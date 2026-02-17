@@ -17,8 +17,10 @@ local nDkmsPid, sDkmsErr = syscall("process_spawn", "/system/dkms.lua", 1)
 if not nDkmsPid then syscall("kernel_panic", "Could not spawn DKMS: " .. tostring(sDkmsErr)) end
 syscall("kernel_log", "[PM] DKMS process started as PID " .. tostring(nDkmsPid))
 
-local vfs_state = { oRootFs = nil, nNextFd = 0, tOpenHandles = {} }
-local tProcessNextAlias = {} -- [pid] = next alias number for that process
+local vfs_state = { oRootFs = nil }
+local g_tPmInternal = {}     -- [nId] -> { type, devname, driverPid, rawHandle }
+local g_nPmNextInternal = 1
+-- local tProcessNextAlias = {} -- [pid] = next alias number for that process
 local g_tPmSignalBuffer = {}
 
 syscall("syscall_override", "vfs_open")
@@ -51,19 +53,17 @@ end
 -- ==========================================
 
 
-local function fResolveHandle(nCallerPid, sSynapseToken, vHandle)
-  local tObj = syscall("ob_resolve_handle", nCallerPid, vHandle)
-  if not tObj then
-    return nil, nil, "Handle not found for PID " .. nCallerPid .. " handle " .. tostring(vHandle)
-  end
-  -- sMLTR validation (skip for system PIDs)
-  if nCallerPid >= 20 and tObj.sSynapseToken and sSynapseToken then
-    if tObj.sSynapseToken ~= sSynapseToken then
-      syscall("kernel_log", "[PM] sMLTR VIOLATION: PID " .. nCallerPid .. " token mismatch")
-      return nil, nil, "Synapse token mismatch"
+local OB_ACCESS_READ    = 0x0001
+local OB_ACCESS_WRITE   = 0x0002
+local OB_ACCESS_DEVCTL  = 0x0008
+
+local function fResolveObject(nCallerPid, sSynapseToken, vHandle, nAccess)
+    local pObj, nSt = syscall("ob_reference_by_handle",
+                              nCallerPid, vHandle, nAccess, sSynapseToken)
+    if not pObj then
+        return nil, "Handle invalid or access denied (status " .. tostring(nSt) .. ")"
     end
-  end
-  return tObj.nInternalFd, tObj
+    return pObj
 end
 
 --[[
@@ -144,16 +144,15 @@ local function flush_boot_log(sLogDevice)
   local sBootLog = syscall("kernel_get_boot_log")
   if not sBootLog or #sBootLog == 0 then return end
   
-  local bOk, nFd = _doInternalOpen(nMyPid, sLogDevice, "w")
+  local bOk, nId = _doInternalOpen(sLogDevice, "w")       -- removed nMyPid
   if bOk then
-     _doInternalWrite(nMyPid, nFd, sBootLog)
-     _doInternalClose(nMyPid, nFd)
+     _doInternalWrite(nId, sBootLog)                        -- removed nMyPid
+     _doInternalClose(nId)                                  -- removed nMyPid
      syscall("kernel_log", "[PM] Boot log flushed.")
   else
      syscall("kernel_log", "[PM] Failed to open log device for flushing.")
   end
 end
-
 
 local function wait_for_dkms()
   while true do
@@ -233,96 +232,116 @@ end
 -- ==========================================
 -- INTERNAL VFS OPS (used by PM itself, no handle tokens)
 -- ==========================================
-
-function _doInternalOpen(nSenderPid, sPath, sMode)
-  if string.sub(sPath, 1, 5) == "/dev/" then
-    local tDKStructs = require("shared_structs")
-    local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_CREATE)
-    if sPath == "/dev/tty" then pIrp.sDeviceName = "\\Device\\TTY0" 
-    elseif sPath == "/dev/gpu0" then pIrp.sDeviceName = "\\Device\\Gpu0"
-    else pIrp.sDeviceName = "\\Device" .. sPath:sub(5):gsub("/", "\\") end
-    pIrp.nSenderPid = nMyPid
-    pIrp.tParameters.sMode = sMode
-    syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
-    local nStatus, vInfo = wait_for_dkms()
-    if nStatus == 0 then 
-       local nFd = vfs_state.nNextFd
-       vfs_state.nNextFd = vfs_state.nNextFd + 1
-       local nDriverPid = (type(vInfo) == "number") and vInfo or nDkmsPid
-       vfs_state.tOpenHandles[nFd] = { 
-         type = "device", devname = pIrp.sDeviceName, driverPid = nDriverPid
-       }
-       return true, nFd
-    else
-       return nil, "Device Open Failed: " .. tostring(nStatus)
-    end
-  end
-  
-  local bOk, hHandle, sReason = syscall("raw_component_invoke", vfs_state.oRootFs.address, "open", sPath, sMode)
-  if not hHandle then return nil, sReason end
-  local nFd = vfs_state.nNextFd
-  vfs_state.nNextFd = vfs_state.nNextFd + 1
-  vfs_state.tOpenHandles[nFd] = { type = "file", handle = hHandle }
-  return true, nFd
+local function _resolveDeviceName(sPath)
+    if sPath == "/dev/tty"  then return "\\Device\\TTY0" end
+    if sPath == "/dev/gpu0" then return "\\Device\\Gpu0" end
+    return "\\Device" .. sPath:sub(5):gsub("/", "\\")
 end
 
-function _doInternalWrite(nSenderPid, nFd, sData)
-  local tHandle = vfs_state.tOpenHandles[nFd]
-  if not tHandle then return nil, "Invalid Handle" end
-  if tHandle.type == "file" then
-    return syscall("raw_component_invoke", vfs_state.oRootFs.address, "write", tHandle.handle, sData)
-  elseif tHandle.type == "device" then
+local function _sendDeviceCreate(sDevName)
+    local tDKStructs = require("shared_structs")
+    local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_CREATE)
+    pIrp.sDeviceName = sDevName
+    pIrp.nSenderPid  = nMyPid
+    syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
+    local nStatus, vInfo = wait_for_dkms()
+    local nDriverPid = (type(vInfo) == "number") and vInfo or nDkmsPid
+    return nStatus, nDriverPid
+end
+
+local function _sendDeviceWrite(sDevName, nDriverPid, sData)
     local tDKStructs = require("shared_structs")
     local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_WRITE)
-    pIrp.sDeviceName = tHandle.devname
-    pIrp.nSenderPid = nMyPid
+    pIrp.sDeviceName     = sDevName
+    pIrp.nSenderPid      = nMyPid
     pIrp.tParameters.sData = sData
-    if tHandle.devname == "\\Device\\TTY0" then
-        pIrp.nFlags = tDKStructs.IRP_FLAG_NO_REPLY 
-        local nTarget = tHandle.driverPid or nDkmsPid
-        local sSignal = (nTarget == nDkmsPid) and "vfs_io_request" or "irp_dispatch"
-        syscall("signal_send", nTarget, sSignal, pIrp)
+    -- fast-path for TTY (fire-and-forget)
+    if sDevName == "\\Device\\TTY0" then
+        pIrp.nFlags = tDKStructs.IRP_FLAG_NO_REPLY
+        syscall("signal_send", nDriverPid, "irp_dispatch", pIrp)
         return true, #sData
     end
     syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
-    local nStatus, vInfo = wait_for_dkms()
-    if nStatus == 0 then return true, vInfo else return nil, "Write Error" end
-  end
+    local nSt, vInfo = wait_for_dkms()
+    return (nSt == 0), vInfo
 end
 
-function _doInternalRead(nSenderPid, nFd, nCount)
-  local tHandle = vfs_state.tOpenHandles[nFd]
-  if not tHandle then return nil, "Invalid Handle" end
-  if tHandle.type == "file" then
-    local res1, res2 = syscall("raw_component_invoke", vfs_state.oRootFs.address, "read", tHandle.handle, nCount)
-    if type(res2) == "boolean" then res2 = nil end
-    return res1, res2
-  elseif tHandle.type == "device" then
+local function _sendDeviceRead(sDevName)
     local tDKStructs = require("shared_structs")
     local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_READ)
-    pIrp.sDeviceName = tHandle.devname
-    pIrp.nSenderPid = nMyPid
+    pIrp.sDeviceName = sDevName
+    pIrp.nSenderPid  = nMyPid
     syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
-    local nStatus, vInfo = wait_for_dkms()
-    if nStatus == 0 then return true, vInfo else return nil, "Read Error" end
-  end
+    local nSt, vInfo = wait_for_dkms()
+    return (nSt == 0), vInfo
 end
 
-function _doInternalClose(nSenderPid, nFd)
-  local tHandle = vfs_state.tOpenHandles[nFd]
-  if not tHandle then return nil end
-  if tHandle.type == "file" then
-      syscall("raw_component_invoke", vfs_state.oRootFs.address, "close", tHandle.handle)
-  elseif tHandle.type == "device" then
-      local tDKStructs = require("shared_structs")
-      local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_CLOSE)
-      pIrp.sDeviceName = tHandle.devname
-      pIrp.nSenderPid = nMyPid
-      syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
-      wait_for_dkms()
-  end
-  vfs_state.tOpenHandles[nFd] = nil
-  return true
+local function _sendDeviceClose(sDevName)
+    local tDKStructs = require("shared_structs")
+    local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_CLOSE)
+    pIrp.sDeviceName = sDevName
+    pIrp.nSenderPid  = nMyPid
+    syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
+    wait_for_dkms()
+end
+
+local function _sendDeviceControl(sDevName, sMethod, tArgs)
+    local tDKStructs = require("shared_structs")
+    local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_DEVICE_CONTROL)
+    pIrp.sDeviceName = sDevName
+    pIrp.nSenderPid  = nMyPid
+    pIrp.tParameters.sMethod = sMethod
+    pIrp.tParameters.tArgs   = tArgs or {}
+    syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
+    local nSt, vInfo = wait_for_dkms()
+    return (nSt == 0), vInfo
+end
+
+function _doInternalOpen(sPath, sMode)
+    local nId = g_nPmNextInternal; g_nPmNextInternal = g_nPmNextInternal + 1
+    if sPath:sub(1, 5) == "/dev/" then
+        local sDevName = _resolveDeviceName(sPath)
+        local nSt, nDrvPid = _sendDeviceCreate(sDevName)
+        if nSt ~= 0 then return nil, "Device open failed" end
+        g_tPmInternal[nId] = { type="device", devname=sDevName, driverPid=nDrvPid }
+        return true, nId
+    end
+    local bOk, hRaw, sReason = syscall("raw_component_invoke",
+                                        vfs_state.oRootFs.address, "open", sPath, sMode)
+    if not hRaw then return nil, sReason end
+    g_tPmInternal[nId] = { type="file", rawHandle=hRaw }
+    return true, nId
+end
+
+function _doInternalWrite(nId, sData)
+    local t = g_tPmInternal[nId]; if not t then return nil end
+    if t.type == "file" then
+        return syscall("raw_component_invoke", vfs_state.oRootFs.address, "write", t.rawHandle, sData)
+    else
+        return _sendDeviceWrite(t.devname, t.driverPid, sData)
+    end
+end
+
+function _doInternalRead(nId, nCount)
+    local t = g_tPmInternal[nId]; if not t then return nil end
+    if t.type == "file" then
+        local r1, r2 = syscall("raw_component_invoke",
+                                vfs_state.oRootFs.address, "read", t.rawHandle, nCount)
+        if type(r2) == "boolean" then r2 = nil end
+        return r1, r2
+    else
+        return _sendDeviceRead(t.devname)
+    end
+end
+
+function _doInternalClose(nId)
+    local t = g_tPmInternal[nId]; if not t then return end
+    if t.type == "file" then
+        syscall("raw_component_invoke", vfs_state.oRootFs.address, "close", t.rawHandle)
+    else
+        _sendDeviceClose(t.devname)
+    end
+    g_tPmInternal[nId] = nil
 end
 
 
@@ -330,58 +349,118 @@ end
 -- PUBLIC VFS HANDLERS (called via syscall override)
 -- These now accept synapse tokens from the kernel dispatcher.
 -- ==========================================
+-- ==========================================
+-- PUBLIC VFS HANDLERS  (syscall override targets)
+-- These create/resolve ObManager objects — no FDs leave PM.
+-- ==========================================
 
 function vfs_state.handle_open(nSenderPid, sSynapseToken, sPath, sMode)
-  if string.sub(sPath, 1, 5) ~= "/dev/" then
-    if not check_access(nSenderPid, sPath, sMode or "r") then
-       return nil, "Permission denied"
+    -- permission check (unchanged)
+    if sPath:sub(1, 5) ~= "/dev/" then
+        if not check_access(nSenderPid, sPath, sMode or "r") then
+            return nil, "Permission denied"
+        end
     end
-  end
 
-  local bOk, nFd = _doInternalOpen(nSenderPid, sPath, sMode)
-  if not bOk then return nil, nFd end
+    local tBody = { sPath = sPath, sMode = sMode }
 
-  -- Find next free alias for this process (skip over inherited ones)
-  if not tProcessNextAlias[nSenderPid] then tProcessNextAlias[nSenderPid] = 0 end
-  local nAlias = tProcessNextAlias[nSenderPid]
-  -- Skip aliases that already exist (e.g. inherited 0, 1, 2)
-  while syscall("ob_resolve_handle", nSenderPid, nAlias) ~= nil do
-    nAlias = nAlias + 1
-  end
-  tProcessNextAlias[nSenderPid] = nAlias + 1
+    if sPath:sub(1, 5) == "/dev/" then
+        local sDevName = _resolveDeviceName(sPath)
+        local nSt, nDrvPid = _sendDeviceCreate(sDevName)
+        if nSt ~= 0 then return nil, "Device open failed" end
+        tBody.sCategory  = "device"
+        tBody.sDeviceName = sDevName
+        tBody.nDriverPid  = nDrvPid
+    else
+        local bOk, hRaw = syscall("raw_component_invoke",
+                                    vfs_state.oRootFs.address, "open", sPath, sMode)
+        if not hRaw then return nil, "File not found" end
+        tBody.sCategory = "file"
+        tBody.hRawHandle = hRaw
+    end
 
-  local sToken = syscall("ob_create_handle", nSenderPid, {
-    nInternalFd = nFd,
-    sSynapseToken = sSynapseToken,
-    sPath = sPath,
-  })
-  if sToken then
-    syscall("ob_set_alias", nSenderPid, nAlias, sToken)
-  end
+    -- create the IoFileObject in the kernel Object Manager
+    local pObj = syscall("ob_create_object", "IoFileObject", tBody)
+    if not pObj then return nil, "ObCreateObject failed" end
 
-  return true, nAlias
+    -- choose access mask from mode
+    local nAccess = OB_ACCESS_READ
+    if sMode == "w" or sMode == "a" then nAccess = OB_ACCESS_WRITE end
+    if sMode == "rw" then nAccess = OB_ACCESS_READ + OB_ACCESS_WRITE end
+    nAccess = nAccess + OB_ACCESS_DEVCTL  -- always allow ioctl
+
+    -- mint a handle token for the calling process
+    local sToken = syscall("ob_create_handle",
+                           nSenderPid, pObj, nAccess, sSynapseToken)
+    if not sToken then
+        syscall("ob_dereference_object", pObj)
+        return nil, "ObCreateHandle failed"
+    end
+
+    -- auto-assign standard handles for /dev/tty
+    if sPath == "/dev/tty" then
+        if sMode == "r" then
+            if not syscall("ob_get_standard_handle", nSenderPid, -10) then
+                syscall("ob_set_standard_handle", nSenderPid, -10, sToken)
+            end
+        end
+        if sMode == "w" or sMode == "rw" then
+            if not syscall("ob_get_standard_handle", nSenderPid, -11) then
+                syscall("ob_set_standard_handle", nSenderPid, -11, sToken)
+            end
+            if not syscall("ob_get_standard_handle", nSenderPid, -12) then
+                syscall("ob_set_standard_handle", nSenderPid, -12, sToken)
+            end
+        end
+    end
+
+    return true, sToken
 end
 
 
 function vfs_state.handle_write(nSenderPid, sSynapseToken, vHandle, sData)
-  local nFd, tObj, sErr = fResolveHandle(nSenderPid, sSynapseToken, vHandle)
-  if not nFd then return nil, sErr or "Invalid Handle" end
-  return _doInternalWrite(nSenderPid, nFd, sData)
+    local pObj, sErr = fResolveObject(nSenderPid, sSynapseToken, vHandle, OB_ACCESS_WRITE)
+    if not pObj then return nil, sErr end
+    local b = pObj.pBody
+    if b.sCategory == "device" then
+        return _sendDeviceWrite(b.sDeviceName, b.nDriverPid, sData)
+    else
+        return syscall("raw_component_invoke",
+                        vfs_state.oRootFs.address, "write", b.hRawHandle, sData)
+    end
 end
+
 
 function vfs_state.handle_read(nSenderPid, sSynapseToken, vHandle, nCount)
-  local nFd, tObj, sErr = fResolveHandle(nSenderPid, sSynapseToken, vHandle)
-  if not nFd then return nil, sErr or "Invalid Handle" end
-  return _doInternalRead(nSenderPid, nFd, nCount)
+    local pObj, sErr = fResolveObject(nSenderPid, sSynapseToken, vHandle, OB_ACCESS_READ)
+    if not pObj then return nil, sErr end
+    local b = pObj.pBody
+    if b.sCategory == "device" then
+        return _sendDeviceRead(b.sDeviceName)
+    else
+        local r1, r2 = syscall("raw_component_invoke",
+                                vfs_state.oRootFs.address, "read", b.hRawHandle, nCount)
+        if type(r2) == "boolean" then r2 = nil end
+        return r1, r2
+    end
 end
 
+
 function vfs_state.handle_close(nSenderPid, sSynapseToken, vHandle)
-  local nFd, tObj, sErr = fResolveHandle(nSenderPid, sSynapseToken, vHandle)
-  if not nFd then return nil end
-  _doInternalClose(nSenderPid, nFd)
-  syscall("ob_close_handle", nSenderPid, vHandle)
-  return true
+    local pObj, sErr = fResolveObject(nSenderPid, sSynapseToken, vHandle, 0)
+    if not pObj then return nil end
+    local b = pObj.pBody
+    -- I/O cleanup BEFORE releasing the handle
+    if b.sCategory == "device" then
+        _sendDeviceClose(b.sDeviceName)
+    elseif b.hRawHandle then
+        syscall("raw_component_invoke",
+                vfs_state.oRootFs.address, "close", b.hRawHandle)
+    end
+    syscall("ob_close_handle", nSenderPid, vHandle)
+    return true
 end
+
 
 function vfs_state.handle_chmod(nSenderPid, sPath, nMode)
   local nUid = syscall("process_get_uid", nSenderPid) or 1000
@@ -405,24 +484,11 @@ function vfs_state.handle_chmod(nSenderPid, sPath, nMode)
 end
 
 function vfs_state.handle_device_control(nSenderPid, sSynapseToken, vHandle, sMethod, tArgs)
-  local nFd, tObj, sErr = fResolveHandle(nSenderPid, sSynapseToken, vHandle)
-  if not nFd then return nil, sErr or "Invalid Handle" end
-  
-  local tHandle = vfs_state.tOpenHandles[nFd]
-  if not tHandle or tHandle.type ~= "device" then
-    return nil, "Not a device handle"
-  end
-  
-  local tDKStructs = require("shared_structs")
-  local pIrp = tDKStructs.fNewIrp(tDKStructs.IRP_MJ_DEVICE_CONTROL)
-  pIrp.sDeviceName = tHandle.devname
-  pIrp.nSenderPid = nMyPid
-  pIrp.tParameters.sMethod = sMethod
-  pIrp.tParameters.tArgs = tArgs or {}
-  
-  syscall("signal_send", nDkmsPid, "vfs_io_request", pIrp)
-  local nStatus, vInfo = wait_for_dkms()
-  if nStatus == 0 then return true, vInfo else return nil, "DeviceControl Error" end
+    local pObj, sErr = fResolveObject(nSenderPid, sSynapseToken, vHandle, OB_ACCESS_DEVCTL)
+    if not pObj then return nil, sErr end
+    local b = pObj.pBody
+    if b.sCategory ~= "device" then return nil, "Not a device handle" end
+    return _sendDeviceControl(b.sDeviceName, sMethod, tArgs)
 end
 
 function vfs_state.handle_list(nSenderPid, sPath)

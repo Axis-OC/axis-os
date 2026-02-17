@@ -385,9 +385,259 @@ local function readLine()
   return sResult
 end
 
+
+local function parseRedirects(tArgs)
+    -- Returns: cleaned args, output file path, append mode
+    local tClean = {}
+    local sOutFile = nil
+    local bAppend = false
+    local i = 1
+    while i <= #tArgs do
+        if tArgs[i] == ">>" then
+            bAppend = true
+            i = i + 1
+            if i <= #tArgs then sOutFile = tArgs[i] end
+        elseif tArgs[i] == ">" then
+            bAppend = false
+            i = i + 1
+            if i <= #tArgs then sOutFile = tArgs[i] end
+        elseif tArgs[i]:sub(-2) == ">>" then
+            -- handle "file>>" edge case? no, keep it simple
+            table.insert(tClean, tArgs[i])
+        elseif tArgs[i]:sub(-1) == ">" then
+            -- "echo>file" without space — not supported, treat as arg
+            table.insert(tClean, tArgs[i])
+        else
+            table.insert(tClean, tArgs[i])
+        end
+        i = i + 1
+    end
+    -- resolve output path
+    if sOutFile and sOutFile:sub(1,1) ~= "/" then
+        sOutFile = ENV.PWD .. (ENV.PWD == "/" and "" or "/") .. sOutFile
+        sOutFile = sOutFile:gsub("//", "/")
+    end
+    return tClean, sOutFile, bAppend
+end
+
+local function splitPipeline(tArgs)
+    -- Split argument list on "|" tokens
+    local tSegments = {}
+    local tCurrent = {}
+    for _, sToken in ipairs(tArgs) do
+        if sToken == "|" then
+            if #tCurrent > 0 then
+                table.insert(tSegments, tCurrent)
+            end
+            tCurrent = {}
+        else
+            table.insert(tCurrent, sToken)
+        end
+    end
+    if #tCurrent > 0 then
+        table.insert(tSegments, tCurrent)
+    end
+    return tSegments
+end
+
+
+-- =============================================
+-- PIPELINE & REDIRECTION HELPERS
+-- =============================================
+
+local function executeSimpleCommand(tArgs, sOutFile, bAppend)
+    -- Execute a single command (builtin or external)
+    -- Returns false if the shell should exit, true otherwise
+    if #tArgs == 0 then return true end
+
+    local cmd = tArgs[1]
+    local cmdArgs = {}
+    for i = 2, #tArgs do table.insert(cmdArgs, tArgs[i]) end
+
+    -- Builtins run in-process (no redirection support for builtins)
+    if builtins[cmd] then
+        return builtins[cmd](cmdArgs)
+    end
+
+    -- External command
+    local execPath = findExecutable(cmd)
+    if not execPath then
+        oFs.write(hStderr, "sh: " .. cmd .. ": command not found\n")
+        return true
+    end
+
+    local ring = syscall("process_get_ring")
+
+    -- Build environment for child
+    local tChildEnv = {
+        ARGS = cmdArgs,
+        PWD = ENV.PWD,
+        PATH = ENV.PATH,
+        USER = ENV.USER,
+        HOME = ENV.HOME,
+        HOSTNAME = ENV.HOSTNAME,
+    }
+
+    -- Handle output redirection
+    -- We open the file BEFORE spawning so the child inherits the handle
+    local hRedirectFile = nil
+    if sOutFile then
+        local sMode = bAppend and "a" or "w"
+        hRedirectFile = oFs.open(sOutFile, sMode)
+        if not hRedirectFile then
+            oFs.write(hStderr, "sh: cannot open " .. sOutFile .. " for writing\n")
+            return true
+        end
+        -- Tell the child to use this file as stdout
+        -- We pass the token so PM can set it as STD_OUTPUT
+        tChildEnv._REDIRECT_STDOUT = hRedirectFile._token
+    end
+
+    local pid, err = syscall("process_spawn", execPath, ring, tChildEnv)
+    if pid then
+        -- If we redirected, set the child's stdout to the file handle
+        if tChildEnv._REDIRECT_STDOUT then
+            syscall("ob_set_standard_handle", pid, -11, tChildEnv._REDIRECT_STDOUT)
+        end
+
+        -- Wait for child, watching for Ctrl+C
+        while true do
+            local sStatus = syscall("process_status", pid)
+            if not sStatus or sStatus == "dead" then break end
+            -- Yield to let child run
+            syscall("process_wait", pid)
+            break
+        end
+    else
+        oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
+    end
+
+    -- Clean up redirect handle
+    if hRedirectFile then
+        oFs.close(hRedirectFile)
+    end
+
+    return true
+end
+
+local function executePipeline(tSegments)
+    -- Execute a multi-stage pipeline: cmd1 | cmd2 | cmd3
+    -- Strategy: create a chain of ringbuffer-backed temp files.
+    -- Each stage writes to a temp, next stage reads from it.
+    -- Not true concurrent pipes, but functional for our cooperative scheduler.
+
+    local sPrevTempPath = nil
+
+    for nStage = 1, #tSegments do
+        local tStageArgs = tSegments[nStage]
+        if #tStageArgs == 0 then goto pipe_continue end
+
+        local cmd = tStageArgs[1]
+        local cmdArgs = {}
+        for i = 2, #tStageArgs do table.insert(cmdArgs, tStageArgs[i]) end
+
+        -- Parse redirects on the LAST stage only
+        local sOutFile, bAppend = nil, false
+        if nStage == #tSegments then
+            tStageArgs, sOutFile, bAppend = parseRedirects(tStageArgs)
+            cmd = tStageArgs[1]
+            cmdArgs = {}
+            for i = 2, #tStageArgs do table.insert(cmdArgs, tStageArgs[i]) end
+        end
+
+        -- Builtins in pipelines: only supported as first or last stage
+        if builtins[cmd] then
+            -- For builtins in a pipeline, just run them normally
+            -- (piping builtin output is not supported in this version)
+            builtins[cmd](cmdArgs)
+            goto pipe_continue
+        end
+
+        local execPath = findExecutable(cmd)
+        if not execPath then
+            oFs.write(hStderr, "sh: " .. cmd .. ": command not found\n")
+            return true
+        end
+
+        local ring = syscall("process_get_ring")
+
+        -- Temp file for this stage's output (unless it's the last stage)
+        local sThisTempPath = nil
+        if nStage < #tSegments then
+            sThisTempPath = "/tmp/.pipe_" .. tostring(nStage) .. "_" .. tostring(math.random(10000, 99999))
+        end
+
+        local tChildEnv = {
+            ARGS = cmdArgs,
+            PWD = ENV.PWD,
+            PATH = ENV.PATH,
+            USER = ENV.USER,
+            HOME = ENV.HOME,
+            HOSTNAME = ENV.HOSTNAME,
+        }
+
+        -- If there's input from a previous stage, pass it
+        if sPrevTempPath then
+            tChildEnv._PIPE_INPUT = sPrevTempPath
+        end
+
+        -- If there's a temp for output (not last stage), redirect stdout
+        local hOutFile = nil
+        if sThisTempPath then
+            hOutFile = oFs.open(sThisTempPath, "w")
+            if hOutFile then
+                tChildEnv._REDIRECT_STDOUT = hOutFile._token
+            end
+        elseif sOutFile then
+            -- Last stage with file redirect
+            local sMode = bAppend and "a" or "w"
+            hOutFile = oFs.open(sOutFile, sMode)
+            if hOutFile then
+                tChildEnv._REDIRECT_STDOUT = hOutFile._token
+            end
+        end
+
+        local pid, err = syscall("process_spawn", execPath, ring, tChildEnv)
+        if pid then
+            if tChildEnv._REDIRECT_STDOUT then
+                syscall("ob_set_standard_handle", pid, -11, tChildEnv._REDIRECT_STDOUT)
+            end
+            if tChildEnv._PIPE_INPUT then
+                -- Open the previous temp for reading and set as child's stdin
+                local hIn = oFs.open(tChildEnv._PIPE_INPUT, "r")
+                if hIn then
+                    syscall("ob_set_standard_handle", pid, -10, hIn._token)
+                end
+            end
+            syscall("process_wait", pid)
+        else
+            oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
+        end
+
+        if hOutFile then
+            oFs.close(hOutFile)
+        end
+
+        -- Clean up previous temp file
+        if sPrevTempPath then
+            -- Best-effort delete (we don't have rm syscall yet, so leave it)
+            -- TODO: syscall("vfs_unlink", sPrevTempPath)
+        end
+
+        sPrevTempPath = sThisTempPath
+        ::pipe_continue::
+    end
+
+    -- Clean up last temp
+    -- TODO: unlink sPrevTempPath if it exists
+
+    return true
+end
+
 -- =============================================
 -- MAIN LOOP
 -- =============================================
+
 
 while true do
   oFs.write(hStdout, getPrompt())
@@ -396,49 +646,47 @@ while true do
   local line = readLine()
   if not line then break end
 
+  -- Ctrl+C: discard and show new prompt
+  if line == "\3" then
+    oFs.write(hStdout, "^C\n")
+    goto main_continue
+  end
+
   -- Trim
   local sLine = line
-  -- remove leading/trailing whitespace
   sLine = sLine:match("^%s*(.-)%s*$") or ""
 
   if #sLine > 0 then
     -- Add to history (skip duplicates of last entry)
     if #tHistory == 0 or tHistory[#tHistory] ~= sLine then
       table.insert(tHistory, sLine)
-      -- Cap history at 100 entries
       if #tHistory > 100 then table.remove(tHistory, 1) end
     end
 
     local args = parseLine(sLine)
     if #args > 0 then
-      local cmd = args[1]
-      table.remove(args, 1)
 
-      if builtins[cmd] then
-        if not builtins[cmd](args) then break end
+      -- Check for pipeline
+      local tSegments = splitPipeline(args)
+
+      if #tSegments > 1 then
+        -- Multi-command pipeline
+        executePipeline(tSegments)
+
       else
-        local execPath = findExecutable(cmd)
-        if execPath then
-          local ring = syscall("process_get_ring")
-          local pid, err = syscall("process_spawn", execPath, ring, {
-            ARGS = args,
-            PWD = ENV.PWD,
-            PATH = ENV.PATH,
-            USER = ENV.USER,
-            HOME = ENV.HOME,
-            HOSTNAME = ENV.HOSTNAME,
-          })
-          if pid then
-            syscall("process_wait", pid)
-          else
-            oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
-          end
-        else
-          oFs.write(hStderr, "sh: " .. cmd .. ": command not found\n")
+        -- Single command — check for redirects
+        local tCleanArgs, sOutFile, bAppend = parseRedirects(args)
+
+        if #tCleanArgs > 0 then
+          local bContinue = executeSimpleCommand(tCleanArgs, sOutFile, bAppend)
+          if not bContinue then break end
         end
       end
+
     end
   end
+
+  ::main_continue::
 end
 
 oFs.close(hStdin)

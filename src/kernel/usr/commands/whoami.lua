@@ -1,0 +1,1 @@
+print(env.USER or "unknown")

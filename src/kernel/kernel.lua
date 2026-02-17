@@ -370,24 +370,23 @@ function kernel.create_sandbox(nPid, nRing)
     math = math,
     debug = debug, -- needed for traceback
     
-    syscall = function(...)
-      return kernel.syscall_dispatch(...)
-    end,
-    
-    require = function(sModulePath)
-      local mod, sErr = kernel.custom_require(sModulePath, nPid)
-      if not mod then error(sErr, 2) end
-      return mod
-    end,
-    
-    print = function(...)
-      local tParts = {}
-      for i = 1, select("#", ...) do
-        tParts[i] = tostring(select(i, ...))
-      end
-      kernel.syscall_dispatch("vfs_write", 1, table.concat(tParts, "\t") .. "\n")
-    end,
-  }
+        syscall = function(...)
+            return kernel.syscall_dispatch(...)
+        end,
+
+        require = function(sModulePath)
+            local mod, sErr = kernel.custom_require(sModulePath, nPid)
+            if not mod then error(sErr, 2) end
+            return mod
+        end,
+
+        -- STD_OUTPUT_HANDLE = -11
+        print = function(...)
+            local tP = {}
+            for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
+            kernel.syscall_dispatch("vfs_write", -11, table.concat(tP, "\t") .. "\n")
+        end,
+    }
   
   -- Safe os table
   local tSafeOs = {}
@@ -399,19 +398,17 @@ function kernel.create_sandbox(nPid, nRing)
   tSandbox.os = tSafeOs
 
   -- io library (unbuffered stdout/stdin)
-  tSandbox.io = {
-    write = function(...)
-      local tParts = {}
-      for i = 1, select("#", ...) do
-        tParts[i] = tostring(select(i, ...))
-      end
-      kernel.syscall_dispatch("vfs_write", 1, table.concat(tParts))
-    end,
-    read = function()
-      local _, _, data = kernel.syscall_dispatch("vfs_read", 0)
-      return data
-    end,
-  }
+    tSandbox.io = {
+        write = function(...)
+            local tP = {}
+            for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
+            kernel.syscall_dispatch("vfs_write", -11, table.concat(tP))
+        end,
+        read = function()
+            local _, _, data = kernel.syscall_dispatch("vfs_read", -10)
+            return data
+        end,
+    }
   
   -- Ring 0 gets god-mode
   if nRing == 0 then
@@ -481,11 +478,9 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
   
   -- Object Handle: Initialize per-process handle table
   if g_oObManager then
-    g_oObManager.InitProcess(nPid)
-    -- Inherit parent's handles (stdin/stdout/stderr aliases)
+    g_oObManager.ObInitializeProcess(nPid)
     if nParentPid and nParentPid > 0 and kernel.tProcessTable[nParentPid] then
-      -- child's handles are rebound to child's synapse token
-        g_oObManager.InheritHandles(nParentPid, nPid, sSynapseToken)
+      g_oObManager.ObInheritHandles(nParentPid, nPid, sSynapseToken)
     end
   end
   
@@ -763,6 +758,31 @@ kernel.tSyscallTable["process_status"] = {
   allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["process_list"] = {
+    func = function(nPid)
+        local tResult = {}
+        for nProcPid, tProc in pairs(kernel.tProcessTable) do
+            if tProc.status ~= "dead" then
+                local sImage = "?"
+                if tProc.env and tProc.env.env and tProc.env.env.arg then
+                    sImage = tProc.env.env.arg[0] or "?"
+                end
+                table.insert(tResult, {
+                    pid    = nProcPid,
+                    parent = tProc.parent or 0,
+                    ring   = tProc.ring or -1,
+                    status = tProc.status or "?",
+                    uid    = tProc.uid or -1,
+                    image  = sImage,
+                })
+            end
+        end
+        table.sort(tResult, function(a, b) return a.pid < b.pid end)
+        return tResult
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
 kernel.tSyscallTable["process_list_threads"] = {
   func = function(nPid)
     local tProc = kernel.tProcessTable[nPid]
@@ -817,63 +837,159 @@ kernel.tSyscallTable["process_get_uid"] = {
 -- OBJECT HANDLE SYSCALLS (Ring 1 — used by PM)
 -- ==========================================
 
-kernel.tSyscallTable["ob_create_handle"] = {
-  func = function(nPid, nTargetPid, tObjectHeader)
-    if not g_oObManager then return nil, "ObManager not loaded" end
-    local sToken = g_oObManager.CreateHandle(nTargetPid, tObjectHeader)
-    return sToken
-  end,
-  allowed_rings = {0, 1}
+kernel.tSyscallTable["ob_create_object"] = {
+    func = function(nPid, sType, tBody)
+        if not g_oObManager then return nil, "ObManager not loaded" end
+        return g_oObManager.ObCreateObject(sType, tBody)
+    end,
+    allowed_rings = {0, 1}
 }
 
-kernel.tSyscallTable["ob_resolve_handle"] = {
-  func = function(nPid, nTargetPid, vHandle)
-    if not g_oObManager then return nil end
-    return g_oObManager.ReferenceObjectByHandle(nTargetPid, vHandle)
-  end,
-  allowed_rings = {0, 1}
+kernel.tSyscallTable["ob_reference_object"] = {
+    func = function(nPid, pObj)
+        if g_oObManager and pObj then g_oObManager.ObReferenceObject(pObj) end
+        return true
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_dereference_object"] = {
+    func = function(nPid, pObj)
+        if g_oObManager and pObj then g_oObManager.ObDereferenceObject(pObj) end
+        return true
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_insert_object"] = {
+    func = function(nPid, pObj, sPath)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObInsertObject(pObj, sPath)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_lookup_object"] = {
+    func = function(nPid, sPath)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObLookupObject(sPath)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_delete_object"] = {
+    func = function(nPid, sPath)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObDeleteObject(sPath)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_create_symlink"] = {
+    func = function(nPid, sLink, sTarget)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObCreateSymbolicLink(sLink, sTarget)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_delete_symlink"] = {
+    func = function(nPid, sPath)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObDeleteSymbolicLink(sPath)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_create_handle"] = {
+    func = function(nPid, nTargetPid, pObj, nAccess, sSynapseToken, bInheritable)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObCreateHandle(nTargetPid, pObj, nAccess, sSynapseToken, bInheritable)
+    end,
+    allowed_rings = {0, 1}
 }
 
 kernel.tSyscallTable["ob_close_handle"] = {
-  func = function(nPid, nTargetPid, vHandle)
-    if not g_oObManager then return false end
-    return g_oObManager.CloseHandle(nTargetPid, vHandle)
-  end,
-  allowed_rings = {0, 1}
+    func = function(nPid, nTargetPid, vHandle)
+        if not g_oObManager then return false end
+        return g_oObManager.ObCloseHandle(nTargetPid, vHandle)
+    end,
+    allowed_rings = {0, 1}
 }
 
-kernel.tSyscallTable["ob_set_alias"] = {
-  func = function(nPid, nTargetPid, nAlias, sToken)
-    if not g_oObManager then return false end
-    return g_oObManager.SetHandleAlias(nTargetPid, nAlias, sToken)
-  end,
-  allowed_rings = {0, 1}
+kernel.tSyscallTable["ob_reference_by_handle"] = {
+    func = function(nPid, nTargetPid, vHandle, nDesiredAccess, sSynapseToken)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObReferenceObjectByHandle(nTargetPid, vHandle, nDesiredAccess, sSynapseToken)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_set_standard_handle"] = {
+    func = function(nPid, nTargetPid, nIndex, sToken)
+        if not g_oObManager then return false end
+        return g_oObManager.ObSetStandardHandle(nTargetPid, nIndex, sToken)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_get_standard_handle"] = {
+    func = function(nPid, nTargetPid, nIndex)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObGetStandardHandle(nTargetPid, nIndex)
+    end,
+    allowed_rings = {0, 1}
 }
 
 kernel.tSyscallTable["ob_init_process"] = {
-  func = function(nPid, nTargetPid)
-    if not g_oObManager then return false end
-    g_oObManager.InitProcess(nTargetPid)
-    return true
-  end,
-  allowed_rings = {0, 1}
+    func = function(nPid, nTargetPid)
+        if not g_oObManager then return false end
+        g_oObManager.ObInitializeProcess(nTargetPid)
+        return true
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_destroy_process"] = {
+    func = function(nPid, nTargetPid)
+        if not g_oObManager then return false end
+        g_oObManager.ObObDestroyProcess(nTargetPid)
+        return true
+    end,
+    allowed_rings = {0, 1}
 }
 
 kernel.tSyscallTable["ob_inherit_handles"] = {
-  func = function(nPid, nParentPid, nChildPid)
-    if not g_oObManager then return false end
-    g_oObManager.InheritHandles(nParentPid, nChildPid)
-    return true
-  end,
-  allowed_rings = {0, 1}
+    func = function(nPid, nParentPid, nChildPid, sChildToken)
+        if not g_oObManager then return false end
+        g_oObManager.ObInheritHandles(nParentPid, nChildPid, sChildToken)
+        return true
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_duplicate_handle"] = {
+    func = function(nPid, nSrcPid, sSrcToken, nDstPid, nAccess, sSynToken)
+        if not g_oObManager then return nil end
+        return g_oObManager.ObDuplicateHandle(nSrcPid, sSrcToken, nDstPid, nAccess, sSynToken)
+    end,
+    allowed_rings = {0, 1}
 }
 
 kernel.tSyscallTable["ob_list_handles"] = {
-  func = function(nPid, nTargetPid)
-    if not g_oObManager then return {} end
-    return g_oObManager.ListHandles(nTargetPid or nPid)
-  end,
-  allowed_rings = {0, 1}
+    func = function(nPid, nTargetPid)
+        if not g_oObManager then return {} end
+        return g_oObManager.ObListHandles(nTargetPid or nPid)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["ob_dump_directory"] = {
+    func = function(nPid)
+        if not g_oObManager then return {} end
+        return g_oObManager.ObDumpDirectory()
+    end,
+    allowed_rings = {0, 1}
 }
 
 
@@ -1049,12 +1165,12 @@ kprint("dev", "Initializing syscall dispatcher table...")
 -- 0. Load Object Manager
 g_oObManager = __load_ob_manager()
 if g_oObManager then
-  kprint("ok", "Object Manager loaded. Handle tables active.")
+    g_oObManager.ObInitSystem()
+    kprint("ok", "Object Manager initialised.  Namespace: \\, \\Device, \\DosDevices")
 else
-  kprint("warn", "Object Manager not available. Running without handle security.")
+    kprint("warn", "Object Manager not available. Running without handle security.")
 end
-
-kprint("ok", "sMLTR (Synapse Message Layer Token Randomization) active.")
+kprint("ok", "sMLTR (Synapse Message Layer Token Randomisation) active.")
 
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")
@@ -1094,7 +1210,7 @@ kernel.tRings[nKernelPid] = 0
 g_nCurrentPid = nKernelPid
 _G = tKernelEnv
 
-if g_oObManager then g_oObManager.InitProcess(nKernelPid) end
+if g_oObManager then g_oObManager.ObInitializeProcess(nKernelPid) end
 
 kprint("ok", "Kernel process registered as PID", nKernelPid)
 
@@ -1161,7 +1277,7 @@ while true do
       if tProcess.status == "dead" then
         -- Object Handle: Destroy process handle table
         if g_oObManager then
-          g_oObManager.DestroyProcess(nPid)
+          g_oObManager.ObDestroyProcess(nPid)
         end
         
         for _, nWaiterPid in ipairs(tProcess.wait_queue or {}) do
@@ -1177,7 +1293,7 @@ while true do
         for _, nTid in ipairs(tProcess.threads or {}) do
           if kernel.tProcessTable[nTid] and kernel.tProcessTable[nTid].status ~= "dead" then
             kernel.tProcessTable[nTid].status = "dead"
-            if g_oObManager then g_oObManager.DestroyProcess(nTid) end
+            if g_oObManager then g_oObManager.ObDestroyProcess(nTid) end
           end
         end
       end

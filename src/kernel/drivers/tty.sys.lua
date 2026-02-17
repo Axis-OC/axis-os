@@ -199,6 +199,17 @@ local function processKeyCooked(ext, ch, code)
     oKMD.DkCompleteRequest(pIrp, 0, sResult)
     return true
 
+    elseif code == 46 and ch == 3 then -- Ctrl+C
+    local sResult = "\3"
+    local pIrp = ext.pPendingReadIrp
+    if pIrp then
+        ext.pPendingReadIrp = nil
+        ext.sLineBuffer = ""
+        oKMD.DkCompleteRequest(pIrp, 0, sResult)
+        writeToScreen(g_pDeviceObject, "^C\n")
+    end
+    return true
+
   elseif code == 200 then -- Up arrow
     local sResult = "\27[A" .. (ext.sLineBuffer or "")
     local pIrp = ext.pPendingReadIrp
