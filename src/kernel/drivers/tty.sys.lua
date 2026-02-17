@@ -172,6 +172,59 @@ local function writeToScreen(pDeviceObject, sData)
   end
 end
 
+local function processKeyCooked(ext, ch, code)
+  if not ext.pPendingReadIrp then return false end
+
+  if code == 28 then -- Enter
+    local sResult = ext.sLineBuffer or ""
+    local pIrp = ext.pPendingReadIrp
+    ext.pPendingReadIrp = nil
+    ext.sLineBuffer = ""
+    oKMD.DkCompleteRequest(pIrp, 0, sResult)
+    writeToScreen(g_pDeviceObject, "\n")
+    return true
+
+  elseif code == 14 then -- Backspace
+    if ext.sLineBuffer and #ext.sLineBuffer > 0 then
+      ext.sLineBuffer = ext.sLineBuffer:sub(1, -2)
+      writeToScreen(g_pDeviceObject, "\b")
+    end
+    return true
+
+  elseif code == 15 then -- Tab
+    local sResult = "\t" .. (ext.sLineBuffer or "")
+    local pIrp = ext.pPendingReadIrp
+    ext.pPendingReadIrp = nil
+    ext.sLineBuffer = ""
+    oKMD.DkCompleteRequest(pIrp, 0, sResult)
+    return true
+
+  elseif code == 200 then -- Up arrow
+    local sResult = "\27[A" .. (ext.sLineBuffer or "")
+    local pIrp = ext.pPendingReadIrp
+    ext.pPendingReadIrp = nil
+    ext.sLineBuffer = ""
+    oKMD.DkCompleteRequest(pIrp, 0, sResult)
+    return true
+
+  elseif code == 208 then -- Down arrow
+    local sResult = "\27[B" .. (ext.sLineBuffer or "")
+    local pIrp = ext.pPendingReadIrp
+    ext.pPendingReadIrp = nil
+    ext.sLineBuffer = ""
+    oKMD.DkCompleteRequest(pIrp, 0, sResult)
+    return true
+
+  elseif code ~= 0 and ch > 0 and ch < 256 then
+    local s = string.char(ch)
+    ext.sLineBuffer = (ext.sLineBuffer or "") .. s
+    writeToScreen(g_pDeviceObject, s)
+    return true
+  end
+
+  return false
+end
+
 -- [[ 3. IRP Handlers ]] --
 
 local function fCreate(d, i) oKMD.DkCompleteRequest(i, 0, 0) end
@@ -180,15 +233,39 @@ local function fWrite(d, i)
   writeToScreen(d, i.tParameters.sData)
   oKMD.DkCompleteRequest(i, 0, #i.tParameters.sData)
 end
+
 local function fRead(d, i)
   local p = d.pDeviceExtension
-  if p.pPendingReadIrp then 
-     oKMD.DkCompleteRequest(i, tStatus.STATUS_DEVICE_BUSY)
-  else 
-     p.pPendingReadIrp = i
-     p.sLineBuffer = "" 
+  if p.pPendingReadIrp then
+    oKMD.DkCompleteRequest(i, tStatus.STATUS_DEVICE_BUSY)
+  else
+    p.pPendingReadIrp = i
+    if p.sLineBuffer == nil then p.sLineBuffer = "" end
+    -- Drain any buffered keystrokes into the new read
+    while p.tKeyBuffer and #p.tKeyBuffer > 0 and p.pPendingReadIrp do
+      local tKey = table.remove(p.tKeyBuffer, 1)
+      processKeyCooked(p, tKey[1], tKey[2])
+    end
   end
 end
+
+local function fDeviceControl(d, i)
+  local ext = d.pDeviceExtension
+  local sMethod = i.tParameters.sMethod
+  local tArgs = i.tParameters.tArgs or {}
+
+  if sMethod == "set_buffer" then
+    ext.sLineBuffer = tArgs[1] or ""
+    oKMD.DkCompleteRequest(i, 0)
+  elseif sMethod == "get_buffer" then
+    oKMD.DkCompleteRequest(i, 0, ext.sLineBuffer or "")
+  elseif sMethod == "get_cursor" then
+    oKMD.DkCompleteRequest(i, 0, {x = ext.nCursorX, y = ext.nCursorY})
+  else
+    oKMD.DkCompleteRequest(i, tStatus.STATUS_NOT_IMPLEMENTED)
+  end
+end
+
 
 -- [[ 4. Driver Entry ]] --
 
@@ -198,6 +275,7 @@ function DriverEntry(pObj)
   pObj.tDispatch[tDKStructs.IRP_MJ_CLOSE] = fClose
   pObj.tDispatch[tDKStructs.IRP_MJ_WRITE] = fWrite
   pObj.tDispatch[tDKStructs.IRP_MJ_READ] = fRead
+  pObj.tDispatch[tDKStructs.IRP_MJ_DEVICE_CONTROL] = fDeviceControl
   
   g_tDispatchTable = pObj.tDispatch
 
@@ -217,6 +295,8 @@ function DriverEntry(pObj)
   dev.pDeviceExtension.nHeight = 25
   dev.pDeviceExtension.nCursorX = 1
   dev.pDeviceExtension.nCursorY = 25
+  dev.pDeviceExtension.tKeyBuffer = {}
+  dev.pDeviceExtension.sLineBuffer = ""
   
   if gpu then
      local _, p = oKMD.DkGetHardwareProxy(gpu)
@@ -256,23 +336,13 @@ while true do
         if fHandler then fHandler(g_pDeviceObject, pIrp) end
     elseif sig == "hardware_interrupt" and p1 == "key_down" then
         local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
-        if ext and ext.pPendingReadIrp then
+        if ext then
             local ch, code = p3, p4
-            if code == 28 then -- Enter
-                local sResult = ext.sLineBuffer
-                local pIrp = ext.pPendingReadIrp
-                ext.pPendingReadIrp = nil
-                oKMD.DkCompleteRequest(pIrp, 0, sResult)
-                writeToScreen(g_pDeviceObject, "\n")
-            elseif code == 14 then -- Backspace
-                if #ext.sLineBuffer > 0 then
-                    ext.sLineBuffer = ext.sLineBuffer:sub(1, -2)
-                    writeToScreen(g_pDeviceObject, "\b")
-                end
-            elseif code ~= 0 and ch > 0 and ch < 256 then
-                local s = string.char(ch)
-                ext.sLineBuffer = ext.sLineBuffer .. s
-                writeToScreen(g_pDeviceObject, s)
+            if ext.pPendingReadIrp then
+                processKeyCooked(ext, ch, code)
+            else
+                if not ext.tKeyBuffer then ext.tKeyBuffer = {} end
+                table.insert(ext.tKeyBuffer, {ch, code})
             end
         end
     end

@@ -103,20 +103,24 @@ end
 
 -- Inherit handles from parent to child (like fork() fd inheritance).
 -- Creates new tokens for the child pointing to cloned object headers.
-function oOb.InheritHandles(nParentPid, nChildPid)
+function oOb.InheritHandles(nParentPid, nChildPid, sChildSynapseToken)
     local tParent = tProcessHandleTables[nParentPid]
     if not tParent then return end
     
     oOb.InitProcess(nChildPid)
     local tChild = tProcessHandleTables[nChildPid]
     
-    -- Clone all aliases (standard FDs: 0=stdin, 1=stdout, 2=stderr)
     for nAlias, sParentToken in pairs(tParent.tAliases) do
         local tObj = tParent.tHandles[sParentToken]
         if tObj then
-            -- Deep-copy the object header so child has its own
             local tClone = {}
             for k, v in pairs(tObj) do tClone[k] = v end
+            
+            -- CRITICAL: rebind the clone to the child's synapse token
+            -- otherwise sMLTR will reject child's access to inherited handles
+            if sChildSynapseToken then
+                tClone.sSynapseToken = sChildSynapseToken
+            end
             
             local sChildToken = fGenerateHandleToken()
             while tChild.tHandles[sChildToken] do sChildToken = fGenerateHandleToken() end

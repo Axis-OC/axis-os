@@ -15,11 +15,11 @@ local function fGetFd(hHandle)
   return hHandle -- already a raw value
 end
 
-local function fFlush(vFd)
-  local sData = tBuffers[vFd]
+local function fFlush(nFd)
+  local sData = tBuffers[nFd]
   if sData and #sData > 0 then
-    tBuffers[vFd] = ""
-    local bSys, bVfs, valResult = syscall("vfs_write", vFd, sData)
+    tBuffers[nFd] = ""
+    local bSys, bVfs, valResult = syscall("vfs_write", nFd, sData)
     return bSys and bVfs, valResult
   end
   return true
@@ -36,47 +36,48 @@ oFsLib.open = function(sPath, sMode)
 end
 
 oFsLib.read = function(hHandle, nCount)
-  local vFd = fGetFd(hHandle)
-  if vFd == nil then return nil, "Invalid handle" end
-  
+  if not hHandle then return nil, "Invalid handle" end
+  local nFd = (type(hHandle) == "table") and hHandle.fd or hHandle
+  if nFd == nil then return nil, "Invalid handle" end
+
   -- flush all write buffers before reading
-  for vBufFd, _ in pairs(tBuffers) do
-     fFlush(vBufFd)
+  for nBufFd, _ in pairs(tBuffers) do
+     fFlush(nBufFd)
   end
-  
-  local bSys, bVfs, valResult = syscall("vfs_read", vFd, nCount or math.huge)
+
+  local bSys, bVfs, valResult = syscall("vfs_read", nFd, nCount or math.huge)
   return (bSys and bVfs) and valResult or nil, valResult
 end
 
 oFsLib.write = function(hHandle, sData)
-  local vFd = fGetFd(hHandle)
-  if vFd == nil then return nil, "Invalid handle" end
-  
-  -- Buffer key: use tostring so both strings and numbers work as keys
-  local sBufKey = tostring(vFd)
-  local sBuf = (tBuffers[sBufKey] or "") .. tostring(sData)
-  tBuffers[sBufKey] = sBuf
-  
+  if not hHandle then return nil, "Invalid handle" end
+  local nFd = (type(hHandle) == "table") and hHandle.fd or hHandle
+  if nFd == nil then return nil, "Invalid handle" end
+
+  local sBuf = (tBuffers[nFd] or "") .. tostring(sData)
+  tBuffers[nFd] = sBuf
+
   if sBuf:find("[\n\r]") or #sBuf > 2048 then
-     return fFlush(vFd)
+     return fFlush(nFd)
   end
   return true
 end
 
 oFsLib.flush = function(hHandle)
-  local vFd = fGetFd(hHandle)
-  if vFd ~= nil then return fFlush(vFd) end
+  if not hHandle then return end
+  local nFd = (type(hHandle) == "table") and hHandle.fd or hHandle
+  if nFd ~= nil then return fFlush(nFd) end
 end
 
 oFsLib.close = function(hHandle)
-  local vFd = fGetFd(hHandle)
-  if vFd == nil then return nil end
-  
-  local sBufKey = tostring(vFd)
-  fFlush(vFd)
-  tBuffers[sBufKey] = nil
-  
-  local bSys, bVfs = syscall("vfs_close", vFd)
+  if not hHandle then return nil end
+  local nFd = (type(hHandle) == "table") and hHandle.fd or hHandle
+  if nFd == nil then return nil end
+
+  fFlush(nFd)
+  tBuffers[nFd] = nil
+
+  local bSys, bVfs = syscall("vfs_close", nFd)
   return bSys and bVfs
 end
 
@@ -92,9 +93,10 @@ end
 
 -- deviceControl for ITER and similar drivers
 oFsLib.deviceControl = function(hHandle, sMethod, tArgs)
-  local vFd = fGetFd(hHandle)
-  if vFd == nil then return nil, "Invalid handle" end
-  local bSys, bVfs, valResult = syscall("vfs_device_control", vFd, sMethod, tArgs)
+  if not hHandle then return nil, "Invalid handle" end
+  local nFd = (type(hHandle) == "table") and hHandle.fd or hHandle
+  if nFd == nil then return nil, "Invalid handle" end
+  local bSys, bVfs, valResult = syscall("vfs_device_control", nFd, sMethod, tArgs or {})
   return bSys and bVfs, valResult
 end
 

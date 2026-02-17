@@ -18,6 +18,8 @@ if not nDkmsPid then syscall("kernel_panic", "Could not spawn DKMS: " .. tostrin
 syscall("kernel_log", "[PM] DKMS process started as PID " .. tostring(nDkmsPid))
 
 local vfs_state = { oRootFs = nil, nNextFd = 0, tOpenHandles = {} }
+local tProcessNextAlias = {} -- [pid] = next alias number for that process
+local g_tPmSignalBuffer = {}
 
 syscall("syscall_override", "vfs_open")
 syscall("syscall_override", "vfs_read")
@@ -48,6 +50,23 @@ end
 -- sMLTR HELPERS
 -- ==========================================
 
+
+local function fResolveHandle(nCallerPid, sSynapseToken, vHandle)
+  local tObj = syscall("ob_resolve_handle", nCallerPid, vHandle)
+  if not tObj then
+    return nil, nil, "Handle not found for PID " .. nCallerPid .. " handle " .. tostring(vHandle)
+  end
+  -- sMLTR validation (skip for system PIDs)
+  if nCallerPid >= 20 and tObj.sSynapseToken and sSynapseToken then
+    if tObj.sSynapseToken ~= sSynapseToken then
+      syscall("kernel_log", "[PM] sMLTR VIOLATION: PID " .. nCallerPid .. " token mismatch")
+      return nil, nil, "Synapse token mismatch"
+    end
+  end
+  return tObj.nInternalFd, tObj
+end
+
+--[[
 -- Validate that the caller's synapse token matches what's stored in the handle.
 -- Returns true if valid, false + reason if not.
 local function fValidateSynapseToken(nCallerPid, sSynapseToken, tObjectHeader)
@@ -113,6 +132,8 @@ function fAutoCreateStdHandle(nCallerPid, sSynapseToken, nAlias)
   return false
 end
 
+--]]
+
 
 -- ==========================================
 -- BOOT LOG FLUSH
@@ -142,6 +163,9 @@ local function wait_for_dkms()
            return p1, p2
         elseif sSig == "os_event" then
            syscall("signal_send", nDkmsPid, "os_event", p1, p2, p3, p4, p5)
+        else
+           -- Buffer any other signals so they aren't lost
+           table.insert(g_tPmSignalBuffer, {nSender, sSig, p1, p2, p3, p4, p5})
         end
     end
   end
@@ -308,37 +332,34 @@ end
 -- ==========================================
 
 function vfs_state.handle_open(nSenderPid, sSynapseToken, sPath, sMode)
-  -- Access check
   if string.sub(sPath, 1, 5) ~= "/dev/" then
     if not check_access(nSenderPid, sPath, sMode or "r") then
        return nil, "Permission denied"
     end
   end
-  
-  -- Do the actual open
+
   local bOk, nFd = _doInternalOpen(nSenderPid, sPath, sMode)
   if not bOk then return nil, nFd end
-  
-  -- Create a secure object handle for the caller
+
+  -- Find next free alias for this process (skip over inherited ones)
+  if not tProcessNextAlias[nSenderPid] then tProcessNextAlias[nSenderPid] = 0 end
+  local nAlias = tProcessNextAlias[nSenderPid]
+  -- Skip aliases that already exist (e.g. inherited 0, 1, 2)
+  while syscall("ob_resolve_handle", nSenderPid, nAlias) ~= nil do
+    nAlias = nAlias + 1
+  end
+  tProcessNextAlias[nSenderPid] = nAlias + 1
+
   local sToken = syscall("ob_create_handle", nSenderPid, {
     nInternalFd = nFd,
     sSynapseToken = sSynapseToken,
     sPath = sPath,
   })
-  
-  if not sToken then
-    -- Failed to create handle, clean up
-    _doInternalClose(nSenderPid, nFd)
-    return nil, "Failed to create object handle"
+  if sToken then
+    syscall("ob_set_alias", nSenderPid, nAlias, sToken)
   end
-  
-  -- Auto-set standard aliases for the first 3 FDs opened
-  -- This preserves backward compatibility with {fd=0}, {fd=1}, {fd=2}
-  if nFd <= 2 then
-    syscall("ob_set_alias", nSenderPid, nFd, sToken)
-  end
-  
-  return true, sToken
+
+  return true, nAlias
 end
 
 
@@ -357,13 +378,8 @@ end
 function vfs_state.handle_close(nSenderPid, sSynapseToken, vHandle)
   local nFd, tObj, sErr = fResolveHandle(nSenderPid, sSynapseToken, vHandle)
   if not nFd then return nil end
-  
-  -- Close the internal FD
   _doInternalClose(nSenderPid, nFd)
-  
-  -- Close the object handle in ob_manager
   syscall("ob_close_handle", nSenderPid, vHandle)
-  
   return true
 end
 
@@ -433,6 +449,16 @@ end
 
 
 function vfs_state.handle_driver_load(nSenderPid, sPath)
+  -- Security: check ring and UID
+  local nCallerRing = syscall("process_get_ring")
+  -- nCallerRing here is PM's ring (1), not the original caller's.
+  -- We check the original caller's UID instead.
+  local nUid = syscall("process_get_uid", nSenderPid) or 1000
+  if nUid ~= 0 then
+     syscall("kernel_log", "[PM] DRIVER_LOAD DENIED: PID " .. nSenderPid .. " (UID " .. nUid .. ") is not root")
+     return nil, "Permission denied: only root (UID 0) can load drivers"
+  end
+
   syscall("kernel_log", "[PM] User (PID " .. nSenderPid .. ") requested load of: " .. sPath)
   syscall("signal_send", nDkmsPid, "load_driver_path_request", sPath, nSenderPid)
   while true do
@@ -452,7 +478,12 @@ function vfs_state.handle_driver_load(nSenderPid, sPath)
           end
        elseif sSig == "os_event" then
           syscall("signal_send", nDkmsPid, "os_event", p1, p2, p3, p4)
+       else
+          table.insert(g_tPmSignalBuffer, {nSender, sSig, p1, p2, p3, p4})
        end
+    elseif bOk then
+       -- Signal from non-DKMS sender — buffer it
+       table.insert(g_tPmSignalBuffer, {nSender, sSig, p1, p2, p3, p4})
     end
   end
 end
@@ -630,6 +661,37 @@ else syscall("kernel_log", "[PM] Init spawned as PID " .. tostring(nInitPid)) en
 -- ==========================================
 
 while true do
+   -- Drain buffered signals first
+   while #g_tPmSignalBuffer > 0 do
+      local tSig = table.remove(g_tPmSignalBuffer, 1)
+      local nBufSender, sBufSig = tSig[1], tSig[2]
+      local bp1, bp2, bp3, bp4, bp5 = tSig[3], tSig[4], tSig[5], tSig[6], tSig[7]
+      
+      if sBufSig == "syscall" then
+        local tData = bp1
+        local sName = tData.name
+        local tArgs = tData.args
+        local nCaller = tData.sender_pid
+        local sSynToken = tData.synapse_token
+        local result1, result2
+        
+        if sName == "vfs_open" then result1, result2 = vfs_state.handle_open(nCaller, sSynToken, tArgs[1], tArgs[2])
+        elseif sName == "vfs_write" then result1, result2 = vfs_state.handle_write(nCaller, sSynToken, tArgs[1], tArgs[2])
+        elseif sName == "vfs_read" then result1, result2 = vfs_state.handle_read(nCaller, sSynToken, tArgs[1], tArgs[2])
+        elseif sName == "vfs_close" then result1, result2 = vfs_state.handle_close(nCaller, sSynToken, tArgs[1])
+        elseif sName == "vfs_list" then result1, result2 = vfs_state.handle_list(nCaller, tArgs[1])
+        elseif sName == "vfs_chmod" then result1, result2 = vfs_state.handle_chmod(nCaller, tArgs[1], tArgs[2])
+        elseif sName == "vfs_device_control" then result1, result2 = vfs_state.handle_device_control(nCaller, sSynToken, tArgs[1], tArgs[2], tArgs[3])
+        elseif sName == "driver_load" then result1, result2 = vfs_state.handle_driver_load(nCaller, tArgs[1])
+        end
+        
+        if result1 ~= "async_wait" then
+          syscall("signal_send", nCaller, "syscall_return", result1, result2)
+        end
+      elseif sBufSig == "os_event" then
+        syscall("signal_send", nDkmsPid, "os_event", bp1, bp2, bp3, bp4, bp5)
+      end
+    end
   local bOk, nSender, sSignal, p1, p2, p3, p4, p5 = syscall("signal_pull")
   if bOk then
     if sSignal == "syscall" then
