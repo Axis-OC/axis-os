@@ -47,12 +47,12 @@ fLoadPasswd()
 
 oFs.write(hStdout, "\f")
 
+-- Replace the main loop in init.lua:
 while true do
-  oFs.write(hStdout, "\nWelcome to AxisOS v0.3\n")
-  oFs.write(hStdout, "Kernel 0.21 on " .. sHostname .. "\n\n")
+  io.write("\nWelcome to AxisOS v0.3\n")
+  io.write("Kernel 0.21 on " .. sHostname .. "\n\n")
   
-  oFs.write(hStdout, sHostname .. " login: ")
-  oFs.flush(hStdout)
+  io.write(sHostname .. " login: ")   -- No buffering, appears immediately
   
   local sUsername = oFs.read(hStdin)
   
@@ -61,19 +61,18 @@ while true do
     
     local tUserEntry = tPasswdDb[sUsername]
     
-    oFs.write(hStdout, "Password: ")
-    oFs.flush(hStdout)
+    io.write("Password: ")             -- No buffering
     
     local sPassword = oFs.read(hStdin) 
     if sPassword then sPassword = sPassword:gsub("\n", "") end
 
     if tUserEntry and tUserEntry.hash == fHash(sPassword or "") then
-      oFs.write(hStdout, "\nAccess Granted.\n")
+      io.write("\nAccess Granted.\n")
       
       local nTargetRing = tUserEntry.ring or 3
       
       if nTargetRing == 0 then
-         oFs.write(hStdout, "\27[31mWARNING: SPAWNING IN RING 0 (KERNEL MODE)\27[37m\n")
+         io.write("\27[31mWARNING: SPAWNING IN RING 0 (KERNEL MODE)\27[37m\n")
       end
 
       local nPid = oSys.spawn(tUserEntry.shell, nTargetRing, { 
@@ -87,14 +86,14 @@ while true do
       
       if nPid then
         oSys.wait(nPid)
-        oFs.write(hStdout, "\f") 
+        io.write("\f")
       end
     else
-      oFs.write(hStdout, "\nLogin incorrect\n")
-      syscall("process_wait", 0)
+      io.write("\nLogin incorrect\n")
+      syscall("process_yield")  -- yield instead of wait(0) which does nothing
     end
   else
     syscall("kernel_log", "[INIT] Error reading stdin. Retrying...")
-    syscall("process_wait", 0)
+    syscall("process_yield")
   end
 end

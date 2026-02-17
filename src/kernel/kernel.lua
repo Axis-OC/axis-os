@@ -928,17 +928,25 @@ kernel.tSyscallTable["ob_reference_by_handle"] = {
 kernel.tSyscallTable["ob_set_standard_handle"] = {
     func = function(nPid, nTargetPid, nIndex, sToken)
         if not g_oObManager then return false end
+        -- Security: Ring 3+ can only modify their OWN standard handles
+        if kernel.tRings[nPid] >= 3 and nTargetPid ~= nPid then
+            return nil, "Permission denied: can only set own standard handles"
+        end
         return g_oObManager.ObSetStandardHandle(nTargetPid, nIndex, sToken)
     end,
-    allowed_rings = {0, 1}
+    allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
 kernel.tSyscallTable["ob_get_standard_handle"] = {
     func = function(nPid, nTargetPid, nIndex)
         if not g_oObManager then return nil end
+        -- Security: Ring 3+ can only query their OWN standard handles
+        if kernel.tRings[nPid] >= 3 and nTargetPid ~= nPid then
+            return nil, "Permission denied"
+        end
         return g_oObManager.ObGetStandardHandle(nTargetPid, nIndex)
     end,
-    allowed_rings = {0, 1}
+    allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
 kernel.tSyscallTable["ob_init_process"] = {

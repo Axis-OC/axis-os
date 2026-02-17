@@ -446,20 +446,16 @@ end
 -- =============================================
 
 local function executeSimpleCommand(tArgs, sOutFile, bAppend)
-    -- Execute a single command (builtin or external)
-    -- Returns false if the shell should exit, true otherwise
     if #tArgs == 0 then return true end
 
     local cmd = tArgs[1]
     local cmdArgs = {}
     for i = 2, #tArgs do table.insert(cmdArgs, tArgs[i]) end
 
-    -- Builtins run in-process (no redirection support for builtins)
     if builtins[cmd] then
         return builtins[cmd](cmdArgs)
     end
 
-    -- External command
     local execPath = findExecutable(cmd)
     if not execPath then
         oFs.write(hStderr, "sh: " .. cmd .. ": command not found\n")
@@ -467,8 +463,8 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
     end
 
     local ring = syscall("process_get_ring")
+    local myPid = syscall("process_get_pid")
 
-    -- Build environment for child
     local tChildEnv = {
         ARGS = cmdArgs,
         PWD = ENV.PWD,
@@ -478,9 +474,10 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
         HOSTNAME = ENV.HOSTNAME,
     }
 
-    -- Handle output redirection
-    -- We open the file BEFORE spawning so the child inherits the handle
+    -- === REDIRECT: save/swap/restore pattern ===
     local hRedirectFile = nil
+    local sOrigStdout = nil
+
     if sOutFile then
         local sMode = bAppend and "a" or "w"
         hRedirectFile = oFs.open(sOutFile, sMode)
@@ -488,31 +485,26 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
             oFs.write(hStderr, "sh: cannot open " .. sOutFile .. " for writing\n")
             return true
         end
-        -- Tell the child to use this file as stdout
-        -- We pass the token so PM can set it as STD_OUTPUT
-        tChildEnv._REDIRECT_STDOUT = hRedirectFile._token
+        -- 1) Save our current -11
+        sOrigStdout = syscall("ob_get_standard_handle", myPid, -11)
+        -- 2) Point our -11 at the redirect file
+        syscall("ob_set_standard_handle", myPid, -11, hRedirectFile._token)
     end
 
+    -- 3) Spawn child — it inherits OUR -11 (now pointing at the file)
     local pid, err = syscall("process_spawn", execPath, ring, tChildEnv)
-    if pid then
-        -- If we redirected, set the child's stdout to the file handle
-        if tChildEnv._REDIRECT_STDOUT then
-            syscall("ob_set_standard_handle", pid, -11, tChildEnv._REDIRECT_STDOUT)
-        end
 
-        -- Wait for child, watching for Ctrl+C
-        while true do
-            local sStatus = syscall("process_status", pid)
-            if not sStatus or sStatus == "dead" then break end
-            -- Yield to let child run
-            syscall("process_wait", pid)
-            break
-        end
+    -- 4) Immediately restore our -11 so the shell's own output is normal again
+    if sOrigStdout then
+        syscall("ob_set_standard_handle", myPid, -11, sOrigStdout)
+    end
+
+    if pid then
+        syscall("process_wait", pid)
     else
         oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
     end
 
-    -- Clean up redirect handle
     if hRedirectFile then
         oFs.close(hRedirectFile)
     end
@@ -521,12 +513,8 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
 end
 
 local function executePipeline(tSegments)
-    -- Execute a multi-stage pipeline: cmd1 | cmd2 | cmd3
-    -- Strategy: create a chain of ringbuffer-backed temp files.
-    -- Each stage writes to a temp, next stage reads from it.
-    -- Not true concurrent pipes, but functional for our cooperative scheduler.
-
     local sPrevTempPath = nil
+    local myPid = syscall("process_get_pid")
 
     for nStage = 1, #tSegments do
         local tStageArgs = tSegments[nStage]
@@ -545,10 +533,7 @@ local function executePipeline(tSegments)
             for i = 2, #tStageArgs do table.insert(cmdArgs, tStageArgs[i]) end
         end
 
-        -- Builtins in pipelines: only supported as first or last stage
         if builtins[cmd] then
-            -- For builtins in a pipeline, just run them normally
-            -- (piping builtin output is not supported in this version)
             builtins[cmd](cmdArgs)
             goto pipe_continue
         end
@@ -561,7 +546,7 @@ local function executePipeline(tSegments)
 
         local ring = syscall("process_get_ring")
 
-        -- Temp file for this stage's output (unless it's the last stage)
+        -- Temp file for this stage's output (unless last stage without file redirect)
         local sThisTempPath = nil
         if nStage < #tSegments then
             sThisTempPath = "/tmp/.pipe_" .. tostring(nStage) .. "_" .. tostring(math.random(10000, 99999))
@@ -576,60 +561,58 @@ local function executePipeline(tSegments)
             HOSTNAME = ENV.HOSTNAME,
         }
 
-        -- If there's input from a previous stage, pass it
+        -- === SAVE current standard handles ===
+        local sOrigStdout = syscall("ob_get_standard_handle", myPid, -11)
+        local sOrigStdin  = syscall("ob_get_standard_handle", myPid, -10)
+
+        -- === SWAP stdin if we have input from a previous stage ===
+        local hPipeIn = nil
         if sPrevTempPath then
-            tChildEnv._PIPE_INPUT = sPrevTempPath
+            hPipeIn = oFs.open(sPrevTempPath, "r")
+            if hPipeIn then
+                syscall("ob_set_standard_handle", myPid, -10, hPipeIn._token)
+            end
         end
 
-        -- If there's a temp for output (not last stage), redirect stdout
+        -- === SWAP stdout for pipe output or file redirect ===
         local hOutFile = nil
         if sThisTempPath then
             hOutFile = oFs.open(sThisTempPath, "w")
             if hOutFile then
-                tChildEnv._REDIRECT_STDOUT = hOutFile._token
+                syscall("ob_set_standard_handle", myPid, -11, hOutFile._token)
             end
         elseif sOutFile then
-            -- Last stage with file redirect
             local sMode = bAppend and "a" or "w"
             hOutFile = oFs.open(sOutFile, sMode)
             if hOutFile then
-                tChildEnv._REDIRECT_STDOUT = hOutFile._token
+                syscall("ob_set_standard_handle", myPid, -11, hOutFile._token)
             end
         end
 
+        -- === SPAWN child (inherits our swapped handles) ===
         local pid, err = syscall("process_spawn", execPath, ring, tChildEnv)
+
+        -- === RESTORE our handles immediately ===
+        if sOrigStdout then
+            syscall("ob_set_standard_handle", myPid, -11, sOrigStdout)
+        end
+        if sOrigStdin then
+            syscall("ob_set_standard_handle", myPid, -10, sOrigStdin)
+        end
+
         if pid then
-            if tChildEnv._REDIRECT_STDOUT then
-                syscall("ob_set_standard_handle", pid, -11, tChildEnv._REDIRECT_STDOUT)
-            end
-            if tChildEnv._PIPE_INPUT then
-                -- Open the previous temp for reading and set as child's stdin
-                local hIn = oFs.open(tChildEnv._PIPE_INPUT, "r")
-                if hIn then
-                    syscall("ob_set_standard_handle", pid, -10, hIn._token)
-                end
-            end
             syscall("process_wait", pid)
         else
             oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
         end
 
-        if hOutFile then
-            oFs.close(hOutFile)
-        end
-
-        -- Clean up previous temp file
-        if sPrevTempPath then
-            -- Best-effort delete (we don't have rm syscall yet, so leave it)
-            -- TODO: syscall("vfs_unlink", sPrevTempPath)
-        end
+        -- Cleanup handles
+        if hOutFile then oFs.close(hOutFile) end
+        if hPipeIn then oFs.close(hPipeIn) end
 
         sPrevTempPath = sThisTempPath
         ::pipe_continue::
     end
-
-    -- Clean up last temp
-    -- TODO: unlink sPrevTempPath if it exists
 
     return true
 end
