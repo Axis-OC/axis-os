@@ -1,17 +1,13 @@
 --
 -- /lib/errcheck.lua
 -- the big book of everything that can go wrong.
--- if you see one of these, something probably blew up.
+-- v2: added sMLTR and Object Handle error codes.
 --
 
 local g_tErrorCodes = {
   -- Success Codes
   STATUS_SUCCESS = 0,
-  STATUS_PENDING = 1, -- for async operations like tty read
-
-  -- Information Codes (100-199)
-  
-  -- Warning Codes (200-299)
+  STATUS_PENDING = 1,
 
   -- Error Codes (300+)
   STATUS_UNSUCCESSFUL = 300,
@@ -31,6 +27,8 @@ local g_tErrorCodes = {
   -- Access and Security errors
   STATUS_ACCESS_DENIED = 500,
   STATUS_PRIVILEGE_NOT_HELD = 501,
+  STATUS_SYNAPSE_TOKEN_MISMATCH = 502,
+  STATUS_SYNAPSE_TOKEN_EXPIRED = 503,
 
   -- VFS/IO errors
   STATUS_INVALID_HANDLE = 600,
@@ -38,6 +36,11 @@ local g_tErrorCodes = {
   STATUS_END_OF_FILE = 602,
   STATUS_NO_SUCH_FILE = 603,
   STATUS_DEVICE_BUSY = 604,
+
+  -- Object Manager errors
+  STATUS_HANDLE_NOT_FOUND = 700,
+  STATUS_HANDLE_TABLE_FULL = 701,
+  STATUS_HANDLE_ALIAS_INVALID = 702,
 }
 
 local g_tErrorStrings = {
@@ -56,21 +59,23 @@ local g_tErrorStrings = {
   [408] = "STATUS_DRIVER_UNLOAD_FAILED: The driver's Unload function returned an error.",
   [500] = "STATUS_ACCESS_DENIED: You do not have permission to perform this action.",
   [501] = "STATUS_PRIVILEGE_NOT_HELD: The operation requires a higher ring level.",
+  [502] = "STATUS_SYNAPSE_TOKEN_MISMATCH: The sMLTR synapse token does not match the expected value.",
+  [503] = "STATUS_SYNAPSE_TOKEN_EXPIRED: The synapse token has been rotated and is no longer valid.",
   [600] = "STATUS_INVALID_HANDLE: The provided file handle is not valid.",
   [601] = "STATUS_INVALID_PARAMETER: A parameter provided to a function was not valid.",
   [602] = "STATUS_END_OF_FILE: Reached the end of the file.",
   [603] = "STATUS_NO_SUCH_FILE: The file or directory does not exist.",
   [604] = "STATUS_DEVICE_BUSY: The device is currently busy with another request.",
+  [700] = "STATUS_HANDLE_NOT_FOUND: The object handle could not be resolved in the process handle table.",
+  [701] = "STATUS_HANDLE_TABLE_FULL: The process handle table is at capacity.",
+  [702] = "STATUS_HANDLE_ALIAS_INVALID: The numeric alias does not map to a valid handle token.",
 }
 
 local oErrCheck = {}
-
--- copy all codes into the exported table
 for sName, nCode in pairs(g_tErrorCodes) do
   oErrCheck[sName] = nCode
 end
 
--- function to get a human-readable string from a status code
 function oErrCheck.fGetErrorString(nStatusCode)
   return g_tErrorStrings[nStatusCode] or "Unknown or unspecified error code: " .. tostring(nStatusCode)
 end

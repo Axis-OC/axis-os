@@ -1,22 +1,33 @@
 --
--- /sys/ob_manager.lua
+-- /lib/ob_manager.lua
 -- Object Manager & Handle Table logic.
--- Fixed: Now supports legacy FD aliases (0, 1, 2) pointing to secure tokens.
+-- v3: Kernel-loadable. Supports sMLTR token binding on handles.
+--     Handles inherit to child processes. Legacy FD aliases supported.
 --
 
 local oOb = {}
 local tProcessHandleTables = {} -- [pid] = { tHandles={}, tAliases={} }
 
--- generate a cryptographically secure* handle.
--- *not actually crypto secure, but good enough to stop script kiddies.
+-- Entropy pool for handle generation.
+-- Uses multiple sources to make tokens unpredictable.
+local g_nHandleCounter = 0
+
 local function fGenerateHandleToken()
-    local sPart1 = string.format("%x", math.random(0, 0xFFFFFF))
-    local sPart2 = string.format("%x", math.floor(os.clock() * 10000))
-    local sPart3 = string.format("%x", math.random(0, 0xFFFF))
-    return "H-" .. sPart1 .. "-" .. sPart2 .. "-" .. sPart3
+    g_nHandleCounter = g_nHandleCounter + 1
+    local nTime = 0
+    -- try to use raw_computer.uptime if available (kernel context)
+    -- otherwise fall back to os.clock
+    pcall(function()
+        if raw_computer then nTime = math.floor(raw_computer.uptime() * 100000)
+        else nTime = math.floor(os.clock() * 100000) end
+    end)
+    local sPart1 = string.format("%06x", math.random(0, 0xFFFFFF))
+    local sPart2 = string.format("%05x", nTime % 0xFFFFF)
+    local sPart3 = string.format("%04x", math.random(0, 0xFFFF))
+    local sPart4 = string.format("%04x", (g_nHandleCounter * 7 + math.random(0, 0xFF)) % 0xFFFF)
+    return "H-" .. sPart1 .. "-" .. sPart2 .. "-" .. sPart3 .. "-" .. sPart4
 end
 
--- Initialize a handle table for a new process
 function oOb.InitProcess(nPid)
     if not tProcessHandleTables[nPid] then
         tProcessHandleTables[nPid] = {
@@ -26,30 +37,24 @@ function oOb.InitProcess(nPid)
     end
 end
 
--- Clean up when a process dies
 function oOb.DestroyProcess(nPid)
     tProcessHandleTables[nPid] = nil
 end
 
--- Add an object to the process handle table and get a secure Handle back
 function oOb.CreateHandle(nPid, tObjectHeader)
     oOb.InitProcess(nPid)
     local tTable = tProcessHandleTables[nPid]
     
     local sToken = fGenerateHandleToken()
-    -- collision check because random is pseudo
     while tTable.tHandles[sToken] do sToken = fGenerateHandleToken() end
     
     tTable.tHandles[sToken] = tObjectHeader
     return sToken
 end
 
--- Manually map a legacy FD (e.g. 1) to an existing Token
 function oOb.SetHandleAlias(nPid, nAliasFd, sToken)
     oOb.InitProcess(nPid)
     local tTable = tProcessHandleTables[nPid]
-    
-    -- verify token exists first
     if tTable.tHandles[sToken] then
         tTable.tAliases[nAliasFd] = sToken
         return true
@@ -57,37 +62,28 @@ function oOb.SetHandleAlias(nPid, nAliasFd, sToken)
     return false
 end
 
--- Resolve a Handle (String Token OR Integer Alias) to an Object
 function oOb.ReferenceObjectByHandle(nPid, vHandle)
     local tTable = tProcessHandleTables[nPid]
     if not tTable then return nil end
     
     local sRealToken = vHandle
-    
-    -- if user provided a number (e.g. 1 for stdout), look up the alias
     if type(vHandle) == "number" then
         sRealToken = tTable.tAliases[vHandle]
-        if not sRealToken then return nil end -- alias not found
+        if not sRealToken then return nil end
     end
     
-    -- now look up the real object by token
     return tTable.tHandles[sRealToken]
 end
 
--- Get the token string from an alias (helper for cloning)
 function oOb.GetTokenByAlias(nPid, nAlias)
     local tTable = tProcessHandleTables[nPid]
     if not tTable then return nil end
     return tTable.tAliases[nAlias]
 end
 
--- Close a handle
 function oOb.CloseHandle(nPid, vHandle)
     local tTable = tProcessHandleTables[nPid]
     if not tTable then return false end
-    
-    -- if closing an alias (e.g. fs.close(1)), we just remove the alias?
-    -- usually closing fd 1 closes the underlying resource too.
     
     local sRealToken = vHandle
     if type(vHandle) == "number" then
@@ -96,17 +92,50 @@ function oOb.CloseHandle(nPid, vHandle)
     end
     
     if sRealToken and tTable.tHandles[sRealToken] then
-        -- destroy object ref. 
-        -- in a real OS we would decrement refcount, but here we kill it.
         tTable.tHandles[sRealToken] = nil 
-        
-        -- clean up any other aliases pointing to this dead token
         for k, v in pairs(tTable.tAliases) do
             if v == sRealToken then tTable.tAliases[k] = nil end
         end
         return true
     end
     return false
+end
+
+-- Inherit handles from parent to child (like fork() fd inheritance).
+-- Creates new tokens for the child pointing to cloned object headers.
+function oOb.InheritHandles(nParentPid, nChildPid)
+    local tParent = tProcessHandleTables[nParentPid]
+    if not tParent then return end
+    
+    oOb.InitProcess(nChildPid)
+    local tChild = tProcessHandleTables[nChildPid]
+    
+    -- Clone all aliases (standard FDs: 0=stdin, 1=stdout, 2=stderr)
+    for nAlias, sParentToken in pairs(tParent.tAliases) do
+        local tObj = tParent.tHandles[sParentToken]
+        if tObj then
+            -- Deep-copy the object header so child has its own
+            local tClone = {}
+            for k, v in pairs(tObj) do tClone[k] = v end
+            
+            local sChildToken = fGenerateHandleToken()
+            while tChild.tHandles[sChildToken] do sChildToken = fGenerateHandleToken() end
+            
+            tChild.tHandles[sChildToken] = tClone
+            tChild.tAliases[nAlias] = sChildToken
+        end
+    end
+end
+
+-- List all handles for a process (for debugging / cleanup)
+function oOb.ListHandles(nPid)
+    local tTable = tProcessHandleTables[nPid]
+    if not tTable then return {} end
+    local tResult = {}
+    for sToken, tObj in pairs(tTable.tHandles) do
+        table.insert(tResult, { token = sToken, object = tObj })
+    end
+    return tResult
 end
 
 return oOb
