@@ -1,3 +1,9 @@
+--
+-- /lib/syscall.lua
+-- User-mode syscall convenience wrappers.
+-- v2: Object Handle aware. Synapse token retrieval.
+--
+
 local sys = {}
 
 sys.write = function(...)
@@ -5,11 +11,11 @@ sys.write = function(...)
   for i = 1, select("#", ...) do
     parts[i] = tostring(select(i, ...))
   end
-  syscall("vfs_write", 1, table.concat(parts, "\t")) -- 1 = stdout
+  syscall("vfs_write", 1, table.concat(parts, "\t")) -- alias 1 = stdout
 end
 
 sys.read = function()
-  local ok, data = syscall("vfs_read", 0) -- 0 = stdin
+  local ok, data = syscall("vfs_read", 0) -- alias 0 = stdin
   return data
 end
 
@@ -35,6 +41,16 @@ end
 
 sys.shutdown = function()
   return syscall("computer_shutdown")
+end
+
+-- sMLTR: get this process's synapse token
+sys.getSynapseToken = function()
+  return syscall("synapse_get_token")
+end
+
+-- syscall passthrough for insmod etc
+sys.syscall = function(...)
+  return syscall(...)
 end
 
 return sys

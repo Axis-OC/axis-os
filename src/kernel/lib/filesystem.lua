@@ -1,17 +1,25 @@
 --
 -- /lib/filesystem.lua
 -- user-mode fs wrapper.
--- now with aggressive buffering because donut.c was murdering the kernel with syscalls.
+-- v3: Object Handle token support. Handles can be string tokens or numeric aliases.
+--     Aggressive buffering retained for performance.
 --
 
 local oFsLib = {}
 local tBuffers = {} 
 
-local function fFlush(nFd)
-  local sData = tBuffers[nFd]
+-- Internal: get the raw handle value (token string or numeric alias)
+local function fGetFd(hHandle)
+  if not hHandle then return nil end
+  if type(hHandle) == "table" then return hHandle.fd end
+  return hHandle -- already a raw value
+end
+
+local function fFlush(vFd)
+  local sData = tBuffers[vFd]
   if sData and #sData > 0 then
-    tBuffers[nFd] = "" -- wipe it before sending
-    local bSys, bVfs, valResult = syscall("vfs_write", nFd, sData)
+    tBuffers[vFd] = ""
+    local bSys, bVfs, valResult = syscall("vfs_write", vFd, sData)
     return bSys and bVfs, valResult
   end
   return true
@@ -19,7 +27,8 @@ end
 
 oFsLib.open = function(sPath, sMode)
   local bSys, bVfs, valResult = syscall("vfs_open", sPath, sMode or "r")
-  if bSys and bVfs and type(valResult) == "number" then
+  if bSys and bVfs and valResult ~= nil then
+    -- valResult is now a handle token (string) or legacy fd (number)
     return { fd = valResult }
   else
     return nil, valResult
@@ -27,48 +36,47 @@ oFsLib.open = function(sPath, sMode)
 end
 
 oFsLib.read = function(hHandle, nCount)
-  if not hHandle or not hHandle.fd then return nil, "Invalid handle" end
+  local vFd = fGetFd(hHandle)
+  if vFd == nil then return nil, "Invalid handle" end
   
-  -- flush all buffers before reading. 
-  -- otherwise prompts like "login: " sit in the buffer while we wait for input. awkward.
-  for nBufFd, _ in pairs(tBuffers) do
-     fFlush(nBufFd)
+  -- flush all write buffers before reading
+  for vBufFd, _ in pairs(tBuffers) do
+     fFlush(vBufFd)
   end
   
-  local bSys, bVfs, valResult = syscall("vfs_read", hHandle.fd, nCount or math.huge)
+  local bSys, bVfs, valResult = syscall("vfs_read", vFd, nCount or math.huge)
   return (bSys and bVfs) and valResult or nil, valResult
 end
 
 oFsLib.write = function(hHandle, sData)
-  if not hHandle or not hHandle.fd then return nil, "Invalid handle" end
-  local nFd = hHandle.fd
+  local vFd = fGetFd(hHandle)
+  if vFd == nil then return nil, "Invalid handle" end
   
-  -- change: buffering everything now, not just stdout.
-  -- we hoard chars like a dragon hoards gold until a newline appears.
-  local sBuf = (tBuffers[nFd] or "") .. tostring(sData)
-  tBuffers[nFd] = sBuf
+  -- Buffer key: use tostring so both strings and numbers work as keys
+  local sBufKey = tostring(vFd)
+  local sBuf = (tBuffers[sBufKey] or "") .. tostring(sData)
+  tBuffers[sBufKey] = sBuf
   
-  -- flush strategy:
-  -- 1. if there's a newline (interactive stuff)
-  -- 2. if the buffer is getting fat (> 2kb)
   if sBuf:find("[\n\r]") or #sBuf > 2048 then
-     return fFlush(nFd)
+     return fFlush(vFd)
   end
   return true
 end
 
 oFsLib.flush = function(hHandle)
-  if hHandle and hHandle.fd then return fFlush(hHandle.fd) end
+  local vFd = fGetFd(hHandle)
+  if vFd ~= nil then return fFlush(vFd) end
 end
 
 oFsLib.close = function(hHandle)
-  if not hHandle or not hHandle.fd then return nil end
+  local vFd = fGetFd(hHandle)
+  if vFd == nil then return nil end
   
-  -- flush the toilet before leaving
-  fFlush(hHandle.fd)
-  tBuffers[hHandle.fd] = nil
+  local sBufKey = tostring(vFd)
+  fFlush(vFd)
+  tBuffers[sBufKey] = nil
   
-  local bSys, bVfs = syscall("vfs_close", hHandle.fd)
+  local bSys, bVfs = syscall("vfs_close", vFd)
   return bSys and bVfs
 end
 
@@ -79,6 +87,14 @@ end
 
 oFsLib.chmod = function(sPath, nMode)
   local bSys, bVfs, valResult = syscall("vfs_chmod", sPath, nMode)
+  return bSys and bVfs, valResult
+end
+
+-- deviceControl for ITER and similar drivers
+oFsLib.deviceControl = function(hHandle, sMethod, tArgs)
+  local vFd = fGetFd(hHandle)
+  if vFd == nil then return nil, "Invalid handle" end
+  local bSys, bVfs, valResult = syscall("vfs_device_control", vFd, sMethod, tArgs)
   return bSys and bVfs, valResult
 end
 
