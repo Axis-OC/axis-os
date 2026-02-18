@@ -37,6 +37,19 @@ local g_nWidth, g_nHeight = 80, 25
 local g_nCurrentLine = 0
 local tBootArgs = boot_args or {} 
 
+local g_oPreempt = nil          -- loaded from /lib/preempt.lua at boot
+
+local g_tSchedStats = {
+    nTotalResumes      = 0,
+    nPreemptions       = 0,
+    nWatchdogWarnings  = 0,
+    nWatchdogKills     = 0,
+    nMaxSliceMs        = 0,
+}
+
+local WATCHDOG_WARN_THRESHOLD = 2.0   -- seconds — warn if a single resume exceeds this
+local WATCHDOG_KILL_STRIKES   = 3     -- kill after this many warnings
+
 -- Object Manager (loaded at boot from /lib/ob_manager.lua)
 local g_oObManager = nil
 local g_oRegistry = nil
@@ -337,6 +350,31 @@ local function __load_registry()
   end
 end
 
+local function __load_preempt()
+    local sCode, sErr = primitive_load("/lib/preempt.lua")
+    if not sCode then
+        kprint("warn", "Preempt module not found at /lib/preempt.lua: " .. tostring(sErr))
+        return nil
+    end
+    local tEnv = {
+        string = string, math = math, table = table,
+        pairs = pairs, ipairs = ipairs, type = type,
+        tostring = tostring, tonumber = tonumber,
+    }
+    local fChunk, sLoadErr = load(sCode, "@preempt", "t", tEnv)
+    if not fChunk then
+        kprint("fail", "Failed to parse preempt module: " .. tostring(sLoadErr))
+        return nil
+    end
+    local bOk, oResult = pcall(fChunk)
+    if bOk and type(oResult) == "table" then
+        return oResult
+    else
+        kprint("fail", "Failed to init preempt module: " .. tostring(oResult))
+        return nil
+    end
+end
+
 -------------------------------------------------
 -- PROCESS & MODULE MANAGEMENT
 -------------------------------------------------
@@ -403,22 +441,60 @@ function kernel.create_sandbox(nPid, nRing)
     math = math,
     debug = debug,
 
-        syscall = function(...)
-            return kernel.syscall_dispatch(...)
-        end,
+    syscall = function(...)
+        return kernel.syscall_dispatch(...)
+    end,
 
-        require = function(sModulePath)
-            local mod, sErr = kernel.custom_require(sModulePath, nPid)
-            if not mod then error(sErr, 2) end
-            return mod
-        end,
-    }
+    require = function(sModulePath)
+        local mod, sErr = kernel.custom_require(sModulePath, nPid)
+        if not mod then error(sErr, 2) end
+        return mod
+    end,
+  }
 
-  -- print and io defined AFTER tSandbox exists so closures can
-  -- reference tSandbox.env for NO_COLOR detection.
-  -- When a child's stdout is redirected to a file, the shell sets
-  -- env.NO_COLOR = "1". All ANSI escape codes are stripped automatically.
+  -- =========================================================
+  -- PREEMPTIVE SCHEDULING:  __pc()  yield checkpoint
+  --
+  -- For Ring ≥ 2.5 processes the instrumenter rewrites source
+  -- to call __pc() inside every loop / branch.  The function
+  -- keeps a fast counter and only checks the wall clock every
+  -- CHECK_INTERVAL calls.  When the quantum is exhausted it
+  -- does a bare coroutine.yield() which the scheduler treats
+  -- as "preempted → reschedule immediately".
+  -- =========================================================
+  if g_oPreempt and nRing >= 2.5 then
+      local nPcCounter   = 0
+      local nPcLastYield = raw_computer.uptime()
+      local nPcQuantum   = g_oPreempt.DEFAULT_QUANTUM
+      local nPcInterval  = g_oPreempt.CHECK_INTERVAL
+      local fUptime      = raw_computer.uptime   -- captured ref
 
+      tSandbox.__pc = function()
+          nPcCounter = nPcCounter + 1
+          if nPcCounter < nPcInterval then return end
+          nPcCounter = 0
+          local nNow = fUptime()
+          if nNow - nPcLastYield >= nPcQuantum then
+              coroutine.yield()              -- → scheduler
+              nPcLastYield = fUptime()       -- refresh after resume
+          end
+      end
+
+      -- Wrap load() so that dynamically compiled code is also
+      -- instrumented  (e.g.  load("while true do end")  ).
+      local fKernelLoad = load
+      tSandbox.load = function(sChunk, sName, sMode, tLoadEnv)
+          if type(sChunk) == "string" then
+              local sInst, nInj = g_oPreempt.instrument(sChunk, sName or "[dynamic]")
+              if nInj > 0 then sChunk = sInst end
+          end
+          return fKernelLoad(sChunk, sName, sMode, tLoadEnv or tSandbox)
+      end
+  else
+      tSandbox.__pc = function() end          -- no-op for system rings
+  end
+
+  -- print / io  (defined AFTER tSandbox so closures can read env)
   tSandbox.print = function(...)
       local tP = {}
       for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
@@ -444,7 +520,7 @@ function kernel.create_sandbox(nPid, nRing)
           return data
       end,
   }
-  
+
   -- Safe os table
   local tSafeOs = {}
   for sKey, vValue in pairs(os) do
@@ -460,34 +536,50 @@ function kernel.create_sandbox(nPid, nRing)
     tSandbox.raw_component = raw_component
     tSandbox.raw_computer = raw_computer
   end
-  
+
   setmetatable(tSandbox, { __index = _G })
   tSandbox._G = tSandbox
-  
+
   return tSandbox
 end
 
 function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
   local nPid = kernel.nNextPid
   kernel.nNextPid = kernel.nNextPid + 1
-  
+
   kprint("info", "Creating process " .. nPid .. " ('" .. sPath .. "') at Ring " .. nRing)
-  
+
   local sCode, sErr = kernel.syscalls.vfs_read_file(0, sPath)
   if not sCode then
     kprint("fail", "Failed to create process: " .. sErr)
     return nil, sErr
   end
-  
+
+  -- =========================================================
+  -- PREEMPTIVE SCHEDULING:  instrument source for Ring ≥ 2.5
+  -- Injects __pc() calls after every  do / then / repeat / else
+  -- so the process yields back to the scheduler periodically.
+  -- =========================================================
+  if g_oPreempt and nRing >= 2.5 then
+      local sInstrumented, nInjections = g_oPreempt.instrument(sCode, sPath)
+      if nInjections > 0 then
+          kprint("dev", string.format(
+              "Preempt: %s → %d yield checkpoints injected", sPath, nInjections))
+          sCode = sInstrumented
+      else
+          kprint("dev", "Preempt: " .. sPath .. " — no loops/branches to instrument")
+      end
+  end
+
   local tEnv = kernel.create_sandbox(nPid, nRing)
   if tPassEnv then tEnv.env = tPassEnv end
-  
+
   local fFunc, sLoadErr = load(sCode, "@" .. sPath, "t", tEnv)
   if not fFunc then
     kprint("fail", "SYNTAX ERROR in " .. sPath .. ": " .. tostring(sLoadErr))
     return nil, sLoadErr
   end
-  
+
   local coProcess = coroutine.create(function()
     local bIsOk, sErr = pcall(fFunc)
     if not bIsOk then
@@ -498,10 +590,10 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
     end
     kernel.tProcessTable[nPid].status = "dead"
   end)
-  
+
   -- sMLTR: Generate unique synapse token for this process
   local sSynapseToken = fGenerateSynapseToken()
-  
+
   kernel.tProcessTable[nPid] = {
     co = coProcess,
     status = "ready",
@@ -516,10 +608,16 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
     synapseToken = sSynapseToken,
     -- Thread tracking
     threads = {},
+    -- Preemptive scheduler per-process stats
+    nCpuTime         = 0,
+    nPreemptCount    = 0,
+    nLastSlice       = 0,
+    nMaxSlice        = 0,
+    nWatchdogStrikes = 0,
   }
   kernel.tPidMap[coProcess] = nPid
   kernel.tRings[nPid] = nRing
-  
+
   -- Object Handle: Initialize per-process handle table
   if g_oObManager then
     g_oObManager.ObInitializeProcess(nPid)
@@ -527,9 +625,9 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
       g_oObManager.ObInheritHandles(nParentPid, nPid, sSynapseToken)
     end
   end
-  
+
   kprint("dev", "  PID " .. nPid .. " synapse token: " .. sSynapseToken:sub(1, 16) .. "...")
-  
+
   return nPid
 end
 
@@ -1179,6 +1277,45 @@ kernel.tSyscallTable["synapse_rotate"] = {
   allowed_rings = {0, 1}
 }
 
+-- ==========================================
+-- SCHEDULER DIAGNOSTICS
+-- ==========================================
+
+kernel.tSyscallTable["sched_get_stats"] = {
+    func = function(nPid)
+        local tResult = {
+            nTotalResumes     = g_tSchedStats.nTotalResumes,
+            nPreemptions      = g_tSchedStats.nPreemptions,
+            nWatchdogWarnings = g_tSchedStats.nWatchdogWarnings,
+            nWatchdogKills    = g_tSchedStats.nWatchdogKills,
+            nMaxSliceMs       = g_tSchedStats.nMaxSliceMs,
+        }
+        if g_oPreempt then
+            local tP = g_oPreempt.getStats()
+            tResult.nInstrumentedFiles    = tP.nTotalInstrumented
+            tResult.nInjectedCheckpoints  = tP.nTotalInjections
+            tResult.nQuantumMs            = tP.nQuantumMs
+            tResult.nCheckInterval        = tP.nCheckInterval
+        end
+        return tResult
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["process_cpu_stats"] = {
+    func = function(nPid, nTargetPid)
+        local tTarget = kernel.tProcessTable[nTargetPid or nPid]
+        if not tTarget then return nil end
+        return {
+            nCpuTime         = tTarget.nCpuTime         or 0,
+            nPreemptCount    = tTarget.nPreemptCount    or 0,
+            nLastSlice       = tTarget.nLastSlice       or 0,
+            nMaxSlice        = tTarget.nMaxSlice        or 0,
+            nWatchdogStrikes = tTarget.nWatchdogStrikes or 0,
+        }
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
 
 -- Raw Component (Privileged)
 kernel.tSyscallTable["raw_component_list"] = {
@@ -1343,6 +1480,17 @@ else
     kprint("warn", "Virtual Registry not available.")
 end
 
+-- Load Preemptive Scheduler module
+g_oPreempt = __load_preempt()
+if g_oPreempt then
+    kprint("ok", string.format(
+        "Preemptive scheduler active  (quantum=%dms, interval=%d, no debug hooks)",
+        g_oPreempt.DEFAULT_QUANTUM * 1000,
+        g_oPreempt.CHECK_INTERVAL))
+else
+    kprint("warn", "Preemptive scheduling unavailable — cooperative only.")
+end
+
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")
 local tFstab = primitive_load_lua("/etc/fstab.lua")
@@ -1410,72 +1558,163 @@ kprint("none", "")
 
 table.insert(kernel.tProcessTable[nPipelinePid].run_queue, "start")
 
+-- =================================================================
+-- MAIN KERNEL EVENT LOOP  —  Preemptive Round-Robin Scheduler
+--
+-- Key changes from cooperative-only:
+--
+--  1) After each coroutine.resume(), if the process status is still
+--     "running" it was preempted by __pc() rather than yielding via
+--     a syscall.  We set it back to "ready" so it runs again next
+--     tick.
+--
+--  2) Between every process resume we call computer.pullSignal(0)
+--     to RESET the OpenComputers "too long without yielding" timer.
+--     Without this, the cumulative runtime of all processes in one
+--     tick could exceed OC's ~5-second hard limit and crash the
+--     machine.
+--
+--  3) We track wall-clock time per resume and maintain per-process
+--     CPU accounting.  A watchdog warns (and eventually kills)
+--     processes whose single resumes exceed WATCHDOG_WARN_THRESHOLD.
+--
+--  4) Hardware events captured during intermediate pullSignal(0)
+--     calls are forwarded to the Pipeline Manager immediately,
+--     improving input responsiveness.
+-- =================================================================
+
 while true do
   local nWorkDone = 0
-  
-  -- 1. Run all "ready" processes
+
   for nPid, tProcess in pairs(kernel.tProcessTable) do
     if tProcess.status == "ready" then
       nWorkDone = nWorkDone + 1
       g_nCurrentPid = nPid
       tProcess.status = "running"
-      
+
+      -- ---------- measure wall-clock time for this resume ----------
+      local nResumeStart = raw_computer.uptime()
+
       local tResumeParams = tProcess.resume_args
       tProcess.resume_args = nil
-      
+
       local bIsOk, sErrOrSignalName
       if tResumeParams then
-        bIsOk, sErrOrSignalName = coroutine.resume(tProcess.co, true, table.unpack(tResumeParams))
+        bIsOk, sErrOrSignalName = coroutine.resume(
+            tProcess.co, true, table.unpack(tResumeParams))
       else
         bIsOk, sErrOrSignalName = coroutine.resume(tProcess.co)
       end
-      
-      g_nCurrentPid = nKernelPid 
-      
+
+      local nSliceTime = raw_computer.uptime() - nResumeStart
+
+      g_nCurrentPid = nKernelPid
+
+      -- ---------- per-process CPU accounting ----------
+      tProcess.nCpuTime  = (tProcess.nCpuTime or 0) + nSliceTime
+      tProcess.nLastSlice = nSliceTime
+      if nSliceTime > (tProcess.nMaxSlice or 0) then
+          tProcess.nMaxSlice = nSliceTime
+      end
+
+      -- ---------- global scheduler accounting ----------
+      g_tSchedStats.nTotalResumes = g_tSchedStats.nTotalResumes + 1
+      local nSliceMs = nSliceTime * 1000
+      if nSliceMs > g_tSchedStats.nMaxSliceMs then
+          g_tSchedStats.nMaxSliceMs = nSliceMs
+      end
+
+      -- ---------- crash handling ----------
       if not bIsOk then
         tProcess.status = "dead"
         kernel.panic(tostring(sErrOrSignalName), tProcess.co)
       end
-      
+
+      -- ---------- PREEMPTION DETECTION ----------
+      -- If the process status is still "running" it means the
+      -- coroutine yielded WITHOUT going through a syscall (which
+      -- would have set status to "sleeping").  This happens when
+      -- __pc() fires.  Mark it "ready" so it runs again next tick.
+      if tProcess.status == "running" then
+          tProcess.status = "ready"
+          tProcess.nPreemptCount = (tProcess.nPreemptCount or 0) + 1
+          g_tSchedStats.nPreemptions = g_tSchedStats.nPreemptions + 1
+      end
+
+      -- ---------- natural exit ----------
       if coroutine.status(tProcess.co) == "dead" then
         if tProcess.status ~= "dead" then
           kprint("info", "Process " .. nPid .. " exited normally.")
           tProcess.status = "dead"
         end
       end
-      
-      -- Wake up waiters and clean up dead processes
+
+      -- ---------- watchdog ----------
+      if nSliceTime > WATCHDOG_WARN_THRESHOLD and tProcess.status ~= "dead" then
+          tProcess.nWatchdogStrikes = (tProcess.nWatchdogStrikes or 0) + 1
+          g_tSchedStats.nWatchdogWarnings = g_tSchedStats.nWatchdogWarnings + 1
+          kprint("warn", string.format(
+              "WATCHDOG: PID %d ran %.2fs without yielding (strike %d/%d)",
+              nPid, nSliceTime,
+              tProcess.nWatchdogStrikes, WATCHDOG_KILL_STRIKES))
+          if tProcess.nWatchdogStrikes >= WATCHDOG_KILL_STRIKES then
+              kprint("fail", "WATCHDOG: Killing PID " .. nPid ..
+                             " — exceeded " .. WATCHDOG_KILL_STRIKES .. " strikes")
+              tProcess.status = "dead"
+              g_tSchedStats.nWatchdogKills = g_tSchedStats.nWatchdogKills + 1
+          end
+      end
+
+      -- ---------- wake waiters / clean up dead ----------
       if tProcess.status == "dead" then
-        -- Object Handle: Destroy process handle table
+        -- Object Handle cleanup
         if g_oObManager then
           g_oObManager.ObDestroyProcess(nPid)
         end
-        
+
         for _, nWaiterPid in ipairs(tProcess.wait_queue or {}) do
           local tWaiter = kernel.tProcessTable[nWaiterPid]
-          if tWaiter and tWaiter.status == "sleeping" and tWaiter.wait_reason == "wait_pid" then
+          if tWaiter and tWaiter.status == "sleeping"
+             and tWaiter.wait_reason == "wait_pid" then
             tWaiter.status = "ready"
             tWaiter.resume_args = {true}
-            nWorkDone = nWorkDone + 1
           end
         end
-        
+
         -- Kill orphaned threads
         for _, nTid in ipairs(tProcess.threads or {}) do
-          if kernel.tProcessTable[nTid] and kernel.tProcessTable[nTid].status ~= "dead" then
+          if kernel.tProcessTable[nTid]
+             and kernel.tProcessTable[nTid].status ~= "dead" then
             kernel.tProcessTable[nTid].status = "dead"
             if g_oObManager then g_oObManager.ObDestroyProcess(nTid) end
           end
         end
       end
-    end
-  end
-  
-  -- 2. Pull external events
+
+      -- ======================================================
+      -- CRITICAL:  Reset the OC "too long without yielding"
+      -- timer between process resumes.  Also picks up any
+      -- pending hardware events (key_down, scroll, etc.) and
+      -- forwards them immediately — this makes the system feel
+      -- noticeably more responsive under load.
+      -- ======================================================
+      local sIntEvt, ip1, ip2, ip3, ip4, ip5 = computer.pullSignal(0)
+      if sIntEvt then
+          pcall(kernel.syscalls.signal_send, nKernelPid,
+                kernel.nPipelinePid, "os_event",
+                sIntEvt, ip1, ip2, ip3, ip4, ip5)
+      end
+
+    end  -- if status == "ready"
+  end  -- for each process
+
+  -- 2. Pull external events  (block briefly if nothing was ready)
   local nTimeout = (nWorkDone > 0) and 0 or 0.05
   local sEventName, p1, p2, p3, p4, p5 = computer.pullSignal(nTimeout)
-  
+
   if sEventName then
-    pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid, "os_event", sEventName, p1, p2, p3, p4, p5)
+    pcall(kernel.syscalls.signal_send, nKernelPid,
+          kernel.nPipelinePid, "os_event",
+          sEventName, p1, p2, p3, p4, p5)
   end
 end
