@@ -50,89 +50,76 @@ oPreempt.nTotalInjections   = 0
 function oPreempt.instrument(sCode, sLabel)
     if not sCode or #sCode == 0 then return sCode, 0 end
 
+    local sCheckName = string.format("_pc_%04x%04x",
+        math.random(0, 0xFFFF), math.random(0, 0xFFFF))
+
     local tOut        = {}
     local nOutIdx     = 0
     local nLen        = #sCode
     local nPos        = 1
     local nInjections = 0
 
-    --  helper ---------------------------------------------------------
     local function isIdChar(c)
         if not c or c == "" then return false end
         local b = c:byte()
-        return (b >= 65 and b <= 90)        -- A-Z
-            or (b >= 97 and b <= 122)       -- a-z
-            or (b >= 48 and b <= 57)        -- 0-9
-            or b == 95                       -- _
+        return (b >= 65 and b <= 90)
+            or (b >= 97 and b <= 122)
+            or (b >= 48 and b <= 57)
+            or b == 95
     end
 
     local function emit(s)
         nOutIdx = nOutIdx + 1
         tOut[nOutIdx] = s
     end
-    --  ----------------------------------------------------------------
 
     while nPos <= nLen do
         local c = sCode:sub(nPos, nPos)
 
-        -- ==== String literals ("…" or '…') ====
+        -- ============ STRING LITERALS ============
         if c == '"' or c == "'" then
             local q      = c
             local nStart = nPos
             nPos = nPos + 1
             while nPos <= nLen do
                 local c2 = sCode:sub(nPos, nPos)
-                if c2 == '\\' then
-                    nPos = nPos + 2          -- skip escaped char
-                elseif c2 == q then
-                    nPos = nPos + 1
-                    break
-                else
-                    nPos = nPos + 1
-                end
+                if c2 == '\\' then nPos = nPos + 2
+                elseif c2 == q then nPos = nPos + 1; break
+                else nPos = nPos + 1 end
             end
             emit(sCode:sub(nStart, nPos - 1))
 
-        -- ==== Comments  (-- …) ====
+        -- ============ COMMENTS ============
         elseif c == '-' and nPos + 1 <= nLen
                         and sCode:sub(nPos + 1, nPos + 1) == '-' then
             local nComStart = nPos
-            nPos = nPos + 2                   -- skip  --
-
-            -- long comment?  --[[ or --[==[  etc.
+            nPos = nPos + 2
             local bLong = false
             if nPos <= nLen and sCode:sub(nPos, nPos) == '[' then
                 local nEq    = 0
                 local nProbe = nPos + 1
                 while nProbe <= nLen and sCode:sub(nProbe, nProbe) == '=' do
-                    nEq = nEq + 1;  nProbe = nProbe + 1
+                    nEq = nEq + 1; nProbe = nProbe + 1
                 end
                 if nProbe <= nLen and sCode:sub(nProbe, nProbe) == '[' then
                     bLong = true
                     local sClose = ']' .. string.rep('=', nEq) .. ']'
                     local nEnd   = sCode:find(sClose, nProbe + 1, true)
-                    if nEnd then
-                        nPos = nEnd + #sClose
-                    else
-                        nPos = nLen + 1
-                    end
+                    nPos = nEnd and (nEnd + #sClose) or (nLen + 1)
                 end
             end
-
             if not bLong then
-                -- short comment: consume to end of line
                 local nEol = sCode:find('\n', nPos)
                 nPos = nEol and (nEol + 1) or (nLen + 1)
             end
-
             emit(sCode:sub(nComStart, nPos - 1))
 
-        -- ==== Long strings  [[ ]], [=[ ]=]  etc. ====
+        -- ============ LONG STRINGS ============
         elseif c == '[' then
             local nEq    = 0
             local nProbe = nPos + 1
             while nProbe <= nLen and sCode:sub(nProbe, nProbe) == '=' do
-                nEq = nEq + 1;  nProbe = nProbe + 1
+                nEq = nEq + 1; nProbe = nProbe + 1
             end
             if nProbe <= nLen and sCode:sub(nProbe, nProbe) == '[' then
                 local sClose = ']' .. string.rep('=', nEq) .. ']'
@@ -141,74 +128,118 @@ function oPreempt.instrument(sCode, sLabel)
                     emit(sCode:sub(nPos, nEnd + #sClose - 1))
                     nPos = nEnd + #sClose
                 else
-                    emit(sCode:sub(nPos))
-                    nPos = nLen + 1
+                    emit(sCode:sub(nPos)); nPos = nLen + 1
                 end
             else
-                emit(c);  nPos = nPos + 1
+                emit(c); nPos = nPos + 1
             end
 
-        -- ==== Keywords  (do / then / repeat / else) ====
+        -- ============ KEYWORDS ============
         else
             local bInjected = false
             local cPrev = (nPos > 1) and sCode:sub(nPos - 1, nPos - 1) or ""
 
             if not isIdChar(cPrev) then
-                for _, sKw in ipairs({"repeat", "then", "else", "do"}) do
-                    local nKwLen = #sKw
-                    if nPos + nKwLen - 1 <= nLen
-                       and sCode:sub(nPos, nPos + nKwLen - 1) == sKw then
 
-                        -- word boundary AFTER the keyword
-                        local cAfter = (nPos + nKwLen <= nLen)
-                                       and sCode:sub(nPos + nKwLen, nPos + nKwLen) or ""
-                        if not isIdChar(cAfter) then
+                -- === "goto" — inject BEFORE the goto keyword ===
+                -- This catches goto-loops without breaking
+                -- Lua's "label is last in block" scope rule.
+                if nPos + 3 <= nLen
+                   and sCode:sub(nPos, nPos + 3) == "goto"
+                   and not isIdChar(sCode:sub(nPos + 4, nPos + 4) or "") then
+                    emit(sCheckName .. "();")
+                    nInjections = nInjections + 1
+                    emit("goto")
+                    nPos = nPos + 4
+                    bInjected = true
+                end
 
-                            -- guard: "else" immediately before "if" → elseif
-                            if sKw == "else" then
-                                local sLook = sCode:sub(nPos + nKwLen)
-                                if sLook:match("^%s*if[^%w_]")
-                                or sLook:match("^%s*if$") then
-                                    goto skip_keyword
-                                end
-                            end
-
-                            -- emit keyword
-                            emit(sKw)
-                            nPos = nPos + nKwLen
-
-                            -- preserve whitespace after keyword
-                            while nPos <= nLen do
-                                local cW = sCode:sub(nPos, nPos)
-                                if cW == ' ' or cW == '\t'
-                                or cW == '\n' or cW == '\r' then
-                                    emit(cW);  nPos = nPos + 1
-                                else
-                                    break
-                                end
-                            end
-
-                            -- >>> INJECT <<<
-                            emit("__pc();")
-                            nInjections = nInjections + 1
-                            bInjected = true
-                            break
+                -- === "function(" — inject at function entry ===
+                if not bInjected
+                   and nPos + 7 <= nLen
+                   and sCode:sub(nPos, nPos + 7) == "function"
+                   and not isIdChar(sCode:sub(nPos + 8, nPos + 8) or "") then
+                    emit("function")
+                    nPos = nPos + 8
+                    -- Skip to closing ) of parameter list
+                    local nParen = 0
+                    local bFoundOpen = false
+                    while nPos <= nLen do
+                        local ch = sCode:sub(nPos, nPos)
+                        emit(ch); nPos = nPos + 1
+                        if ch == '(' then
+                            nParen = nParen + 1; bFoundOpen = true
+                        elseif ch == ')' then
+                            nParen = nParen - 1
+                            if nParen <= 0 and bFoundOpen then break end
                         end
                     end
-                    ::skip_keyword::
-                end  -- for keywords
+                    -- Skip whitespace after )
+                    while nPos <= nLen do
+                        local cW = sCode:sub(nPos, nPos)
+                        if cW == ' ' or cW == '\t'
+                           or cW == '\n' or cW == '\r' then
+                            emit(cW); nPos = nPos + 1
+                        else break end
+                    end
+                    emit(sCheckName .. "();")
+                    nInjections = nInjections + 1
+                    bInjected = true
+                end
+
+                -- === do / then / repeat / else ===
+                if not bInjected then
+                    for _, sKw in ipairs({"repeat", "then", "else", "do"}) do
+                        local nKwLen = #sKw
+                        if nPos + nKwLen - 1 <= nLen
+                           and sCode:sub(nPos, nPos + nKwLen - 1) == sKw then
+                            local cAfter = (nPos + nKwLen <= nLen)
+                                and sCode:sub(nPos + nKwLen, nPos + nKwLen)
+                                or ""
+                            if not isIdChar(cAfter) then
+                                -- Guard: "else" before "if" = elseif
+                                if sKw == "else" then
+                                    local sLook = sCode:sub(nPos + nKwLen)
+                                    if sLook:match("^%s*if[^%w_]")
+                                    or sLook:match("^%s*if$") then
+                                        goto skip_keyword
+                                    end
+                                end
+                                emit(sKw); nPos = nPos + nKwLen
+                                -- Preserve whitespace
+                                while nPos <= nLen do
+                                    local cW = sCode:sub(nPos, nPos)
+                                    if cW == ' ' or cW == '\t'
+                                    or cW == '\n' or cW == '\r' then
+                                        emit(cW); nPos = nPos + 1
+                                    else break end
+                                end
+                                emit(sCheckName .. "();")
+                                nInjections = nInjections + 1
+                                bInjected = true
+                                break
+                            end
+                        end
+                        ::skip_keyword::
+                    end
+                end
             end
 
             if not bInjected then
-                emit(c);  nPos = nPos + 1
+                emit(c); nPos = nPos + 1
             end
         end
-    end  -- while
+    end
 
     oPreempt.nTotalInstrumented = oPreempt.nTotalInstrumented + 1
     oPreempt.nTotalInjections   = oPreempt.nTotalInjections + nInjections
 
-    return table.concat(tOut), nInjections
+    if nInjections == 0 then
+        return sCode, 0
+    end
+
+    local sPrefix = "local " .. sCheckName .. "=__pc;"
+    return sPrefix .. table.concat(tOut), nInjections
 end
 
 -- =============================================

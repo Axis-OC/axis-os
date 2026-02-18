@@ -27,13 +27,13 @@
 [info] [PM] DKMS process started as PID 3
 [info] [PM] Loading TTY Driver explicitly...
 [info] [PM] Scanning components...
-[info] [PM] Loading driver for internet
 [info] [PM] Loading driver for filesystem
-[info] [PM] Loading driver for data
-[info] [PM] Loading driver for computer
 [info] [PM] Loading driver for eeprom
 [info] [PM] Loading driver for filesystem
+[info] [PM] Loading driver for data
 [info] [PM] Loading driver for filesystem
+[info] [PM] Loading driver for internet
+[info] [PM] Loading driver for computer
 [info] [PM] Processing fstab...
 [info] [DKMS] Ring 1 Driver Manager starting.
 [info] [DKMS] Ring 1 Driver Manager starting.
@@ -55,34 +55,34 @@
 [info] [DKMS] PID 4 registered for interrupt 'scroll'
 [info] [DKMS] PID 4 registered for interrupt 'clipboard'
 [info] [DKMS] Loaded 'AxisTTY' (PID 4)
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 5 ('/drivers/filesystem.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisFSStub' (PID 5)
+[info] [DKMS] Loading: /drivers/eeprom.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 6 ('/drivers/eeprom.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisEEPROMStub' (PID 6)
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 7 ('/drivers/filesystem.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisFSStub' (PID 7)
+[info] [DKMS] Loading: /drivers/data.sys.lua
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 8 ('/drivers/filesystem.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisFSStub' (PID 8)
 [info] [DKMS] Loading: /drivers/internet.sys.lua
 [info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 5 ('/drivers/internet.sys.lua') at Ring 2
+[info] Creating process 9 ('/drivers/internet.sys.lua') at Ring 2
 [info] [DKMS] Device '\Device\Net0' created.
 [info] [DKMS] Registered in @VT\DEV\VIRT_002
 [info] [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
-[info] [DKMS] Loaded 'AxisNet' (PID 5)
-[info] [DKMS] Loading: /drivers/filesystem.sys.lua
-[info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 6 ('/drivers/filesystem.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisFSStub' (PID 6)
-[info] [DKMS] Loading: /drivers/data.sys.lua
+[info] [DKMS] Loaded 'AxisNet' (PID 9)
 [info] [DKMS] Loading: /drivers/computer.sys.lua
 [info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 7 ('/drivers/computer.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisComputerStub' (PID 7)
-[info] [DKMS] Loading: /drivers/eeprom.sys.lua
-[info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 8 ('/drivers/eeprom.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisEEPROMStub' (PID 8)
-[info] [DKMS] Loading: /drivers/filesystem.sys.lua
-[info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 9 ('/drivers/filesystem.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisFSStub' (PID 9)
-[info] [DKMS] Loading: /drivers/filesystem.sys.lua
-[info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 10 ('/drivers/filesystem.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisFSStub' (PID 10)
+[info] Creating process 10 ('/drivers/computer.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisComputerStub' (PID 10)
 [info] [DD] Error: No device object for '/dev/ringlog' (original: /dev/ringlog')
 [info] [PM] Loading RingFS driver...
 [info] [DKMS] Loading: /drivers/ringfs.sys.lua
@@ -93,9 +93,11 @@
 [info] [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
 [info] [DKMS] Loaded 'AxisRingFS' (PID 11)
 [info] [PM] Initializing log system on /dev/ringlog
+[info] [PM] Log rotate: deleted /log/syslog_004.log
+[info] [PM] Log rotate: deleted /vbl/syslog_004.vbl
 [info] [PM] Log rotation active:
-[info] [PM]   .log -> /log/syslog_001.log
-[info] [PM]   .vbl -> /vbl/syslog_001.vbl
+[info] [PM]   .log -> /log/syslog_009.log
+[info] [PM]   .vbl -> /vbl/syslog_009.vbl
 [info] [PM] Ringfs handle opened (persistent).
 [info] [PM] Log system initialized.
 [info] [PM] Processing autoload...
@@ -110,52 +112,5 @@
 [info] [PM] Spawning /bin/init.lua...
 [info] Creating process 13 ('/bin/init.lua') at Ring 3
 [info] [PM] Init spawned as PID 13
-[info] Creating process 14 ('/bin/sh.lua') at Ring 3
-[info] Creating process 15 ('/usr/commands/axfs.lua') at Ring 3
-[info] Process 15 exited normally.
-[info] Creating process 16 ('/usr/commands/axfs.lua') at Ring 3
-[info] Process 16 exited normally.
-[info] Creating process 17 ('/usr/commands/insmod.lua') at Ring 3
-[info] Process 17 exited normally.
-[info] Creating process 18 ('/usr/commands/insmod.lua') at Ring 3
-[info] Process 18 exited normally.
-[info] Creating process 19 ('/usr/commands/axfs.lua') at Ring 3
-[info] Process 19 exited normally.
-[info] Creating process 20 ('/usr/commands/axfs.lua') at Ring 3
-[info] Process 20 exited normally.
-[info] Creating process 21 ('/usr/commands/axfs.lua') at Ring 3
-[info] Process 21 exited normally.
-[info] Creating process 22 ('/usr/commands/vi.lua') at Ring 3
-[info] Process 22 exited normally.
-[info] Creating process 23 ('/usr/commands/preempt_test.lua') at Ring 3
-[info] Process 23 exited normally.
-[info] Creating process 33 ('/usr/commands/xvi.lua') at Ring 3
-[info] Process 33 exited normally.
-[info] Creating process 34 ('/usr/commands/ls.lua') at Ring 3
-[info] Process 34 exited normally.
-[info] Creating process 35 ('/usr/commands/reboot.lua') at Ring 3
-[info] Process 35 exited normally.
-[info] Creating process 36 ('/usr/commands/shutdown.lua') at Ring 3
-[fail] Ring violation: PID 36 (Ring 3) tried to call computer_shutdown
-[info] Creating process 37 ('/usr/commands/ls.lua') at Ring 3
-[info] Process 37 exited normally.
-[info] Creating process 38 ('/usr/commands/ls.lua') at Ring 3
-[info] Process 38 exited normally.
-[info] Creating process 39 ('/usr/commands/ls.lua') at Ring 3
-[info] Process 39 exited normally.
-[info] Creating process 40 ('/usr/commands/echo.lua') at Ring 3
-[info] Process 40 exited normally.
-[info] Creating process 41 ('/usr/commands/echo.lua') at Ring 3
-[info] Process 41 exited normally.
-[info] Creating process 42 ('/usr/commands/id.lua') at Ring 3
-[info] Process 42 exited normally.
-[info] Creating process 43 ('/usr/commands/sched.lua') at Ring 3
-[info] Process 43 exited normally.
-[info] Creating process 44 ('/usr/commands/sched.lua') at Ring 3
-[info] Process 44 exited normally.
-[info] Creating process 45 ('/usr/commands/sched.lua') at Ring 3
-[info] Process 45 exited normally.
-[info] Creating process 46 ('/usr/commands/sched.lua') at Ring 3
-[info] Process 46 exited normally.
-[info] Creating process 47 ('/usr/commands/sched.lua') at Ring 3
-[info] Process 47 exited normally.
+[fail] !!! KERNEL ALERT: PROCESS 13 CRASHED !!!
+[fail] Crash reason: /bin/init.lua:16: attempt to call a nil value (upvalue '_pc_74ffd363')

@@ -259,6 +259,13 @@ end
 ------------------------------------------------
 
 __logger_init()
+do
+    local sMT = getmetatable("")
+    if sMT then
+        sMT.__metatable = "string"   -- locks the metatable
+    end
+end
+
 kprint("info", "AxisOS Xen XKA v0.32-alpha1 starting...")
 kprint("info", "Copyright (C) 2025 AxisOS")
 kprint("none", "")
@@ -610,6 +617,14 @@ function kernel.create_sandbox(nPid, nRing)
   local tUserGlobals = {}   -- user-writable globals
   local tSandbox     = {}   -- EMPTY proxy — MUST never gain direct keys
 
+  local tSafeComputer = {
+    uptime      = computer.uptime,
+    freeMemory  = computer.freeMemory,
+    totalMemory = computer.totalMemory,
+    address     = computer.address,
+    tmpAddress  = computer.tmpAddress,
+  }
+
   -- Capture real functions before any user code can replace them.
   -- These upvalues are used inside __pc() and can never be reached
   -- or modified by user code.
@@ -676,51 +691,58 @@ function kernel.create_sandbox(nPid, nRing)
 
   -- ---- Preemptive checkpoint: __pc() ----
 
+-- Inside create_sandbox, in the tProtected.load definition:
+
   if g_oPreempt and nRing >= 2.5 then
-    local nPcCounter   = 0
-    local nPcLastYield = fRealUptime()
-    local nPcQuantum   = g_oPreempt.DEFAULT_QUANTUM
-    local nPcInterval  = g_oPreempt.CHECK_INTERVAL
+      local nPcCounter   = 0
+      local nPcLastYield = fRealUptime()
+      local nPcQuantum   = g_oPreempt.DEFAULT_QUANTUM
+      local nPcInterval  = g_oPreempt.CHECK_INTERVAL
 
-    tProtected.__pc = function()
-      nPcCounter = nPcCounter + 1
-      if nPcCounter < nPcInterval then return end
-      nPcCounter = 0
-      -- Signal delivery
-      if g_oIpc then
-        local tProc = kernel.tProcessTable[nPid]
-        if tProc and tProc.tPendingSignals
-           and #tProc.tPendingSignals > 0 then
-          g_oIpc.DeliverSignals(nPid)
-          if tProc.status == "dead" then
-            fRealYield()
-            return
+      tProtected.__pc = function()
+          nPcCounter = nPcCounter + 1
+          if nPcCounter < nPcInterval then return end
+          nPcCounter = 0
+          if g_oIpc then
+              local tProc = kernel.tProcessTable[nPid]
+              if tProc and tProc.tPendingSignals
+                and #tProc.tPendingSignals > 0 then
+                  g_oIpc.DeliverSignals(nPid)
+                  if tProc.status == "dead" then
+                      fRealYield()
+                      return
+                  end
+              end
           end
-        end
+          local nNow = fRealUptime()
+          if nNow - nPcLastYield >= nPcQuantum then
+              fRealYield()
+              nPcLastYield = fRealUptime()
+          end
       end
-      -- Time quantum check (uses captured upvalue, not global)
-      local nNow = fRealUptime()
-      if nNow - nPcLastYield >= nPcQuantum then
-        fRealYield()
-        nPcLastYield = fRealUptime()
-      end
-    end
 
-    -- Wrapped load() — instruments source and forces text mode
-    local fKernelLoad = load
-    tProtected.load = function(sChunk, sName, sMode, _tUserEnv)
-      if type(sChunk) == "string" then
-        local sInst, nInj = g_oPreempt.instrument(
-            sChunk, sName or "[dynamic]")
-        if nInj > 0 then sChunk = sInst end
+      local fKernelLoad = load
+      tProtected.load = function(sChunk, sName, sMode, _tUserEnv)
+          if type(sChunk) == "function" then
+              local tParts = {}
+              while true do
+                  local sPart = sChunk()
+                  if not sPart or sPart == "" then break end
+                  tParts[#tParts + 1] = sPart
+              end
+              sChunk = table.concat(tParts)
+          end
+          if type(sChunk) ~= "string" then
+              return nil, "string expected"
+          end
+          local sInst, nInj = g_oPreempt.instrument(
+              sChunk, sName or "[dynamic]")
+          if nInj > 0 then sChunk = sInst end
+          return fKernelLoad(sChunk, sName, "t", tSandbox)
       end
-      -- Force "t" (text mode) — prevents loading raw bytecode
-      -- which would skip instrumentation entirely.
-      return fKernelLoad(sChunk, sName, "t", tLoadEnv or tSandbox)
-    end
   else
-    tProtected.__pc  = function() end   -- no-op for system rings
-    tProtected.load  = load
+      tProtected.__pc = function() end
+      tProtected.load = load
   end
 
   -- ---- print / io ----
@@ -754,7 +776,7 @@ function kernel.create_sandbox(nPid, nRing)
   -- =============================================
 
   local tSafeGlobals = {
-    computer  = computer,
+    computer  = tSafeComputer,
     unicode   = unicode,
     bit32     = bit32,
     checkArg  = checkArg,
