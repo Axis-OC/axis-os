@@ -40,6 +40,7 @@ function tSyscallHandlers.dkms_create_device(nCallerPid, sDeviceName)
   end
   if not pDriverObject then return nil, tStatus.STATUS_ACCESS_DENIED end
   if g_tDeviceTree[sDeviceName] then return nil, tStatus.STATUS_DEVICE_ALREADY_EXISTS end
+
   local pDeviceObject = tDKStructs.fNewDeviceObject()
   pDeviceObject.pDriverObject = pDriverObject
   pDeviceObject.sDeviceName = sDeviceName
@@ -47,6 +48,32 @@ function tSyscallHandlers.dkms_create_device(nCallerPid, sDeviceName)
   pDriverObject.pDeviceObject = pDeviceObject
   g_tDeviceTree[sDeviceName] = pDeviceObject
   syscall("kernel_log", "[DKMS] Device '" .. sDeviceName .. "' created.")
+
+  -- === REGISTRY: register device ===
+  local tInfo = pDriverObject.tDriverInfo or {}
+  local bPhysical = (tInfo.sDriverType == tDKStructs.DRIVER_TYPE_CMD)
+  local sClass = bPhysical and "physical" or "virtual"
+  local sDevId = syscall("reg_alloc_device_id", sClass)
+
+  if sDevId then
+    local sRegPath = "@VT\\DEV\\" .. sDevId
+    syscall("reg_create_key", sRegPath)
+    syscall("reg_set_value", sRegPath, "DeviceName",   sDeviceName,                   "STR")
+    syscall("reg_set_value", sRegPath, "DriverName",    tInfo.sDriverName or "Unknown", "STR")
+    syscall("reg_set_value", sRegPath, "DriverPID",     nCallerPid,                     "NUM")
+    syscall("reg_set_value", sRegPath, "DriverType",    tInfo.sDriverType or "Unknown", "STR")
+    syscall("reg_set_value", sRegPath, "DriverVersion", tInfo.sVersion or "N/A",        "STR")
+    syscall("reg_set_value", sRegPath, "DeviceClass",   sClass,                         "STR")
+    syscall("reg_set_value", sRegPath, "Status",        "online",                       "STR")
+    syscall("reg_set_value", sRegPath, "Ring",          2,                              "NUM")
+
+    -- store the registry ID in the device object for later cleanup
+    pDeviceObject.sRegistryId = sDevId
+    pDeviceObject.sRegistryPath = sRegPath
+
+    syscall("kernel_log", "[DKMS] Registered in @VT\\DEV\\" .. sDevId)
+  end
+
   return pDeviceObject, tStatus.STATUS_SUCCESS
 end
 
@@ -54,14 +81,31 @@ function tSyscallHandlers.dkms_create_symlink(nCallerPid, sLinkName, sDeviceName
   if not g_tDeviceTree[sDeviceName] then return tStatus.STATUS_NO_SUCH_DEVICE end
   g_tSymbolicLinks[sLinkName] = sDeviceName
   syscall("kernel_log", "[DKMS] Symlink '" .. sLinkName .. "' -> '" .. sDeviceName .. "' created.")
+
+  -- === REGISTRY: store symlink on the device node ===
+  local pDev = g_tDeviceTree[sDeviceName]
+  if pDev and pDev.sRegistryPath then
+    syscall("reg_set_value", pDev.sRegistryPath, "Symlink", sLinkName, "STR")
+    -- extract friendly name from symlink: /dev/tty → tty
+    local sFriendly = sLinkName:match("^/dev/(.+)$") or sLinkName
+    syscall("reg_set_value", pDev.sRegistryPath, "FriendlyName", sFriendly, "STR")
+  end
+
   return tStatus.STATUS_SUCCESS
 end
 
 function tSyscallHandlers.dkms_delete_device(nCallerPid, sDeviceName)
     local pDeviceObject = g_tDeviceTree[sDeviceName]
     if not pDeviceObject then return tStatus.STATUS_NO_SUCH_DEVICE end
+
+    -- === REGISTRY: mark offline then delete ===
+    if pDeviceObject.sRegistryPath then
+        syscall("reg_set_value", pDeviceObject.sRegistryPath, "Status", "offline", "STR")
+        syscall("reg_delete_key", pDeviceObject.sRegistryPath)
+    end
+
     g_tDeviceTree[sDeviceName] = nil
-    pDeviceObject.pDriverObject.pDeviceObject = nil 
+    pDeviceObject.pDriverObject.pDeviceObject = nil
     return tStatus.STATUS_SUCCESS
 end
 
@@ -189,6 +233,18 @@ function load_driver(sDriverPath, tDriverEnv)
               if nEntryStatus == tStatus.STATUS_SUCCESS and pInitializedDriverObject then
                   syscall("kernel_log", "[DKMS] Loaded '" .. tDriverInfo.sDriverName .. "' (PID " .. nPid .. ")")
                   g_tDriverRegistry[sDriverPath] = pInitializedDriverObject
+                  -- === REGISTRY: register driver ===
+                    local sDrvRegPath = "@VT\\DRV\\" .. tDriverInfo.sDriverName
+                    syscall("reg_create_key", sDrvRegPath)
+                    syscall("reg_set_value", sDrvRegPath, "Path",         sDriverPath,                     "STR")
+                    syscall("reg_set_value", sDrvRegPath, "PID",          nPid,                            "NUM")
+                    syscall("reg_set_value", sDrvRegPath, "Type",         tDriverInfo.sDriverType or "?",  "STR")
+                    syscall("reg_set_value", sDrvRegPath, "LoadPriority", tDriverInfo.nLoadPriority or 0,  "NUM")
+                    syscall("reg_set_value", sDrvRegPath, "Version",      tDriverInfo.sVersion or "N/A",   "STR")
+                    syscall("reg_set_value", sDrvRegPath, "Status",       "loaded",                        "STR")
+                    if tDriverInfo.sSupportedComponent then
+                        syscall("reg_set_value", sDrvRegPath, "Component", tDriverInfo.sSupportedComponent, "STR")
+                    end
                   return tStatus.STATUS_SUCCESS
               else
                   syscall("kernel_log", "[DKMS] Err: DriverEntry failed: " .. tostring(nEntryStatus))
@@ -240,11 +296,11 @@ while true do
         syscall("signal_send", tData.sender_pid, "syscall_return", ret1, ret2)
       end
       
-elseif sSignalName == "vfs_io_request" then
+elseif sSignalName == "vfs_io_request" then 
       local pIrp = p1
       if pIrp and type(pIrp) == "table" then
           g_tPendingIrps[pIrp.nSenderPid] = pIrp
-          local nDispatchStatus = oDispatcher.DispatchIrp(pIrp, g_tDeviceTree)
+          local nDispatchStatus = oDispatcher.DispatchIrp(pIrp, g_tDeviceTree, g_tSymbolicLinks)
           
           if pIrp.nMajorFunction == 0x00 then -- IRP_MJ_CREATE
              local pDevice = g_tDeviceTree[pIrp.sDeviceName]

@@ -33,45 +33,35 @@ local function print_usage()
 end
 
 local function download_file(sUrl, sDest)
-  local hNet = fs.open("/dev/net", "w")
-  if not hNet then return false, "No network device" end
-  
-  fs.write(hNet, sUrl)
-  fs.close(hNet)
-  
-  local hNetRead = fs.open("/dev/net", "r")
-  if not hNetRead then return false, "Connection failed" end
-  
-  -- check for 404 (hacky)
-  local sCheck = fs.read(hNetRead, 12)
-  if sCheck == "404: Not Fou" then
-     fs.close(hNetRead)
-     return false, "404 Not Found"
+  local http = require("http")
+
+  local stream, sErr = http.open(sUrl)
+  if not stream then return false, sErr end
+
+  -- check for 404 before writing
+  if stream.code == 404 then
+    stream:close()
+    return false, "404 Not Found"
   end
 
   local hFile = fs.open(sDest, "w")
-  if not hFile then 
-     fs.close(hNetRead)
-     return false, "Write permission denied" 
+  if not hFile then
+    stream:close()
+    return false, "Write permission denied"
   end
-  
-  if sCheck then fs.write(hFile, sCheck) end
-  
-  local nBytes = #sCheck
-  local nChunkSize = 2048
-  
+
+  local nBytes = 0
   while true do
-     local sChunk = fs.read(hNetRead, nChunkSize)
-     if not sChunk or #sChunk == 0 then break end
-     fs.write(hFile, sChunk)
-     nBytes = nBytes + #sChunk
-     -- update ui
-     local sSizeStr = string.format("%.1f KB", nBytes / 1024)
-     io.write("\r\27[K :: Downloading... " .. sSizeStr)
+    local sChunk = stream:read(2048)
+    if not sChunk then break end
+    fs.write(hFile, sChunk)
+    nBytes = nBytes + #sChunk
+    local sSizeStr = string.format("%.1f KB", nBytes / 1024)
+    io.write("\r\27[K :: Downloading... " .. sSizeStr)
   end
-  
-  fs.close(hNetRead)
+
   fs.close(hFile)
+  stream:close()
   io.write("\n")
   return true
 end

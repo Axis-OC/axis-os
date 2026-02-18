@@ -799,7 +799,7 @@ local function print_summary()
 
   print("")
   field("Tool", "smltr_debug v1.1.0")
-  field("OS", "AxisOS Xen XKA v0.3")
+  field("OS", "AxisOS Xen XKA v0.32-alpha1")
   field("Security", "sMLTR + WDM ObManager handles")
   print("")
 end
@@ -812,7 +812,7 @@ print("")
 print(C.CYAN .. "  ==========================================================" .. C.RESET)
 print(C.CYAN .. "  sMLTR VERBOSE DEBUG PROGRAM v1.1.0" .. C.RESET)
 print(C.CYAN .. "  Synapse Message Layer Token Randomization Diagnostics" .. C.RESET)
-print(C.CYAN .. "  AxisOS Xen XKA v0.3" .. C.RESET)
+print(C.CYAN .. "  AxisOS Xen XKA v0.32-alpha1" .. C.RESET)
 print(C.CYAN .. "  ==========================================================" .. C.RESET)
 
 local nStartTime = uptime()

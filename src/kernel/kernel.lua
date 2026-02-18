@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.3
+-- AxisOS Xen XKA v0.32-alpha1
 -- v3: Object Handles, sMLTR (Synapse Message Layer Token Randomization),
 --     Ring 3 multitasking improvements.
 --
@@ -39,6 +39,7 @@ local tBootArgs = boot_args or {}
 
 -- Object Manager (loaded at boot from /lib/ob_manager.lua)
 local g_oObManager = nil
+local g_oRegistry = nil
 
 -- Color constants
 local C_WHITE  = 0xFFFFFF
@@ -241,7 +242,7 @@ end
 ------------------------------------------------
 
 __logger_init()
-kprint("info", "AxisOS Xen XKA v0.3 starting...")
+kprint("info", "AxisOS Xen XKA v0.32-alpha1 starting...")
 kprint("info", "Copyright (C) 2025 AxisOS")
 kprint("none", "")
 
@@ -306,6 +307,32 @@ local function __load_ob_manager()
     return oResult
   else
     kprint("fail", "Failed to init ob_manager: " .. tostring(oResult))
+    return nil
+  end
+end
+
+local function __load_registry()
+  local sCode, sErr = primitive_load("/lib/registry.lua")
+  if not sCode then
+    kprint("warn", "Registry not found at /lib/registry.lua: " .. tostring(sErr))
+    return nil
+  end
+  local tRegEnv = {
+    string = string, math = math, os = os,
+    pairs = pairs, type = type, tostring = tostring, table = table,
+    setmetatable = setmetatable, pcall = pcall, ipairs = ipairs,
+    raw_computer = raw_computer,
+  }
+  local fChunk, sLoadErr = load(sCode, "@registry", "t", tRegEnv)
+  if not fChunk then
+    kprint("fail", "Failed to parse registry: " .. tostring(sLoadErr))
+    return nil
+  end
+  local bOk, oResult = pcall(fChunk)
+  if bOk and type(oResult) == "table" then
+    return oResult
+  else
+    kprint("fail", "Failed to init registry: " .. tostring(oResult))
     return nil
   end
 end
@@ -1017,6 +1044,102 @@ kernel.tSyscallTable["ob_dump_directory"] = {
     allowed_rings = {0, 1}
 }
 
+-- ==========================================
+-- REGISTRY SYSCALLS (@VT)
+-- ==========================================
+
+kernel.tSyscallTable["reg_create_key"] = {
+    func = function(nPid, sPath)
+        if not g_oRegistry then return false, "Registry not loaded" end
+        return g_oRegistry.CreateKey(sPath)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+kernel.tSyscallTable["reg_delete_key"] = {
+    func = function(nPid, sPath)
+        if not g_oRegistry then return false end
+        -- protect root hives
+        if sPath == "@VT" or sPath == "@VT\\DEV" or sPath == "@VT\\DRV" or sPath == "@VT\\SYS" then
+            return false, "Cannot delete root hive"
+        end
+        return g_oRegistry.DeleteKey(sPath)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+kernel.tSyscallTable["reg_key_exists"] = {
+    func = function(nPid, sPath)
+        if not g_oRegistry then return false end
+        return g_oRegistry.KeyExists(sPath)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["reg_set_value"] = {
+    func = function(nPid, sPath, sName, vValue, sType)
+        if not g_oRegistry then return false end
+        return g_oRegistry.SetValue(sPath, sName, vValue, sType)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+kernel.tSyscallTable["reg_get_value"] = {
+    func = function(nPid, sPath, sName)
+        if not g_oRegistry then return nil end
+        return g_oRegistry.GetValue(sPath, sName)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["reg_delete_value"] = {
+    func = function(nPid, sPath, sName)
+        if not g_oRegistry then return false end
+        return g_oRegistry.DeleteValue(sPath, sName)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+kernel.tSyscallTable["reg_enum_keys"] = {
+    func = function(nPid, sPath)
+        if not g_oRegistry then return {} end
+        return g_oRegistry.EnumKeys(sPath)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["reg_enum_values"] = {
+    func = function(nPid, sPath)
+        if not g_oRegistry then return {} end
+        return g_oRegistry.EnumValues(sPath)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["reg_query_info"] = {
+    func = function(nPid, sPath)
+        if not g_oRegistry then return nil end
+        return g_oRegistry.QueryInfo(sPath)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["reg_dump_tree"] = {
+    func = function(nPid, sPath, nMaxDepth)
+        if not g_oRegistry then return {} end
+        return g_oRegistry.DumpTree(sPath, nMaxDepth)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["reg_alloc_device_id"] = {
+    func = function(nPid, sClass)
+        if not g_oRegistry then return nil end
+        return g_oRegistry.AllocateDeviceId(sClass)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
 
 -- ==========================================
 -- sMLTR SYSCALLS
@@ -1210,6 +1333,15 @@ else
     kprint("warn", "Object Manager not available. Running without handle security.")
 end
 kprint("ok", "sMLTR (Synapse Message Layer Token Randomisation) active.")
+
+-- Load Virtual Registry
+g_oRegistry = __load_registry()
+if g_oRegistry then
+    g_oRegistry.InitSystem()
+    kprint("ok", "Virtual Registry (@VT) initialised.")
+else
+    kprint("warn", "Virtual Registry not available.")
+end
 
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")

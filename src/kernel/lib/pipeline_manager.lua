@@ -380,9 +380,12 @@ end
 -- INTERNAL VFS OPS (used by PM itself, no handle tokens)
 -- ==========================================
 local function _resolveDeviceName(sPath)
+    -- Keep hardcoded fast-path for TTY (fire-and-forget writes)
     if sPath == "/dev/tty"  then return "\\Device\\TTY0" end
     if sPath == "/dev/gpu0" then return "\\Device\\Gpu0" end
-    return "\\Device" .. sPath:sub(5):gsub("/", "\\")
+    -- Everything else: pass the VFS path directly.
+    -- DKMS resolves it via its symlink table.
+    return sPath
 end
 
 local function _sendDeviceCreate(sDevName)
@@ -803,6 +806,18 @@ local function __scandrvload()
         syscall("signal_send", nDkmsPid, "load_driver_for_component", sCtype, sAddr)
     end
   end
+
+  -- === REGISTRY: enumerate hardware ===
+  if bListOk and tCompList then
+    for sAddr, sCtype in pairs(tCompList) do
+      local sHwPath = "@VT\\SYS\\HARDWARE\\" .. sCtype .. "_" .. sAddr:sub(1, 6)
+      syscall("reg_create_key", sHwPath)
+      syscall("reg_set_value", sHwPath, "Address",       sAddr,  "STR")
+      syscall("reg_set_value", sHwPath, "ComponentType",  sCtype, "STR")
+      syscall("reg_set_value", sHwPath, "ShortAddress",   sAddr:sub(1, 8), "STR")
+    end
+  end
+
 end
 
 
@@ -894,6 +909,24 @@ else
 end
 
 wait_with_throbber("Waiting for system stabilization...", 1.0)
+-- === REGISTRY: populate system info ===
+syscall("kernel_log", "[PM] Populating @VT\\SYS...")
+pcall(function()
+    if g_tSysConfig then
+        syscall("reg_set_value", "@VT\\SYS\\CONFIG", "Hostname",
+                g_tSysConfig.hostname or "AxisBox", "STR")
+        if g_tSysConfig.logging then
+            for k, v in pairs(g_tSysConfig.logging) do
+                syscall("reg_set_value", "@VT\\SYS\\CONFIG",
+                        "logging." .. k, tostring(v), "STR")
+            end
+        end
+    end
+    syscall("reg_set_value", "@VT\\SYS\\BOOT", "SafeMode",
+            env.SAFE_MODE and "true" or "false", "STR")
+    syscall("reg_set_value", "@VT\\SYS\\BOOT", "InitPath",
+            env.INIT_PATH or "/bin/init.lua", "STR")
+end)
 
 syscall("kernel_log", "[PM] Silence on deck. Handing off to userspace.")
 syscall("kernel_set_log_mode", false)

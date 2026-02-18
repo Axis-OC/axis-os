@@ -1,0 +1,12 @@
+-- /etc/hosts
+-- Local hostname resolution. Checked before passing URLs to the internet card.
+-- Format: { hostname = target }
+-- target can be an IP or another hostname (URL rewriting).
+return {
+  ["localhost"]       = "127.0.0.1",
+  ["axis.local"]      = "127.0.0.1",
+  -- Redirect examples:
+  -- ["old-api.example.com"] = "new-api.example.com",
+  -- Block by pointing to nothing:
+  -- ["ads.example.com"] = "0.0.0.0",
+}

@@ -47,10 +47,19 @@ fLoadPasswd()
 
 oFs.write(hStdout, "\f")
 
+
 -- Replace the main loop in init.lua:
 while true do
-  io.write("\nWelcome to AxisOS v0.3\n")
-  io.write("Kernel 0.21 on " .. sHostname .. "\n\n")
+  io.write("    _        _          ___   ____  ",
+ "   / \\  __ _(_)_______/ _ \\/ ___| ",
+ "  / _ \\ \\ \\/ / / __| | | \\___ \\ ",
+ " / ___ \\ >  <| \\__ \\ |_| |___) |",
+ "/_/   \\_/_/\\_\\_|___/\\___/|____/ ")
+
+  io.write("AxisOS v0.32-alpha1\n")
+  io.write("")
+  io.write("\n________________________________________________\n\n")
+  io.write("XEN XKA v0.32A1 on " .. sHostname .. "\n\n")
   
   io.write(sHostname .. " login: ")   -- No buffering, appears immediately
   

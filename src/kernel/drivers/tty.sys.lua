@@ -512,6 +512,41 @@ local function processKeyCooked(ext, ch, code)
   return false
 end
 
+local function processKeyRaw(ext, ch, code)
+  if not ext.pPendingReadIrp then return false end
+  local sResult = nil
+
+  if code == 28 then      sResult = "\n"       -- Enter
+  elseif code == 14 then  sResult = "\b"       -- Backspace
+  elseif code == 15 then  sResult = "\t"       -- Tab
+  elseif code == 1 then   sResult = "\27"      -- Escape
+  elseif code == 200 then sResult = "\27[A"    -- Up
+  elseif code == 208 then sResult = "\27[B"    -- Down
+  elseif code == 203 then sResult = "\27[D"    -- Left
+  elseif code == 205 then sResult = "\27[C"    -- Right
+  elseif code == 201 then sResult = "\27[5~"   -- PgUp
+  elseif code == 209 then sResult = "\27[6~"   -- PgDn
+  elseif code == 199 then sResult = "\27[H"    -- Home
+  elseif code == 207 then sResult = "\27[F"    -- End
+  elseif code == 46 and ch == 3 then sResult = "\3" -- Ctrl+C
+  elseif code == 59 then  sResult = "\27[11~"  -- F1
+  elseif code == 60 then  sResult = "\27[12~"  -- F2
+  elseif code == 61 then  sResult = "\27[13~"  -- F3
+  elseif code == 62 then  sResult = "\27[14~"  -- F4
+  elseif code == 63 then  sResult = "\27[15~"  -- F5
+  elseif ch > 0 and ch < 256 then
+    sResult = string.char(ch)
+  end
+
+  if sResult then
+    local pIrp = ext.pPendingReadIrp
+    ext.pPendingReadIrp = nil
+    oKMD.DkCompleteRequest(pIrp, 0, sResult)
+    return true
+  end
+  return false
+end
+
 -- =============================================
 -- 6. IRP HANDLERS
 -- =============================================
@@ -531,9 +566,14 @@ local function fRead(d, i)
   else
     p.pPendingReadIrp = i
     if p.sLineBuffer == nil then p.sLineBuffer = "" end
+    local sMode = p.sMode or "cooked"
     while p.tKeyBuffer and #p.tKeyBuffer > 0 and p.pPendingReadIrp do
       local tKey = table.remove(p.tKeyBuffer, 1)
-      processKeyCooked(p, tKey[1], tKey[2])
+      if sMode == "raw" then
+        processKeyRaw(p, tKey[1], tKey[2])
+      else
+        processKeyCooked(p, tKey[1], tKey[2])
+      end
     end
   end
 end
@@ -559,6 +599,19 @@ local function fDeviceControl(d, i)
   elseif sMethod == "scroll_end" then
     fSnapToBottom(ext)
     oKMD.DkCompleteRequest(i, 0)
+    elseif sMethod == "set_mode" then
+    local sNewMode = tArgs[1]
+    if sNewMode == "raw" or sNewMode == "cooked" then
+      ext.sMode = sNewMode
+      ext.sLineBuffer = ""
+      oKMD.DkCompleteRequest(i, 0)
+    else
+      oKMD.DkCompleteRequest(i, tStatus.STATUS_INVALID_PARAMETER)
+    end
+  elseif sMethod == "get_mode" then
+    oKMD.DkCompleteRequest(i, 0, ext.sMode or "cooked")
+  elseif sMethod == "get_size" then
+    oKMD.DkCompleteRequest(i, 0, {w = ext.nWidth, h = ext.nHeight})
   elseif sMethod == "get_scroll_info" then
     oKMD.DkCompleteRequest(i, 0, {
       offset = ext.nScrollOffset,
@@ -601,6 +654,7 @@ function DriverEntry(pObj)
   dev.pDeviceExtension.nCursorY    = 25
   dev.pDeviceExtension.tKeyBuffer  = {}
   dev.pDeviceExtension.sLineBuffer = ""
+  dev.pDeviceExtension.sMode = "cooked"
 
   if gpu then
     local _, p = oKMD.DkGetHardwareProxy(gpu)
@@ -651,23 +705,34 @@ while true do
       local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
       if ext then
         local ch, code = p3, p4
-        if ext.pPendingReadIrp then
-          processKeyCooked(ext, ch, code)
-        else
-          -- scroll keys work even without a pending read IRP
-          if code == 201 then
-            fScrollUp(ext, math.max(1, math.floor(ext.nHeight / 2)))
-          elseif code == 209 then
-            fScrollDown(ext, math.max(1, math.floor(ext.nHeight / 2)))
-          elseif code == 199 then
-            fScrollUp(ext, #ext.tScrollback)
-          elseif code == 207 then
-            fSnapToBottom(ext)
+        local sMode = ext.sMode or "cooked"
+
+        if sMode == "raw" then
+          -- RAW MODE: all keys go to app, mouse scroll still works for scrollback
+          if ext.pPendingReadIrp then
+            processKeyRaw(ext, ch, code)
           else
-            -- non-scroll key with no pending read: buffer it, snap to live
-            fSnapToBottom(ext)
             if not ext.tKeyBuffer then ext.tKeyBuffer = {} end
             table.insert(ext.tKeyBuffer, {ch, code})
+          end
+        else
+          -- COOKED MODE: scroll keys work, line editing
+          if ext.pPendingReadIrp then
+            processKeyCooked(ext, ch, code)
+          else
+            if code == 201 then
+              fScrollUp(ext, math.max(1, math.floor(ext.nHeight / 2)))
+            elseif code == 209 then
+              fScrollDown(ext, math.max(1, math.floor(ext.nHeight / 2)))
+            elseif code == 199 then
+              fScrollUp(ext, #ext.tScrollback)
+            elseif code == 207 then
+              fSnapToBottom(ext)
+            else
+              fSnapToBottom(ext)
+              if not ext.tKeyBuffer then ext.tKeyBuffer = {} end
+              table.insert(ext.tKeyBuffer, {ch, code})
+            end
           end
         end
       end
