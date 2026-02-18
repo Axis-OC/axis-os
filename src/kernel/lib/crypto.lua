@@ -90,4 +90,27 @@ function oCrypto.GenerateKeyPair(nBits)
     return pub, priv
 end
 
--- ECDSA
+-- ECDSA Sign (Tier 3)
+function oCrypto.Sign(sData, oPrivateKey)
+    if not g_oDataCard or g_nTier < 3 then return nil, "Tier 3 required" end
+    return g_oDataCard.ecdsa(sData, oPrivateKey)
+end
+
+-- ECDSA Verify (Tier 3)
+function oCrypto.Verify(sData, sSignature, oPublicKey)
+    if not g_oDataCard or g_nTier < 3 then return false end
+    return g_oDataCard.ecdsa(sData, oPublicKey, sSignature)
+end
+
+-- Key serialization (data card encode/decode)
+function oCrypto.SerializeKey(oKey)
+    if not g_oDataCard then return nil end
+    return g_oDataCard.encode64(g_oDataCard.serialize(oKey))
+end
+
+function oCrypto.DeserializeKey(sB64, sType)
+    if not g_oDataCard then return nil end
+    return g_oDataCard.deserialize(g_oDataCard.decode64(sB64), sType)
+end
+
+return oCrypto   -- ← THIS WAS MISSING

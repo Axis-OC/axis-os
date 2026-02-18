@@ -11,6 +11,12 @@ local oDispatcher = require("driverdispatch")
 
 syscall("kernel_log", "[DKMS] Ring 1 Driver Manager starting.")
 
+syscall("kernel_log", "[DKMS] Ring 1 Driver Manager starting.")
+
+-- Initialize security subsystem EAGERLY (before any driver loads)
+-- This prevents a stall during the first load_driver() call.
+oSec.Initialize()
+
 local g_tDriverRegistry = {}
 local g_tDeviceTree = {}
 local g_tSymbolicLinks = {}
@@ -401,12 +407,21 @@ elseif sSignalName == "load_driver_path_request" then
       ::continue::
 
 
+    elseif sSignalName == "os_event" and p1 == "clipboard" then
+        -- p2 = keyboard address, p3 = pasted text
+        for _, pDriver in pairs(g_tDriverRegistry) do
+            if pDriver.tDriverInfo.sDriverName == "AxisTTY" then
+                syscall("signal_send", pDriver.nDriverPid, "hardware_interrupt", "clipboard", p3)
+            end
+        end
+
     elseif sSignalName == "os_event" and p1 == "key_down" then
       for _, pDriver in pairs(g_tDriverRegistry) do
           if pDriver.tDriverInfo.sDriverName == "AxisTTY" then
               syscall("signal_send", pDriver.nDriverPid, "hardware_interrupt", "key_down", p2, p3, p4)
           end
       end
+
 
     elseif sSignalName == "os_event" and p1 == "scroll" then
         -- p2=screenAddr, p3=x, p4=y, p5=direction (1=up, -1=down)

@@ -717,8 +717,7 @@ function kernel.create_thread(fFunc, nParentPid)
   
   kernel.tPidMap[coThread] = nPid
   kernel.tRings[nPid] = tParentProcess.ring
-  
-  -- FIX: was InitProcess / InheritHandles (non-existent)
+
   if g_oObManager then
     g_oObManager.ObInitializeProcess(nPid)
     if nParentPid and nParentPid > 0 and kernel.tProcessTable[nParentPid] then
@@ -830,7 +829,7 @@ end
 -- Kernel (Ring 0)
 kernel.tSyscallTable["kernel_panic"] = {
   func = function(nPid, sReason) kernel.panic(sReason) end,
-  allowed_rings = {0}
+  allowed_rings = {0, 1, 2}
 }
 
 kernel.tSyscallTable["kernel_yield"] = {

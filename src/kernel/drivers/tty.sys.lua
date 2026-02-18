@@ -427,89 +427,237 @@ local function writeToScreen(pDeviceObject, sData)
   end
 end
 
+
+-- =============================================
+-- 4b. VISIBLE CURSOR
+-- GPU-only overlay — not baked into shadow buffer.
+-- Inverted block at current input position.
+-- =============================================
+
+local function fShowCursor(ext)
+  if not g_oGpuProxy then return end
+  if not ext.pPendingReadIrp then return end
+  if ext.nScrollOffset > 0 then return end
+
+  local nX, nY = ext.nCursorX, ext.nCursorY
+  if nX < 1 or nX > ext.nWidth or nY < 1 or nY > ext.nHeight then return end
+
+  -- Read char from shadow (cursor is GPU-only, never touches shadow)
+  local sChar = " "
+  local sRow = ext.tScreenRows[nY]
+  if sRow and nX <= #sRow then
+    local c = sRow:sub(nX, nX)
+    if c ~= "" then sChar = c end
+  end
+
+  -- Draw inverted block
+  g_oGpuProxy.setForeground(DEFAULT_BG)
+  g_oGpuProxy.setBackground(DEFAULT_FG)
+  g_oGpuProxy.set(nX, nY, sChar)
+
+  -- Restore write colors so subsequent output is normal
+  g_oGpuProxy.setForeground(ext.nCurrentFg)
+  g_oGpuProxy.setBackground(ext.nCurrentBg)
+
+  ext.bCursorShown  = true
+  ext.nCursorShownX = nX
+  ext.nCursorShownY = nY
+end
+
+local function fHideCursor(ext)
+  if not g_oGpuProxy or not ext.bCursorShown then return end
+  ext.bCursorShown = false
+
+  local nX = ext.nCursorShownX
+  local nY = ext.nCursorShownY
+  if not nX or not nY then return end
+  if nY < 1 or nY > ext.nHeight or nX < 1 or nX > ext.nWidth then return end
+
+  -- Restore from shadow buffer with correct per-cell colors
+  local sChar = " "
+  local sRow = ext.tScreenRows[nY]
+  if sRow and nX <= #sRow then
+    local c = sRow:sub(nX, nX)
+    if c ~= "" then sChar = c end
+  end
+
+  local nFg = (ext.tScreenFg[nY] and ext.tScreenFg[nY][nX]) or DEFAULT_FG
+  local nBg = (ext.tScreenBg[nY] and ext.tScreenBg[nY][nX]) or DEFAULT_BG
+
+  g_oGpuProxy.setForeground(nFg)
+  g_oGpuProxy.setBackground(nBg)
+  g_oGpuProxy.set(nX, nY, sChar)
+
+  -- Restore write colors
+  g_oGpuProxy.setForeground(ext.nCurrentFg)
+  g_oGpuProxy.setBackground(ext.nCurrentBg)
+end
+
 -- =============================================
 -- 5. KEY PROCESSING
 -- =============================================
 
 local function processKeyCooked(ext, ch, code)
-  -- scroll keys work always, even mid-input
-  if code == 201 then -- PgUp
-    fScrollUp(ext, math.max(1, math.floor(ext.nHeight / 2)))
-    return true
-  elseif code == 209 then -- PgDn
-    fScrollDown(ext, math.max(1, math.floor(ext.nHeight / 2)))
-    return true
-  elseif code == 199 then -- Home
-    fScrollUp(ext, #ext.tScrollback)
-    return true
-  elseif code == 207 then -- End
-    fSnapToBottom(ext)
-    return true
+  if code == 201 then
+    fScrollUp(ext, math.max(1, math.floor(ext.nHeight / 2))); return true
+  elseif code == 209 then
+    fScrollDown(ext, math.max(1, math.floor(ext.nHeight / 2))); return true
   end
 
-  -- any other key while scrolled: snap to live first
   fSnapToBottom(ext)
 
-  if not ext.pPendingReadIrp then return false end
+  if not ext.pPendingReadIrp then
+    if code == 199 then fScrollUp(ext, #ext.tScrollback); return true end
+    if code == 207 then fSnapToBottom(ext); return true end
+    return false
+  end
 
-  if code == 28 then -- Enter
-    local sResult = ext.sLineBuffer or ""
-    local pIrp = ext.pPendingReadIrp
-    ext.pPendingReadIrp = nil
-    ext.sLineBuffer = ""
-    oKMD.DkCompleteRequest(pIrp, 0, sResult)
-    writeToScreen(g_pDeviceObject, "\n")
-    return true
+  fHideCursor(ext)
 
-  elseif code == 14 then -- Backspace
-    if ext.sLineBuffer and #ext.sLineBuffer > 0 then
-      ext.sLineBuffer = ext.sLineBuffer:sub(1, -2)
-      writeToScreen(g_pDeviceObject, "\b")
+  if ext.nBufCursorPos == nil then
+    ext.nBufCursorPos = #(ext.sLineBuffer or "")
+  end
+
+  local sBuf = ext.sLineBuffer or ""
+  local nCur = ext.nBufCursorPos
+  local bHandled = false
+  local bIrpDone = false  -- true if IRP was completed (no cursor needed)
+
+  local function reRender(sText, nBacktrack)
+    if #sText > 0 then writeToScreen(g_pDeviceObject, sText) end
+    if nBacktrack > 0 then
+      writeToScreen(g_pDeviceObject, "\27[" .. nBacktrack .. "D")
     end
-    return true
+  end
 
-  elseif code == 15 then -- Tab
-    local sResult = "\t" .. (ext.sLineBuffer or "")
+  if code == 28 then -- ENTER
     local pIrp = ext.pPendingReadIrp
     ext.pPendingReadIrp = nil
     ext.sLineBuffer = ""
-    oKMD.DkCompleteRequest(pIrp, 0, sResult)
-    return true
+    ext.nBufCursorPos = 0
+    writeToScreen(g_pDeviceObject, "\n")
+    oKMD.DkCompleteRequest(pIrp, 0, sBuf)
+    bHandled = true; bIrpDone = true
 
-  elseif code == 46 and ch == 3 then -- Ctrl+C
+  elseif code == 14 then -- BACKSPACE
+    if nCur > 0 then
+      ext.sLineBuffer = sBuf:sub(1, nCur - 1) .. sBuf:sub(nCur + 1)
+      ext.nBufCursorPos = nCur - 1
+      writeToScreen(g_pDeviceObject, "\27[D")
+      local sTail = ext.sLineBuffer:sub(nCur) .. " "
+      reRender(sTail, #sTail)
+    end
+    bHandled = true
+
+  elseif code == 211 then -- DELETE
+    if nCur < #sBuf then
+      ext.sLineBuffer = sBuf:sub(1, nCur) .. sBuf:sub(nCur + 2)
+      local sTail = ext.sLineBuffer:sub(nCur + 1) .. " "
+      reRender(sTail, #sTail)
+    end
+    bHandled = true
+
+  elseif code == 203 then -- LEFT
+    if nCur > 0 then
+      ext.nBufCursorPos = nCur - 1
+      writeToScreen(g_pDeviceObject, "\27[D")
+    end
+    bHandled = true
+
+  elseif code == 205 then -- RIGHT
+    if nCur < #sBuf then
+      ext.nBufCursorPos = nCur + 1
+      writeToScreen(g_pDeviceObject, "\27[C")
+    end
+    bHandled = true
+
+  elseif code == 199 then -- HOME
+    if nCur > 0 then
+      writeToScreen(g_pDeviceObject, "\27[" .. nCur .. "D")
+      ext.nBufCursorPos = 0
+    end
+    bHandled = true
+
+  elseif code == 207 then -- END
+    local nToEnd = #sBuf - nCur
+    if nToEnd > 0 then
+      writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
+      ext.nBufCursorPos = #sBuf
+    end
+    bHandled = true
+
+  elseif code == 15 then -- TAB
+    local nToEnd = #sBuf - nCur
+    if nToEnd > 0 then
+      writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
+    end
+    local pIrp = ext.pPendingReadIrp
+    ext.pPendingReadIrp = nil
+    ext.sLineBuffer = ""
+    ext.nBufCursorPos = 0
+    oKMD.DkCompleteRequest(pIrp, 0, "\t" .. sBuf)
+    bHandled = true; bIrpDone = true
+
+  elseif code == 46 and ch == 3 then -- CTRL+C
     local pIrp = ext.pPendingReadIrp
     if pIrp then
       ext.pPendingReadIrp = nil
       ext.sLineBuffer = ""
+      ext.nBufCursorPos = 0
       oKMD.DkCompleteRequest(pIrp, 0, "\3")
       writeToScreen(g_pDeviceObject, "^C\n")
     end
-    return true
+    bHandled = true; bIrpDone = true
 
-  elseif code == 200 then -- Up arrow
-    local sResult = "\27[A" .. (ext.sLineBuffer or "")
+  elseif code == 200 then -- UP (history)
+    local nToEnd = #sBuf - nCur
+    if nToEnd > 0 then
+      writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
+    end
     local pIrp = ext.pPendingReadIrp
     ext.pPendingReadIrp = nil
     ext.sLineBuffer = ""
-    oKMD.DkCompleteRequest(pIrp, 0, sResult)
-    return true
+    ext.nBufCursorPos = 0
+    oKMD.DkCompleteRequest(pIrp, 0, "\27[A" .. sBuf)
+    bHandled = true; bIrpDone = true
 
-  elseif code == 208 then -- Down arrow
-    local sResult = "\27[B" .. (ext.sLineBuffer or "")
+  elseif code == 208 then -- DOWN (history)
+    local nToEnd = #sBuf - nCur
+    if nToEnd > 0 then
+      writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
+    end
     local pIrp = ext.pPendingReadIrp
     ext.pPendingReadIrp = nil
     ext.sLineBuffer = ""
-    oKMD.DkCompleteRequest(pIrp, 0, sResult)
-    return true
+    ext.nBufCursorPos = 0
+    oKMD.DkCompleteRequest(pIrp, 0, "\27[B" .. sBuf)
+    bHandled = true; bIrpDone = true
 
-  elseif code ~= 0 and ch > 0 and ch < 256 then
+  elseif code ~= 0 and ch > 0 and ch < 256 then -- PRINTABLE
     local s = string.char(ch)
-    ext.sLineBuffer = (ext.sLineBuffer or "") .. s
-    writeToScreen(g_pDeviceObject, s)
-    return true
+    ext.sLineBuffer = sBuf:sub(1, nCur) .. s .. sBuf:sub(nCur + 1)
+    ext.nBufCursorPos = nCur + 1
+    if nCur >= #sBuf then
+      writeToScreen(g_pDeviceObject, s)
+    else
+      local sTail = ext.sLineBuffer:sub(nCur + 1)
+      writeToScreen(g_pDeviceObject, sTail)
+      local nBack = #sTail - 1
+      if nBack > 0 then
+        writeToScreen(g_pDeviceObject, "\27[" .. nBack .. "D")
+      end
+    end
+    bHandled = true
   end
 
-  return false
+  -- =============================================
+  -- SINGLE EXIT: redraw cursor if read still active
+  -- =============================================
+  if not bIrpDone then
+    fShowCursor(ext)
+  end
+
+  return bHandled
 end
 
 local function processKeyRaw(ext, ch, code)
@@ -544,6 +692,9 @@ local function processKeyRaw(ext, ch, code)
     oKMD.DkCompleteRequest(pIrp, 0, sResult)
     return true
   end
+  -- Redraw cursor at new position after key processing
+  fShowCursor(ext)
+
   return false
 end
 
@@ -555,7 +706,10 @@ local function fCreate(d, i) oKMD.DkCompleteRequest(i, 0, 0) end
 local function fClose(d, i)  oKMD.DkCompleteRequest(i, 0)    end
 
 local function fWrite(d, i)
+  local ext = d.pDeviceExtension
+  fHideCursor(ext)
   writeToScreen(d, i.tParameters.sData)
+  fShowCursor(ext)
   oKMD.DkCompleteRequest(i, 0, #i.tParameters.sData)
 end
 
@@ -566,6 +720,7 @@ local function fRead(d, i)
   else
     p.pPendingReadIrp = i
     if p.sLineBuffer == nil then p.sLineBuffer = "" end
+    p.nBufCursorPos = #p.sLineBuffer  -- reset cursor position
     local sMode = p.sMode or "cooked"
     while p.tKeyBuffer and #p.tKeyBuffer > 0 and p.pPendingReadIrp do
       local tKey = table.remove(p.tKeyBuffer, 1)
@@ -575,6 +730,8 @@ local function fRead(d, i)
         processKeyCooked(p, tKey[1], tKey[2])
       end
     end
+    -- Show cursor if still waiting for input
+    fShowCursor(p)
   end
 end
 
@@ -585,6 +742,7 @@ local function fDeviceControl(d, i)
 
   if sMethod == "set_buffer" then
     ext.sLineBuffer = tArgs[1] or ""
+    ext.nBufCursorPos = #ext.sLineBuffer  -- cursor at end
     oKMD.DkCompleteRequest(i, 0)
   elseif sMethod == "get_buffer" then
     oKMD.DkCompleteRequest(i, 0, ext.sLineBuffer or "")
@@ -736,7 +894,25 @@ while true do
           end
         end
       end
-
+  elseif sig == "hardware_interrupt" and p1 == "clipboard" then
+      local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
+      if ext and ext.pPendingReadIrp and p2 and type(p2) == "string" then
+        local sText = p2:gsub("[%c]", "")
+        if #sText > 0 then
+          fHideCursor(ext)
+          local sBuf = ext.sLineBuffer or ""
+          local nCur = ext.nBufCursorPos or #sBuf
+          ext.sLineBuffer = sBuf:sub(1, nCur) .. sText .. sBuf:sub(nCur + 1)
+          ext.nBufCursorPos = nCur + #sText
+          local sAfter = sText .. ext.sLineBuffer:sub(ext.nBufCursorPos + 1)
+          writeToScreen(g_pDeviceObject, sAfter)
+          local nBack = #ext.sLineBuffer - ext.nBufCursorPos
+          if nBack > 0 then
+            writeToScreen(g_pDeviceObject, "\27[" .. nBack .. "D")
+          end
+          fShowCursor(ext)
+        end
+      end
     elseif sig == "hardware_interrupt" and p1 == "scroll" then
       local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
       if ext and type(p2) == "number" then
