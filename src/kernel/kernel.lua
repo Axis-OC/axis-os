@@ -638,9 +638,7 @@ function kernel.create_sandbox(nPid, nRing)
   -- Standard Lua (safe subset — NO rawset, rawget, debug)
   tProtected.assert   = assert
   tProtected.error    = error
-  tProtected.ipairs   = ipairs
   tProtected.next     = next
-  tProtected.pairs    = pairs
   tProtected.pcall    = pcall
   tProtected.select   = select
   tProtected.tonumber = tonumber
@@ -650,9 +648,45 @@ function kernel.create_sandbox(nPid, nRing)
   tProtected._VERSION = _VERSION
   tProtected.xpcall   = xpcall
 
+  do
+      local fRealNext = next
+      tProtected.pairs = function(t)
+          if type(t) ~= "table" then
+              error("bad argument #1 to 'pairs' (table expected, got "
+                    .. type(t) .. ")", 2)
+          end
+          return fRealNext, t, nil
+      end
+      tProtected.ipairs = function(t)
+          if type(t) ~= "table" then
+              error("bad argument #1 to 'ipairs' (table expected, got "
+                    .. type(t) .. ")", 2)
+          end
+          local i = 0
+          return function()
+              i = i + 1
+              local v = rawget(t, i)
+              if v ~= nil then return i, v end
+          end
+      end
+  end
+
   -- Library tables
   tProtected.coroutine = coroutine
-  tProtected.string = shallowCopy(string)
+  do
+      local tSafeString = shallowCopy(string)
+      tSafeString.dump = nil
+      -- Cap string.rep to prevent single-call memory bombs
+      local fRealRep = string.rep
+      tSafeString.rep = function(s, n, sep)
+          local nEst = #s * n + (sep and #sep * (n - 1) or 0)
+          if nEst > 1048576 then
+              error("string.rep: result too large", 2)
+          end
+          return fRealRep(s, n, sep)
+      end
+      tProtected.string = tSafeString
+  end
   tProtected.table  = shallowCopy(table)
   tProtected.math   = shallowCopy(math)
 
@@ -674,7 +708,19 @@ function kernel.create_sandbox(nPid, nRing)
   --   getmetatable(sandbox) → "protected"  (not the real mt)
   --   setmetatable(sandbox, x) → error     (can't override __metatable)
   -- All other tables work normally.
+  -- REPLACE THIS:
   tProtected.setmetatable = setmetatable
+
+  -- WITH THIS:
+  do
+      local fRealSetmt = setmetatable
+      tProtected.setmetatable = function(tbl, mt)
+          if type(mt) == "table" then
+              rawset(mt, "__gc", nil)
+          end
+          return fRealSetmt(tbl, mt)
+      end
+  end
   tProtected.getmetatable = getmetatable
 
   -- ---- Kernel interfaces ----

@@ -28,12 +28,12 @@
 [info] [PM] Loading TTY Driver explicitly...
 [info] [PM] Scanning components...
 [info] [PM] Loading driver for filesystem
-[info] [PM] Loading driver for filesystem
 [info] [PM] Loading driver for data
-[info] [PM] Loading driver for internet
-[info] [PM] Loading driver for filesystem
-[info] [PM] Loading driver for eeprom
 [info] [PM] Loading driver for computer
+[info] [PM] Loading driver for filesystem
+[info] [PM] Loading driver for internet
+[info] [PM] Loading driver for eeprom
+[info] [PM] Loading driver for filesystem
 [info] [PM] Processing fstab...
 [info] [DKMS] Ring 1 Driver Manager starting.
 [info] [DKMS] Ring 1 Driver Manager starting.
@@ -59,30 +59,30 @@
 [info] [SEC] WARN: Loading UNSIGNED driver
 [info] Creating process 5 ('/drivers/filesystem.sys.lua') at Ring 2
 [info] [DKMS] Loaded 'AxisFSStub' (PID 5)
+[info] [DKMS] Loading: /drivers/data.sys.lua
+[info] [DKMS] Loading: /drivers/computer.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 6 ('/drivers/computer.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisComputerStub' (PID 6)
 [info] [DKMS] Loading: /drivers/filesystem.sys.lua
 [info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 6 ('/drivers/filesystem.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisFSStub' (PID 6)
-[info] [DKMS] Loading: /drivers/data.sys.lua
+[info] Creating process 7 ('/drivers/filesystem.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisFSStub' (PID 7)
 [info] [DKMS] Loading: /drivers/internet.sys.lua
 [info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 7 ('/drivers/internet.sys.lua') at Ring 2
+[info] Creating process 8 ('/drivers/internet.sys.lua') at Ring 2
 [info] [DKMS] Device '\Device\Net0' created.
 [info] [DKMS] Registered in @VT\DEV\VIRT_002
 [info] [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
-[info] [DKMS] Loaded 'AxisNet' (PID 7)
-[info] [DKMS] Loading: /drivers/filesystem.sys.lua
-[info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 8 ('/drivers/filesystem.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisFSStub' (PID 8)
+[info] [DKMS] Loaded 'AxisNet' (PID 8)
 [info] [DKMS] Loading: /drivers/eeprom.sys.lua
 [info] [SEC] WARN: Loading UNSIGNED driver
 [info] Creating process 9 ('/drivers/eeprom.sys.lua') at Ring 2
 [info] [DKMS] Loaded 'AxisEEPROMStub' (PID 9)
-[info] [DKMS] Loading: /drivers/computer.sys.lua
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
 [info] [SEC] WARN: Loading UNSIGNED driver
-[info] Creating process 10 ('/drivers/computer.sys.lua') at Ring 2
-[info] [DKMS] Loaded 'AxisComputerStub' (PID 10)
+[info] Creating process 10 ('/drivers/filesystem.sys.lua') at Ring 2
+[info] [DKMS] Loaded 'AxisFSStub' (PID 10)
 [info] [DD] Error: No device object for '/dev/ringlog' (original: /dev/ringlog')
 [info] [PM] Loading RingFS driver...
 [info] [DKMS] Loading: /drivers/ringfs.sys.lua
@@ -93,11 +93,11 @@
 [info] [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
 [info] [DKMS] Loaded 'AxisRingFS' (PID 11)
 [info] [PM] Initializing log system on /dev/ringlog
-[info] [PM] Log rotate: deleted /log/syslog_001.log
-[info] [PM] Log rotate: deleted /vbl/syslog_001.vbl
+[info] [PM] Log rotate: deleted /log/syslog_006.log
+[info] [PM] Log rotate: deleted /vbl/syslog_006.vbl
 [info] [PM] Log rotation active:
-[info] [PM]   .log -> /log/syslog_006.log
-[info] [PM]   .vbl -> /vbl/syslog_006.vbl
+[info] [PM]   .log -> /log/syslog_011.log
+[info] [PM]   .vbl -> /vbl/syslog_011.vbl
 [info] [PM] Ringfs handle opened (persistent).
 [info] [PM] Log system initialized.
 [info] [PM] Processing autoload...
@@ -113,4 +113,3 @@
 [info] Creating process 13 ('/bin/init.lua') at Ring 3
 [info] [PM] Init spawned as PID 13
 [info] Creating process 14 ('/bin/sh.lua') at Ring 3
-[fail] SYNTAX ERROR in /bin/sh.lua: /bin/sh.lua:616: <goto pipe_continue> at line 518 jumps into the scope of local 'cmd'
