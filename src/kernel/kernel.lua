@@ -37,6 +37,9 @@ local g_nWidth, g_nHeight = 80, 25
 local g_nCurrentLine = 0
 local tBootArgs = boot_args or {} 
 
+local g_bAxfsRoot = false
+local g_oAxfsVol  = nil
+
 local g_oPreempt = nil          -- loaded from /lib/preempt.lua at boot
 local g_oIpc = nil  -- Kernel IPC subsystem
 
@@ -264,20 +267,144 @@ kprint("none", "")
 -- PRIMITIVE BOOTLOADER HELPERS
 -------------------------------------------------
 
-local g_oPrimitiveFs = raw_component.proxy(boot_fs_address)
+-- =============================================
+-- ROOT FILESYSTEM BOOTSTRAP
+-- Detects AXFS boot or falls back to managed FS
+-- =============================================
+
+local g_oPrimitiveFs
+
+if _G.boot_fs_type == "axfs" then
+  -- Booted from AXFS — create minimal volume reader
+  -- Load bpack inline (can't require yet)
+  local function r16(s,o) return s:byte(o)*256+s:byte(o+1) end
+  local function r32(s,o) return s:byte(o)*16777216+s:byte(o+1)*65536+s:byte(o+2)*256+s:byte(o+3) end
+  local function rstr(s,o,n) local r=s:sub(o,o+n-1); local z=r:find("\0",1,true); return z and r:sub(1,z-1) or r end
+
+  local oDrv = raw_component.proxy(_G.boot_drive_addr)
+  local nPOff = _G.boot_part_offset
+  local ss = oDrv.getSectorSize()
+
+  local function prs(n) return oDrv.readSector(nPOff + n + 1) end
+
+  local sb = prs(0)
+  local nDS = r16(sb, 20)
+  local ips = math.floor(ss / 64)
+
+  local function ri(n)
+    local sec = 3+math.floor(n/ips); local off = (n%ips)*64
+    local sd = prs(sec); if not sd then return nil end
+    local o = off+1
+    local t = {iType=r16(sd,o), size=r32(sd,o+8), nBlk=r16(sd,o+22), dir={}, ind=r16(sd,o+44)}
+    for i=1,10 do t.dir[i]=r16(sd,o+24+(i-1)*2) end; return t
+  end
+  local function rb(n) return prs(nDS+n) end
+  local function blks(t)
+    local r={}
+    for i=1,math.min(10,t.nBlk) do if t.dir[i] and t.dir[i]>0 then r[#r+1]=t.dir[i] end end
+    if t.nBlk>10 and t.ind>0 then
+      local si=rb(t.ind); if si then
+        for i=1,math.floor(ss/2) do local p2=r16(si,(i-1)*2+1); if p2>0 then r[#r+1]=p2 end end
+      end
+    end; return r
+  end
+  local function dfind(di,nm)
+    local dpb=math.floor(ss/32)
+    for _,bn in ipairs(blks(di)) do
+      local sd=rb(bn); if sd then
+        for i=0,dpb-1 do local o=i*32+1; local ino=r16(sd,o)
+          if ino>0 then local nl=sd:byte(o+3); if sd:sub(o+4,o+3+nl)==nm then return ino end end
+        end
+      end
+    end
+  end
+  local function resolve(p)
+    local c=1; for seg in p:gmatch("[^/]+") do
+      local t=ri(c); if not t or t.iType~=2 then return nil end
+      c=dfind(t,seg); if not c then return nil end
+    end; return c
+  end
+  local function readfile(p)
+    local n=resolve(p); if not n then return nil end
+    local t=ri(n); if not t or t.iType~=1 then return nil end
+    local ch={}; local rem=t.size
+    for _,bn in ipairs(blks(t)) do
+      local sd=rb(bn); if sd then ch[#ch+1]=sd:sub(1,math.min(rem,ss)); rem=rem-ss end
+      if rem<=0 then break end
+    end; return table.concat(ch)
+  end
+
+  -- Now load axfs_core + axfs_proxy properly
+  local sAxCode = readfile("/lib/axfs_core.lua")
+  local sBpCode = readfile("/lib/bpack.lua")
+  local sPxCode = readfile("/lib/axfs_proxy.lua")
+
+  if sAxCode and sBpCode and sPxCode then
+    -- Load bpack
+    local tBpEnv = {string=string, math=math, table=table}
+    local fBp = load(sBpCode, "@bpack", "t", tBpEnv)
+    local oBpack = fBp()
+
+    -- Load axfs_core with bpack available
+    local tAxEnv = {
+      string=string, math=math, table=table, os=os, type=type,
+      tostring=tostring, pairs=pairs, ipairs=ipairs, setmetatable=setmetatable,
+      require=function(m)
+        if m == "bpack" then return oBpack end
+        error("Cannot require '"..m.."' during AXFS boot")
+      end,
+    }
+    local fAx = load(sAxCode, "@axfs_core", "t", tAxEnv)
+    local oAXFS = fAx()
+
+    -- Load proxy module
+    local tPxEnv = {
+      string=string, math=math, table=table, tostring=tostring,
+      type=type, pairs=pairs, ipairs=ipairs,
+      require=function(m)
+        if m == "axfs_core" then return oAXFS end
+        if m == "bpack" then return oBpack end
+      end,
+    }
+    local fPx = load(sPxCode, "@axfs_proxy", "t", tPxEnv)
+    local oProxy = fPx()
+
+    -- Create proper AXFS volume
+    local tDisk = oAXFS.wrapDrive(oDrv, nPOff, _G.boot_part_size)
+    local vol, vErr = oAXFS.mount(tDisk)
+
+    if vol then
+      g_oAxfsVol = vol
+      g_bAxfsRoot = true
+      g_oPrimitiveFs = oProxy.createProxy(vol, "root")
+      __gpu_dprint("AXFS root mounted (" .. vol.su.label .. ")")
+    else
+      kernel.panic("Failed to mount AXFS root: " .. tostring(vErr))
+    end
+  else
+    kernel.panic("AXFS boot: missing core libraries on disk")
+  end
+else
+  -- Standard managed FS boot
+  g_oPrimitiveFs = raw_component.proxy(boot_fs_address)
+end
 
 local function primitive_load(sPath)
   local hFile, sReason = g_oPrimitiveFs.open(sPath, "r")
   if not hFile then
     return nil, "primitive_load failed to open: " .. tostring(sReason or "Unknown error")
   end
-  local sData = ""
-  local sChunk
-  repeat
-    sChunk = g_oPrimitiveFs.read(hFile, math.huge)
-    if sChunk then sData = sData .. sChunk end
-  until not sChunk
+  local tChunks = {}
+  while true do
+    local sChunk = g_oPrimitiveFs.read(hFile, math.huge)
+    if not sChunk then break end
+    tChunks[#tChunks + 1] = sChunk
+  end
   g_oPrimitiveFs.close(hFile)
+  local sData = table.concat(tChunks)
+  if #sData == 0 then
+    return nil, "primitive_load: empty file: " .. sPath
+  end
   return sData
 end
 
@@ -1768,11 +1895,17 @@ kernel.tSyscallTable["vfs_mkdir"] = {
 
 -- Computer
 kernel.tSyscallTable["computer_shutdown"] = {
-  func = function() raw_computer.shutdown() end,
+  func = function()
+    if g_oAxfsVol then g_oAxfsVol:flush() end
+    raw_computer.shutdown()
+  end,
   allowed_rings = {0, 1, 2, 2.5}
 }
 kernel.tSyscallTable["computer_reboot"] = {
-  func = function() raw_computer.shutdown(true) end,
+  func = function()
+    if g_oAxfsVol then g_oAxfsVol:flush() end
+    raw_computer.shutdown(true)
+  end,
   allowed_rings = {0, 1, 2, 2.5}
 }
 
@@ -1847,8 +1980,17 @@ if tRootEntry.type ~= "rootfs" then
   kprint("fail", "fstab[1] is not of type 'rootfs'.")
   kernel.panic("Invalid fstab configuration.")
 end
-kernel.tVfs.sRootUuid = tRootEntry.uuid
-kernel.tVfs.oRootFs = raw_component.proxy(tRootEntry.uuid)
+
+if g_bAxfsRoot then
+  kernel.tVfs.sRootUuid = g_oPrimitiveFs.address
+  kernel.tVfs.oRootFs = g_oPrimitiveFs
+  kprint("ok", "Mounted AXFS root filesystem (" .. g_oPrimitiveFs._label .. ")")
+else
+  kernel.tVfs.sRootUuid = tRootEntry.uuid
+  kernel.tVfs.oRootFs = raw_component.proxy(tRootEntry.uuid)
+  kprint("ok", "Mounted root filesystem on " .. kernel.tVfs.sRootUuid:sub(1,13) .. "...")
+end
+
 kernel.tVfs.tMounts["/"] = {
   type = "rootfs",
   proxy = kernel.tVfs.oRootFs,

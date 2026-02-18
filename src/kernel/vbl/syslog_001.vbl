@@ -1,0 +1,189 @@
+[info] AxisOS Xen XKA v0.32-alpha1 starting...
+[info] Copyright (C) 2025 AxisOS
+[none] 
+[info] Kernel entering initialization sequence (Ring 0).
+[dev] Initializing syscall dispatcher table...
+[ok] Object Manager initialised.  Namespace: \, \Device, \DosDevices
+[ok] sMLTR (Synapse Message Layer Token Randomisation) active.
+[ok] Virtual Registry (@VT) initialised.
+[ok] Preemptive scheduler active  (quantum=50ms, interval=256, no debug hooks)
+[info] [IPC] Kernel IPC subsystem initialized
+[info] [IPC]   IRQL, DPC, Timers, Events, Mutexes, Semaphores
+[info] [IPC]   Pipes, Shared Memory, Message Queues, Signals
+[info] [IPC]   WaitForMultipleObjects, Process Groups
+[ok] Kernel IPC subsystem online (Events, Mutexes, Semaphores,
+[ok]   Pipes, Sections, MQueues, Signals, WaitMultiple, DPC, IRQL)
+[info] Reading fstab from /etc/fstab.lua...
+[ok] Mounted root filesystem on 8d390d50-4bc9...
+[ok] Mounted root filesystem on 8d390d50-4bc9...
+[ok] Kernel process registered as PID 1
+[info] Starting Ring 1 services...
+[info] Creating process 2 ('/lib/pipeline_manager.lua') at Ring 1
+[dev]   PID 2 synapse token: SYN-0ab2-a934-23...
+[ok] Ring 1 Pipeline Manager started as PID 2
+[info] Handing off control to scheduler...
+[ok] Entering main event loop. Kernel is now running.
+[none] 
+[info] [PM] Ring 1 Pipeline Manager started.
+[info] Creating process 3 ('/system/dkms.lua') at Ring 1
+[dev]   PID 3 synapse token: SYN-c1ca-7bb5-a5...
+[info] [PM] DKMS process started as PID 3
+[info] [PM] Loading TTY Driver explicitly...
+[info] [PM] Scanning components...
+[info] [PM] Loading driver for internet
+[info] [PM] Loading driver for filesystem
+[info] [PM] Loading driver for data
+[info] [PM] Loading driver for computer
+[info] [PM] Loading driver for eeprom
+[info] [PM] Loading driver for filesystem
+[info] [PM] Loading driver for filesystem
+[info] [PM] Processing fstab...
+[info] [DKMS] Ring 1 Driver Manager starting.
+[info] [DKMS] Ring 1 Driver Manager starting.
+[info] [SEC] ── Security Subsystem Init ──
+[info] [SEC] [1/3] Crypto provider...
+[info] [SEC] [1/3] Data Card Tier 3
+[info] [SEC] [2/3] Security policy...
+[info] [SEC] [2/3] Level 1 (WARN)
+[info] [SEC] [3/3] Key store...
+[info] [SEC] [3/3] 0 approved key(s)
+[info] [SEC] ── Ready in 1ms ──
+[info] [DKMS] Loading: /drivers/tty.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 4 ('/drivers/tty.sys.lua') at Ring 2
+[dev]   PID 4 synapse token: SYN-9428-0453-b1...
+[info] [DK] AxisTTY v5.1 Color Scrollback Loaded.
+[info] [DK] DkCreateDevice: \Device\TTY0
+[info] [DKMS] Device '\Device\TTY0' created.
+[info] [DKMS] Registered in @VT\DEV\VIRT_001
+[info] [DK] SymLink: /dev/tty -> \Device\TTY0
+[info] [DKMS] Symlink '/dev/tty' -> '\Device\TTY0' created.
+[info] [DKMS] PID 4 registered for interrupt 'key_down'
+[info] [DKMS] PID 4 registered for interrupt 'scroll'
+[info] [DKMS] PID 4 registered for interrupt 'clipboard'
+[info] [DKMS] Loaded 'AxisTTY' (PID 4)
+[info] [DKMS] Loading: /drivers/internet.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 5 ('/drivers/internet.sys.lua') at Ring 2
+[dev]   PID 5 synapse token: SYN-2408-7dca-56...
+[info] [DK] AxisNet v2.1: Initializing...
+[info] [DK] DkCreateDevice: \Device\Net0
+[info] [DKMS] Device '\Device\Net0' created.
+[info] [DKMS] Registered in @VT\DEV\VIRT_002
+[info] [DK] AxisNet: Card found. HTTP=true TCP=true
+[info] [DK] AxisNet: Time source check: fNow()=4.5
+[info] [DK] SymLink: /dev/net -> \Device\Net0
+[info] [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
+[info] [DK] AxisNet v2.1: Online at /dev/net
+[info] [DKMS] Loaded 'AxisNet' (PID 5)
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 6 ('/drivers/filesystem.sys.lua') at Ring 2
+[dev]   PID 6 synapse token: SYN-a703-1fe1-a0...
+[info] [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
+[info] [DKMS] Loaded 'AxisFSStub' (PID 6)
+[info] [DKMS] Loading: /drivers/data.sys.lua
+[info] [DKMS] Loading: /drivers/computer.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 7 ('/drivers/computer.sys.lua') at Ring 2
+[dev]   PID 7 synapse token: SYN-7668-c0ab-d5...
+[info] [DK] Computer Stub Driver loaded. Exposes... the computer? Sure.
+[info] [DKMS] Loaded 'AxisComputerStub' (PID 7)
+[info] [DKMS] Loading: /drivers/eeprom.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 8 ('/drivers/eeprom.sys.lua') at Ring 2
+[dev]   PID 8 synapse token: SYN-3f40-3066-86...
+[info] [DK] EEPROM Stub Driver loaded. Doing nothing.
+[info] [DKMS] Loaded 'AxisEEPROMStub' (PID 8)
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 9 ('/drivers/filesystem.sys.lua') at Ring 2
+[dev]   PID 9 synapse token: SYN-9496-9309-8b...
+[info] [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
+[info] [DKMS] Loaded 'AxisFSStub' (PID 9)
+[info] [DKMS] Loading: /drivers/filesystem.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 10 ('/drivers/filesystem.sys.lua') at Ring 2
+[dev]   PID 10 synapse token: SYN-099f-8041-37...
+[info] [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
+[info] [DKMS] Loaded 'AxisFSStub' (PID 10)
+[info] [DD] Error: No device object for '/dev/ringlog' (original: /dev/ringlog')
+[info] [PM] Loading RingFS driver...
+[info] [DKMS] Loading: /drivers/ringfs.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 11 ('/drivers/ringfs.sys.lua') at Ring 2
+[dev]   PID 11 synapse token: SYN-38fc-da8b-5c...
+[info] [DK] RingFS: Spinning up the memory donut.
+[info] [DK] DkCreateDevice: \Device\ringlog
+[info] [DKMS] Device '\Device\ringlog' created.
+[info] [DKMS] Registered in @VT\DEV\VIRT_003
+[info] [DK] SymLink: /dev/ringlog -> \Device\ringlog
+[info] [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
+[info] [DKMS] Loaded 'AxisRingFS' (PID 11)
+[info] [PM] Initializing log system on /dev/ringlog
+[info] [PM] Log rotation active:
+[info] [PM]   .log -> /log/syslog_001.log
+[info] [PM]   .vbl -> /vbl/syslog_001.vbl
+[info] [PM] Ringfs handle opened (persistent).[info] [PM] Log system initialized.
+[info] [PM] Processing autoload...
+[info] [PM] Autoloading: /drivers/internet.sys.lua
+[info] [PM] Waiting for system stabilization...
+[info] [DKMS] Loading: /drivers/internet.sys.lua
+[info] [SEC] WARN: Loading UNSIGNED driver
+[info] Creating process 12 ('/drivers/internet.sys.lua') at Ring 2
+[dev]   PID 12 synapse token: SYN-492d-e42a-0e...
+[info] [DK] AxisNet v2.1: Initializing...
+[info] [DK] DkCreateDevice: \Device\Net0
+[info] [DKMS] Err: DriverEntry failed: 406
+[info] [PM] Populating @VT\SYS...
+[info] [PM] Silence on deck. Handing off to userspace.
+[info] [PM] Spawning /bin/init.lua...
+[info] Creating process 13 ('/bin/init.lua') at Ring 3
+[dev] Preempt: /bin/init.lua → 15 yield checkpoints injected
+[dev]   PID 13 synapse token: SYN-7820-8366-12...
+[info] [PM] Init spawned as PID 13[info] Creating process 14 ('/bin/sh.lua') at Ring 3
+[dev] Preempt: /bin/sh.lua → 130 yield checkpoints injected
+[dev]   PID 14 synapse token: SYN-0532-11f7-e3...[info] Creating process 15 ('/usr/commands/axfs.lua') at Ring 3
+[dev] Preempt: /usr/commands/axfs.lua → 101 yield checkpoints injected
+[dev]   PID 15 synapse token: SYN-3207-e68c-36...[info] Process 15 exited normally.[info] Creating process 16 ('/usr/commands/axfs.lua') at Ring 3
+[dev] Preempt: /usr/commands/axfs.lua → 101 yield checkpoints injected
+[dev]   PID 16 synapse token: SYN-14ca-691d-52...[info] Process 16 exited normally.[info] Creating process 17 ('/usr/commands/insmod.lua') at Ring 3
+[dev] Preempt: /usr/commands/insmod.lua → 85 yield checkpoints injected
+[dev]   PID 17 synapse token: SYN-886c-12f6-e4...[info] Process 17 exited normally.[info] Creating process 18 ('/usr/commands/insmod.lua') at Ring 3
+[dev] Preempt: /usr/commands/insmod.lua → 85 yield checkpoints injected
+[dev]   PID 18 synapse token: SYN-2341-6814-f1...[info] Process 18 exited normally.[info] Creating process 19 ('/usr/commands/axfs.lua') at Ring 3
+[dev] Preempt: /usr/commands/axfs.lua → 101 yield checkpoints injected
+[dev]   PID 19 synapse token: SYN-27b3-37b7-85...[info] Process 19 exited normally.[info] Creating process 20 ('/usr/commands/axfs.lua') at Ring 3
+[dev] Preempt: /usr/commands/axfs.lua → 101 yield checkpoints injected
+[dev]   PID 20 synapse token: SYN-485c-1798-bd...[info] Process 20 exited normally.[info] Creating process 21 ('/usr/commands/axfs.lua') at Ring 3
+[dev] Preempt: /usr/commands/axfs.lua → 101 yield checkpoints injected
+[dev]   PID 21 synapse token: SYN-7cd6-3241-3b...[info] Process 21 exited normally.[info] Creating process 22 ('/usr/commands/vi.lua') at Ring 3
+[dev] Preempt: /usr/commands/vi.lua → 191 yield checkpoints injected
+[dev]   PID 22 synapse token: SYN-27af-291c-1e...[info] Process 22 exited normally.[info] Creating process 23 ('/usr/commands/preempt_test.lua') at Ring 3
+[dev] Preempt: /usr/commands/preempt_test.lua → 67 yield checkpoints injected
+[dev]   PID 23 synapse token: SYN-a538-15c2-e7...[dev] Spawning thread 24 for parent 23
+[dev] Spawning thread 25 for parent 23[dev] Spawning thread 26 for parent 23
+[dev] Spawning thread 27 for parent 23
+[dev] Spawning thread 28 for parent 23[dev] Spawning thread 29 for parent 23[dev] Spawning thread 30 for parent 23
+[dev] Spawning thread 31 for parent 23
+[dev] Spawning thread 32 for parent 23[info] Process 23 exited normally.[info] Creating process 33 ('/usr/commands/xvi.lua') at Ring 3
+[dev] Preempt: /usr/commands/xvi.lua → 191 yield checkpoints injected
+[dev]   PID 33 synapse token: SYN-bde3-7e6c-2b...[info] Process 33 exited normally.[info] Creating process 34 ('/usr/commands/ls.lua') at Ring 3
+[dev] Preempt: /usr/commands/ls.lua → 25 yield checkpoints injected
+[dev]   PID 34 synapse token: SYN-1891-ac37-cb...[info] Process 34 exited normally.[info] Creating process 35 ('/usr/commands/reboot.lua') at Ring 3
+[dev] Preempt: /usr/commands/reboot.lua → 2 yield checkpoints injected
+[dev]   PID 35 synapse token: SYN-fddf-62a2-73...[info] Process 35 exited normally.[info] Creating process 36 ('/usr/commands/shutdown.lua') at Ring 3
+[dev] Preempt: /usr/commands/shutdown.lua — no loops/branches to instrument
+[dev]   PID 36 synapse token: SYN-3458-b241-81...[fail] Ring violation: PID 36 (Ring 3) tried to call computer_shutdown[info] Creating process 37 ('/usr/commands/ls.lua') at Ring 3
+[dev] Preempt: /usr/commands/ls.lua → 25 yield checkpoints injected
+[dev]   PID 37 synapse token: SYN-2024-4044-32...[info] Process 37 exited normally.[info] Creating process 38 ('/usr/commands/ls.lua') at Ring 3
+[dev] Preempt: /usr/commands/ls.lua → 25 yield checkpoints injected
+[dev]   PID 38 synapse token: SYN-4788-686e-c3...[info] Process 38 exited normally.[info] Creating process 39 ('/usr/commands/ls.lua') at Ring 3
+[dev] Preempt: /usr/commands/ls.lua → 25 yield checkpoints injected
+[dev]   PID 39 synapse token: SYN-beec-765c-99...[info] Process 39 exited normally.[info] Creating process 40 ('/usr/commands/echo.lua') at Ring 3
+[dev] Preempt: /usr/commands/echo.lua — no loops/branches to instrument
+[dev]   PID 40 synapse token: SYN-75bc-39bd-be...[info] Process 40 exited normally.[info] Creating process 41 ('/usr/commands/echo.lua') at Ring 3
+[dev] Preempt: /usr/commands/echo.lua — no loops/branches to instrument
+[dev]   PID 41 synapse token: SYN-d514-3c4c-06...[info] Process 41 exited normally.[info] Creating process 42 ('/usr/commands/id.lua') at Ring 3
+[dev] Preempt: /usr/commands/id.lua — no loops/branches to instrument
+[dev]   PID 42 synapse token: SYN-a052-bd83-a6...[info] Process 42 exited normally.
