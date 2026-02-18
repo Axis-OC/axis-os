@@ -708,7 +708,7 @@ function kernel.create_sandbox(nPid, nRing)
 
     -- Wrapped load() — instruments source and forces text mode
     local fKernelLoad = load
-    tProtected.load = function(sChunk, sName, sMode, tLoadEnv)
+    tProtected.load = function(sChunk, sName, sMode, _tUserEnv)
       if type(sChunk) == "string" then
         local sInst, nInj = g_oPreempt.instrument(
             sChunk, sName or "[dynamic]")
@@ -719,7 +719,8 @@ function kernel.create_sandbox(nPid, nRing)
       return fKernelLoad(sChunk, sName, "t", tLoadEnv or tSandbox)
     end
   else
-    tProtected.__pc = function() end          -- no-op for system rings
+    tProtected.__pc  = function() end   -- no-op for system rings
+    tProtected.load  = load
   end
 
   -- ---- print / io ----
