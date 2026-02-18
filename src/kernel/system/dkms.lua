@@ -180,7 +180,7 @@ function load_driver(sDriverPath, tDriverEnv)
   syscall("signal_send", nPid, "driver_init", pDriverObject)
   
   while true do
-      local bOk, nSenderPid, sSignalName, p1, p2, p3, p4 = syscall("signal_pull")
+      local bOk, nSenderPid, sSignalName, p1, p2, p3, p4, p5 = syscall("signal_pull")
       if bOk then
           if sSignalName == "driver_init_complete" and nSenderPid == nPid then
               local nEntryStatus = p1
@@ -205,7 +205,7 @@ function load_driver(sDriverPath, tDriverEnv)
               end
               
           else
-              table.insert(g_tSignalQueue, {nSenderPid, sSignalName, p1, p2, p3, p4})
+              table.insert(g_tSignalQueue, {nSenderPid, sSignalName, p1, p2, p3, p4, p5})
           end
       end
   end
@@ -224,10 +224,11 @@ while true do
       p2 = tSig[4]
       p3 = tSig[5]
       p4 = tSig[6]
+      p5 = tSig[7]
   else
       -- if buffer empty then wait
       local bOk
-      bOk, nSenderPid, sSignalName, p1, p2, p3, p4 = syscall("signal_pull")
+      bOk, nSenderPid, sSignalName, p1, p2, p3, p4, p5 = syscall("signal_pull")
       if not bOk then goto continue end
   end
   
@@ -344,13 +345,21 @@ elseif sSignalName == "load_driver_path_request" then
       ::continue::
 
 
-  elseif sSignalName == "os_event" and p1 == "key_down" then
+    elseif sSignalName == "os_event" and p1 == "key_down" then
       for _, pDriver in pairs(g_tDriverRegistry) do
           if pDriver.tDriverInfo.sDriverName == "AxisTTY" then
               syscall("signal_send", pDriver.nDriverPid, "hardware_interrupt", "key_down", p2, p3, p4)
           end
       end
-  end
+
+    elseif sSignalName == "os_event" and p1 == "scroll" then
+        -- p2=screenAddr, p3=x, p4=y, p5=direction (1=up, -1=down)
+        for _, pDriver in pairs(g_tDriverRegistry) do
+            if pDriver.tDriverInfo.sDriverName == "AxisTTY" then
+                syscall("signal_send", pDriver.nDriverPid, "hardware_interrupt", "scroll", p5)
+            end
+        end
+    end
   
   ::continue::
 end

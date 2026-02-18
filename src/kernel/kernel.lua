@@ -349,6 +349,12 @@ function kernel.custom_require(sModulePath, nCallingPid)
   return result
 end
 
+-- ANSI escape code stripper for NO_COLOR support
+local function fStripAnsi(s)
+    return s:gsub("\27%[[%d;]*[a-zA-Z]", "")
+end
+
+
 function kernel.create_sandbox(nPid, nRing)
   local tSandbox = {
     assert = assert,
@@ -368,8 +374,8 @@ function kernel.create_sandbox(nPid, nRing)
     string = string,
     table = table,
     math = math,
-    debug = debug, -- needed for traceback
-    
+    debug = debug,
+
         syscall = function(...)
             return kernel.syscall_dispatch(...)
         end,
@@ -379,14 +385,38 @@ function kernel.create_sandbox(nPid, nRing)
             if not mod then error(sErr, 2) end
             return mod
         end,
-
-        -- STD_OUTPUT_HANDLE = -11
-        print = function(...)
-            local tP = {}
-            for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
-            kernel.syscall_dispatch("vfs_write", -11, table.concat(tP, "\t") .. "\n")
-        end,
     }
+
+  -- print and io defined AFTER tSandbox exists so closures can
+  -- reference tSandbox.env for NO_COLOR detection.
+  -- When a child's stdout is redirected to a file, the shell sets
+  -- env.NO_COLOR = "1". All ANSI escape codes are stripped automatically.
+
+  tSandbox.print = function(...)
+      local tP = {}
+      for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
+      local sOut = table.concat(tP, "\t") .. "\n"
+      if tSandbox.env and tSandbox.env.NO_COLOR then
+          sOut = fStripAnsi(sOut)
+      end
+      kernel.syscall_dispatch("vfs_write", -11, sOut)
+  end
+
+  tSandbox.io = {
+      write = function(...)
+          local tP = {}
+          for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
+          local sOut = table.concat(tP)
+          if tSandbox.env and tSandbox.env.NO_COLOR then
+              sOut = fStripAnsi(sOut)
+          end
+          kernel.syscall_dispatch("vfs_write", -11, sOut)
+      end,
+      read = function()
+          local _, _, data = kernel.syscall_dispatch("vfs_read", -10)
+          return data
+      end,
+  }
   
   -- Safe os table
   local tSafeOs = {}
@@ -397,19 +427,6 @@ function kernel.create_sandbox(nPid, nRing)
   end
   tSandbox.os = tSafeOs
 
-  -- io library (unbuffered stdout/stdin)
-    tSandbox.io = {
-        write = function(...)
-            local tP = {}
-            for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
-            kernel.syscall_dispatch("vfs_write", -11, table.concat(tP))
-        end,
-        read = function()
-            local _, _, data = kernel.syscall_dispatch("vfs_read", -10)
-            return data
-        end,
-    }
-  
   -- Ring 0 gets god-mode
   if nRing == 0 then
     tSandbox.kernel = kernel
@@ -1150,6 +1167,20 @@ kernel.tSyscallTable["vfs_list"]  = {
     func = function(nPid, sPath)
         local bOk, tListOrErr = pcall(g_oPrimitiveFs.list, sPath)
         if bOk then return true, tListOrErr else return false, tListOrErr end
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["vfs_delete"] = {
+    func = function(nPid, sPath)
+        return pcall(g_oPrimitiveFs.remove, sPath)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["vfs_mkdir"] = {
+    func = function(nPid, sPath)
+        return pcall(g_oPrimitiveFs.makeDirectory, sPath)
     end,
     allowed_rings = {0, 1, 2, 2.5, 3}
 }

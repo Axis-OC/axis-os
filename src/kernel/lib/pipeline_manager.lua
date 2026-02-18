@@ -22,12 +22,17 @@ local g_tPmInternal = {}     -- [nId] -> { type, devname, driverPid, rawHandle }
 local g_nPmNextInternal = 1
 -- local tProcessNextAlias = {} -- [pid] = next alias number for that process
 local g_tPmSignalBuffer = {}
+local g_nRingFsId  = nil      -- internal PM FD for ringfs (kept open for ongoing writes)
+local g_tLogState   = nil      -- permanent log file handles { hLogFile, hVblFile, ... }
+local g_tSysConfig  = nil      -- parsed /etc/sys.cfg
 
 syscall("syscall_override", "vfs_open")
 syscall("syscall_override", "vfs_read")
 syscall("syscall_override", "vfs_write")
 syscall("syscall_override", "vfs_close")
 syscall("syscall_override", "vfs_list")
+syscall("syscall_override", "vfs_delete")
+syscall("syscall_override", "vfs_mkdir")
 syscall("syscall_override", "vfs_chmod")
 syscall("syscall_override", "vfs_device_control")
 
@@ -136,22 +141,164 @@ end
 
 
 -- ==========================================
+-- LOG ROTATION SYSTEM
+-- ==========================================
+
+local function _loadSysConfig()
+  if not vfs_state.oRootFs then return {} end
+  local bOk, h = syscall("raw_component_invoke", vfs_state.oRootFs.address, "open", "/etc/sys.cfg", "r")
+  if not bOk or not h then return {} end
+  local _, d = syscall("raw_component_invoke", vfs_state.oRootFs.address, "read", h, math.huge)
+  syscall("raw_component_invoke", vfs_state.oRootFs.address, "close", h)
+  if not d or type(d) ~= "string" then return {} end
+  local f = load(d, "sys.cfg", "t", {})
+  if not f then return {} end
+  local bPcallOk, tResult = pcall(f)
+  return (bPcallOk and type(tResult) == "table") and tResult or {}
+end
+
+local function _rotateLogDir(sDir, nMax)
+  local bOk, tList = syscall("raw_component_invoke", vfs_state.oRootFs.address, "list", sDir)
+  if not bOk or not tList then return 1 end
+  local tFiles = {}
+  local nMaxNum = 0
+  for _, sName in ipairs(tList) do
+    local sClean = sName
+    if sClean:sub(-1) == "/" then sClean = sClean:sub(1, -2) end
+    -- match syslog_NNN.log or syslog_NNN.vbl
+    local sNum = sClean:match("syslog_(%d+)")
+    if sNum then
+      local n = tonumber(sNum)
+      table.insert(tFiles, { name = sClean, num = n })
+      if n > nMaxNum then nMaxNum = n end
+    end
+  end
+  -- sort oldest first
+  table.sort(tFiles, function(a, b) return a.num < b.num end)
+  -- delete oldest until under limit
+  while #tFiles >= nMax do
+    local sOldPath = sDir .. "/" .. tFiles[1].name
+    syscall("raw_component_invoke", vfs_state.oRootFs.address, "remove", sOldPath)
+    syscall("kernel_log", "[PM] Log rotate: deleted " .. sOldPath)
+    table.remove(tFiles, 1)
+  end
+  return nMaxNum + 1
+end
+
+local function _setupLogRotation(tConfig)
+  local tLog = tConfig and tConfig.logging
+  if not tLog or not tLog.enable_log_rotation_saver then
+    syscall("kernel_log", "[PM] Log rotation disabled in sys.cfg.")
+    return nil
+  end
+
+  local sLogDir = tLog.log_dir or "/log"
+  local sVblDir = tLog.vbl_dir or "/vbl"
+  local nMax    = tLog.max_log_files or 5
+
+  -- create directories (ignore errors if they exist)
+  pcall(function() syscall("raw_component_invoke", vfs_state.oRootFs.address, "makeDirectory", sLogDir) end)
+  pcall(function() syscall("raw_component_invoke", vfs_state.oRootFs.address, "makeDirectory", sVblDir) end)
+
+  -- rotate old files
+  local nLogNum = _rotateLogDir(sLogDir, nMax)
+  local nVblNum = _rotateLogDir(sVblDir, nMax)
+  local nNum    = math.max(nLogNum, nVblNum)
+  local sNumStr = string.format("%03d", nNum)
+
+  local sLogPath = sLogDir .. "/syslog_" .. sNumStr .. ".log"
+  local sVblPath = sVblDir .. "/syslog_" .. sNumStr .. ".vbl"
+
+  local bOk1, hLog = syscall("raw_component_invoke", vfs_state.oRootFs.address, "open", sLogPath, "w")
+  local bOk2, hVbl = syscall("raw_component_invoke", vfs_state.oRootFs.address, "open", sVblPath, "w")
+
+  syscall("kernel_log", "[PM] Log rotation active:")
+  if bOk1 and hLog then syscall("kernel_log", "[PM]   .log -> " .. sLogPath) end
+  if bOk2 and hVbl then syscall("kernel_log", "[PM]   .vbl -> " .. sVblPath) end
+
+  return {
+    hLogFile = (bOk1 and hLog) or nil,
+    hVblFile = (bOk2 and hVbl) or nil,
+    sLogPath = sLogPath,
+    sVblPath = sVblPath,
+  }
+end
+
+local function _writeToLogFiles(sText)
+  if not g_tLogState or not sText or #sText == 0 then return end
+
+  -- .vbl gets EVERYTHING (verbose)
+  if g_tLogState.hVblFile then
+    pcall(function()
+      syscall("raw_component_invoke", vfs_state.oRootFs.address,
+              "write", g_tLogState.hVblFile, sText)
+    end)
+  end
+
+  -- .log gets only non-debug entries
+  if g_tLogState.hLogFile then
+    pcall(function()
+      local sFiltered = ""
+      for sLine in (sText .. "\n"):gmatch("([^\n]*)\n") do
+        if #sLine > 0 then
+          local bSkip = false
+          -- skip [dev], [debug], and [DK] (driver kit verbose) lines
+          if sLine:match("^%[dev%]")   then bSkip = true end
+          if sLine:match("^%[debug%]") then bSkip = true end
+          if sLine:match("%[DK%]")     then bSkip = true end
+          if not bSkip then
+            sFiltered = sFiltered .. sLine .. "\n"
+          end
+        end
+      end
+      if #sFiltered > 0 then
+        syscall("raw_component_invoke", vfs_state.oRootFs.address,
+                "write", g_tLogState.hLogFile, sFiltered)
+      end
+    end)
+  end
+end
+
+local function _drainKernelLog()
+  local sNewLog = syscall("kernel_get_boot_log")
+  if not sNewLog or #sNewLog == 0 then return end
+
+  -- write to ringfs live buffer
+  if g_nRingFsId then
+    pcall(function() _doInternalWrite(g_nRingFsId, sNewLog .. "\n") end)
+  end
+
+  -- write to permanent files
+  _writeToLogFiles(sNewLog)
+end
+
+
+-- ==========================================
 -- BOOT LOG FLUSH
 -- ==========================================
 
 local function flush_boot_log(sLogDevice)
-  syscall("kernel_log", "[PM] Flushing boot log to " .. sLogDevice)
-  local sBootLog = syscall("kernel_get_boot_log")
-  if not sBootLog or #sBootLog == 0 then return end
-  
-  local bOk, nId = _doInternalOpen(sLogDevice, "w")       -- removed nMyPid
+  syscall("kernel_log", "[PM] Initializing log system on " .. sLogDevice)
+
+  -- 1. Load system config
+  g_tSysConfig = _loadSysConfig()
+
+  -- 2. Set up persistent log rotation FIRST (before any writes)
+  g_tLogState = _setupLogRotation(g_tSysConfig)
+
+  -- 3. Open ringfs and keep handle for ongoing writes
+  local bOk, nId = _doInternalOpen(sLogDevice, "w")
   if bOk then
-     _doInternalWrite(nId, sBootLog)                        -- removed nMyPid
-     _doInternalClose(nId)                                  -- removed nMyPid
-     syscall("kernel_log", "[PM] Boot log flushed.")
+    g_nRingFsId = nId
+    syscall("kernel_log", "[PM] Ringfs handle opened (persistent).")
   else
-     syscall("kernel_log", "[PM] Failed to open log device for flushing.")
+    syscall("kernel_log", "[PM] Warning: Could not open " .. sLogDevice)
   end
+
+  -- 4. Drain all accumulated boot log to every destination
+  _drainKernelLog()
+
+  syscall("kernel_log", "[PM] Log system initialized.")
 end
 
 local function wait_for_dkms()
@@ -513,6 +660,37 @@ function vfs_state.handle_list(nSenderPid, sPath)
   if bOk then return true, tListOrErr else return nil, tListOrErr end
 end
 
+function vfs_state.handle_delete(nSenderPid, sPath)
+  -- block dangerous paths
+  if not sPath or sPath == "/" then return nil, "Cannot delete root" end
+  if sPath:sub(1, 5) == "/dev/"  then return nil, "Cannot delete device nodes" end
+  if sPath:sub(1, 5) == "/boot"  then return nil, "Cannot delete boot files" end
+
+  -- /tmp/ is world-writable; everything else needs permission check
+  if sPath:sub(1, 5) ~= "/tmp/" then
+    if not check_access(nSenderPid, sPath, "w") then
+      return nil, "Permission denied"
+    end
+  end
+
+  local bOk, sResult = syscall("raw_component_invoke",
+                                vfs_state.oRootFs.address, "remove", sPath)
+  if bOk then return true else return nil, tostring(sResult) end
+end
+
+function vfs_state.handle_mkdir(nSenderPid, sPath)
+  if sPath:sub(1, 5) == "/dev/" then return nil, "Cannot mkdir in /dev" end
+  -- /tmp/ is world-writable
+  if sPath:sub(1, 5) ~= "/tmp/" then
+    if not check_access(nSenderPid, sPath, "w") then
+      return nil, "Permission denied"
+    end
+  end
+  local bOk, sResult = syscall("raw_component_invoke",
+                                vfs_state.oRootFs.address, "makeDirectory", sPath)
+  if bOk then return true else return nil, tostring(sResult) end
+end
+
 
 function vfs_state.handle_driver_load(nSenderPid, sPath)
   -- Security: check ring and UID
@@ -642,9 +820,16 @@ local function process_fstab()
                for _, tEntry in ipairs(tFstab) do
                   if tEntry.type == "ringfs" then
                      if not bRingFsLoaded then
-                         syscall("kernel_log", "[PM] Auto-loading RingFS...")
-                         syscall("signal_send", nDkmsPid, "load_driver_path", "/drivers/ringfs.sys.lua")
-                         syscall("process_wait", 0) 
+                         -- Check if ringfs device already exists
+                         local bProbe, nProbeId = _doInternalOpen("/dev/ringlog", "w")
+                         if bProbe then
+                            _doInternalClose(nProbeId)
+                            syscall("kernel_log", "[PM] RingFS already present, skipping load.")
+                         else
+                            syscall("kernel_log", "[PM] Loading RingFS driver...")
+                            syscall("signal_send", nDkmsPid, "load_driver_path", "/drivers/ringfs.sys.lua")
+                            syscall("process_wait", 0)
+                         end
                          bRingFsLoaded = true
                      end
                      local tOpts = parse_options(tEntry.options)
@@ -727,6 +912,7 @@ else syscall("kernel_log", "[PM] Init spawned as PID " .. tostring(nInitPid)) en
 -- ==========================================
 
 while true do
+    _drainKernelLog()
    -- Drain buffered signals first
    while #g_tPmSignalBuffer > 0 do
       local tSig = table.remove(g_tPmSignalBuffer, 1)
@@ -746,6 +932,8 @@ while true do
         elseif sName == "vfs_read" then result1, result2 = vfs_state.handle_read(nCaller, sSynToken, tArgs[1], tArgs[2])
         elseif sName == "vfs_close" then result1, result2 = vfs_state.handle_close(nCaller, sSynToken, tArgs[1])
         elseif sName == "vfs_list" then result1, result2 = vfs_state.handle_list(nCaller, tArgs[1])
+        elseif sName == "vfs_delete" then result1, result2 = vfs_state.handle_delete(nCaller, tArgs[1])
+        elseif sName == "vfs_mkdir"  then result1, result2 = vfs_state.handle_mkdir(nCaller, tArgs[1])
         elseif sName == "vfs_chmod" then result1, result2 = vfs_state.handle_chmod(nCaller, tArgs[1], tArgs[2])
         elseif sName == "vfs_device_control" then result1, result2 = vfs_state.handle_device_control(nCaller, sSynToken, tArgs[1], tArgs[2], tArgs[3])
         elseif sName == "driver_load" then result1, result2 = vfs_state.handle_driver_load(nCaller, tArgs[1])

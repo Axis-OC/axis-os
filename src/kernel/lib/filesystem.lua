@@ -134,4 +134,14 @@ oFsLib.deviceControl = function(handle, sMethod, tArgs)
     return b1 and b2, val
 end
 
+oFsLib.remove = function(sPath)
+    local b1, b2 = syscall("vfs_delete", sPath)
+    return b1 and b2
+end
+
+oFsLib.mkdir = function(sPath)
+    local b1, b2 = syscall("vfs_mkdir", sPath)
+    return b1 and b2
+end
+
 return oFsLib

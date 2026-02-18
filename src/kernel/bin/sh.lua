@@ -474,27 +474,25 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
         HOSTNAME = ENV.HOSTNAME,
     }
 
-    -- === REDIRECT: save/swap/restore pattern ===
+    -- === REDIRECT: save/swap/restore ===
     local hRedirectFile = nil
     local sOrigStdout = nil
 
     if sOutFile then
+        tChildEnv.NO_COLOR = "1"  -- strip ANSI in child output
         local sMode = bAppend and "a" or "w"
         hRedirectFile = oFs.open(sOutFile, sMode)
         if not hRedirectFile then
             oFs.write(hStderr, "sh: cannot open " .. sOutFile .. " for writing\n")
             return true
         end
-        -- 1) Save our current -11
         sOrigStdout = syscall("ob_get_standard_handle", myPid, -11)
-        -- 2) Point our -11 at the redirect file
         syscall("ob_set_standard_handle", myPid, -11, hRedirectFile._token)
     end
 
-    -- 3) Spawn child — it inherits OUR -11 (now pointing at the file)
     local pid, err = syscall("process_spawn", execPath, ring, tChildEnv)
 
-    -- 4) Immediately restore our -11 so the shell's own output is normal again
+    -- restore immediately so shell's own output is normal
     if sOrigStdout then
         syscall("ob_set_standard_handle", myPid, -11, sOrigStdout)
     end
@@ -524,7 +522,6 @@ local function executePipeline(tSegments)
         local cmdArgs = {}
         for i = 2, #tStageArgs do table.insert(cmdArgs, tStageArgs[i]) end
 
-        -- Parse redirects on the LAST stage only
         local sOutFile, bAppend = nil, false
         if nStage == #tSegments then
             tStageArgs, sOutFile, bAppend = parseRedirects(tStageArgs)
@@ -546,7 +543,6 @@ local function executePipeline(tSegments)
 
         local ring = syscall("process_get_ring")
 
-        -- Temp file for this stage's output (unless last stage without file redirect)
         local sThisTempPath = nil
         if nStage < #tSegments then
             sThisTempPath = "/tmp/.pipe_" .. tostring(nStage) .. "_" .. tostring(math.random(10000, 99999))
@@ -561,11 +557,16 @@ local function executePipeline(tSegments)
             HOSTNAME = ENV.HOSTNAME,
         }
 
+        -- strip ANSI if output goes to a temp file or redirect
+        if sThisTempPath or sOutFile then
+            tChildEnv.NO_COLOR = "1"
+        end
+
         -- === SAVE current standard handles ===
         local sOrigStdout = syscall("ob_get_standard_handle", myPid, -11)
         local sOrigStdin  = syscall("ob_get_standard_handle", myPid, -10)
 
-        -- === SWAP stdin if we have input from a previous stage ===
+        -- === SWAP stdin if reading from previous stage ===
         local hPipeIn = nil
         if sPrevTempPath then
             hPipeIn = oFs.open(sPrevTempPath, "r")
@@ -589,16 +590,12 @@ local function executePipeline(tSegments)
             end
         end
 
-        -- === SPAWN child (inherits our swapped handles) ===
+        -- === SPAWN (child inherits swapped handles) ===
         local pid, err = syscall("process_spawn", execPath, ring, tChildEnv)
 
-        -- === RESTORE our handles immediately ===
-        if sOrigStdout then
-            syscall("ob_set_standard_handle", myPid, -11, sOrigStdout)
-        end
-        if sOrigStdin then
-            syscall("ob_set_standard_handle", myPid, -10, sOrigStdin)
-        end
+        -- === RESTORE immediately ===
+        if sOrigStdout then syscall("ob_set_standard_handle", myPid, -11, sOrigStdout) end
+        if sOrigStdin  then syscall("ob_set_standard_handle", myPid, -10, sOrigStdin)  end
 
         if pid then
             syscall("process_wait", pid)
@@ -606,12 +603,22 @@ local function executePipeline(tSegments)
             oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
         end
 
-        -- Cleanup handles
+        -- cleanup handles
         if hOutFile then oFs.close(hOutFile) end
-        if hPipeIn then oFs.close(hPipeIn) end
+        if hPipeIn  then oFs.close(hPipeIn)  end
+
+        -- === DELETE previous stage's temp file (we finished reading it) ===
+        if sPrevTempPath then
+            oFs.remove(sPrevTempPath)
+        end
 
         sPrevTempPath = sThisTempPath
         ::pipe_continue::
+    end
+
+    -- cleanup last temp (edge case: last stage had piped input)
+    if sPrevTempPath then
+        oFs.remove(sPrevTempPath)
     end
 
     return true
