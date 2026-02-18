@@ -38,6 +38,7 @@ local g_nCurrentLine = 0
 local tBootArgs = boot_args or {} 
 
 local g_oPreempt = nil          -- loaded from /lib/preempt.lua at boot
+local g_oIpc = nil  -- Kernel IPC subsystem
 
 local g_tSchedStats = {
     nTotalResumes      = 0,
@@ -375,6 +376,30 @@ local function __load_preempt()
     end
 end
 
+local function __load_ke_ipc()
+    local sCode, sErr = primitive_load("/lib/ke_ipc.lua")
+    if not sCode then
+        kprint("warn", "ke_ipc not found: " .. tostring(sErr))
+        return nil
+    end
+    local tEnv = {
+        string = string, math = math, os = os, table = table,
+        pairs = pairs, ipairs = ipairs, type = type,
+        tostring = tostring, tonumber = tonumber,
+        pcall = pcall, select = select, next = next, error = error,
+        setmetatable = setmetatable, coroutine = coroutine,
+        raw_computer = raw_computer,
+    }
+    local fChunk, sLoadErr = load(sCode, "@ke_ipc", "t", tEnv)
+    if not fChunk then
+        kprint("fail", "Failed to parse ke_ipc: " .. tostring(sLoadErr))
+        return nil
+    end
+    local bOk, oResult = pcall(fChunk)
+    if bOk and type(oResult) == "table" then return oResult
+    else kprint("fail", "Failed to init ke_ipc: " .. tostring(oResult)); return nil end
+end
+
 -------------------------------------------------
 -- PROCESS & MODULE MANAGEMENT
 -------------------------------------------------
@@ -473,10 +498,22 @@ function kernel.create_sandbox(nPid, nRing)
           nPcCounter = nPcCounter + 1
           if nPcCounter < nPcInterval then return end
           nPcCounter = 0
+          -- Signal delivery (if any pending)
+          if g_oIpc then
+              local tProc = kernel.tProcessTable[nPid]
+              if tProc and tProc.tPendingSignals and #tProc.tPendingSignals > 0 then
+                  g_oIpc.DeliverSignals(nPid)
+                  if tProc.status == "dead" then
+                      coroutine.yield()
+                      return
+                  end
+              end
+          end
+          -- Time quantum check
           local nNow = fUptime()
           if nNow - nPcLastYield >= nPcQuantum then
-              coroutine.yield()              -- → scheduler
-              nPcLastYield = fUptime()       -- refresh after resume
+              coroutine.yield()
+              nPcLastYield = fUptime()
           end
       end
 
@@ -618,6 +655,11 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
   kernel.tPidMap[coProcess] = nPid
   kernel.tRings[nPid] = nRing
 
+  -- Initialize IPC per-process state (signals, IRQL, process group)
+  if g_oIpc then
+      g_oIpc.InitProcessSignals(nPid)
+  end
+
   -- Object Handle: Initialize per-process handle table
   if g_oObManager then
     g_oObManager.ObInitializeProcess(nPid)
@@ -640,7 +682,6 @@ function kernel.create_thread(fFunc, nParentPid)
   
   kprint("dev", "Spawning thread " .. nPid .. " for parent " .. nParentPid)
   
-  -- Threads share parent's sandbox (globals, env, fds)
   local tSharedEnv = tParentProcess.env
   
   local coThread = coroutine.create(function()
@@ -651,7 +692,6 @@ function kernel.create_thread(fFunc, nParentPid)
     kernel.tProcessTable[nPid].status = "dead"
   end)
   
-  -- sMLTR: Thread shares parent's synapse token (same security context)
   local sSynapseToken = tParentProcess.synapseToken
   
   kernel.tProcessTable[nPid] = {
@@ -667,26 +707,34 @@ function kernel.create_thread(fFunc, nParentPid)
     synapseToken = sSynapseToken,
     threads = {},
     is_thread = true,
+    -- Preemptive scheduler stats
+    nCpuTime         = 0,
+    nPreemptCount    = 0,
+    nLastSlice       = 0,
+    nMaxSlice        = 0,
+    nWatchdogStrikes = 0,
   }
   
   kernel.tPidMap[coThread] = nPid
   kernel.tRings[nPid] = tParentProcess.ring
   
-  -- Object Handle: Threads share parent's handle table
-  -- They get the SAME synapse token so they can use parent's handles
+  -- FIX: was InitProcess / InheritHandles (non-existent)
   if g_oObManager then
-    g_oObManager.InitProcess(nPid)
+    g_oObManager.ObInitializeProcess(nPid)
     if nParentPid and nParentPid > 0 and kernel.tProcessTable[nParentPid] then
-      g_oObManager.InheritHandles(nParentPid, nPid, sSynapseToken)
+      g_oObManager.ObInheritHandles(nParentPid, nPid, sSynapseToken)
     end
   end
   
-  -- Track thread in parent
+  -- Initialize IPC per-process state
+  if g_oIpc then
+      g_oIpc.InitProcessSignals(nPid)
+  end
+  
   table.insert(tParentProcess.threads, nPid)
   
   return nPid
 end
-
 -------------------------------------------------
 -- SYSCALL DISPATCHER
 -------------------------------------------------
@@ -703,6 +751,30 @@ function kernel.syscall_dispatch(sName, ...)
   g_nCurrentPid = nPid
   local nRing = kernel.tRings[nPid]
   
+  -- PIPE FAST PATH: intercept vfs_read/vfs_write for kernel pipe handles
+  -- This bypasses PM entirely, preventing PM from blocking on pipe I/O
+  if g_oIpc and (sName == "vfs_read" or sName == "vfs_write") then
+        local vHandle = select(1, ...)
+        local bPcallOk, bIsPipe, r1, r2 = pcall(g_oIpc.TryPipeIo, nPid, sName, ...)
+        if bPcallOk and bIsPipe then
+            return r1, r2
+        end
+        if not bPcallOk then
+            kprint("fail", "[IPC] Pipe fast-path error: " .. tostring(bIsPipe))
+        end
+    end
+
+  -- Signal delivery point: deliver pending signals on every syscall entry
+  if g_oIpc then
+        local p = kernel.tProcessTable[nPid]
+        if p and p.tPendingSignals and #p.tPendingSignals > 0 then
+            local bKilled = g_oIpc.DeliverSignals(nPid)
+            if bKilled then
+                return nil, "Killed by signal"
+            end
+        end
+  end
+
   -- Check for ring 1 overrides
   local nOverridePid = kernel.tSyscallOverrides[sName]
   if nOverridePid then
@@ -872,15 +944,19 @@ kernel.tSyscallTable["process_wait"] = {
 }
 
 kernel.tSyscallTable["process_kill"] = {
-  func = function(nPid, nTargetPid)
+  func = function(nPid, nTargetPid, nSignal)
     local tTarget = kernel.tProcessTable[nTargetPid]
     if not tTarget then return nil, "No such process" end
     local nCallerRing = kernel.tRings[nPid]
     if nCallerRing > 1 and tTarget.parent ~= nPid then
        return nil, "Permission denied"
     end
+    -- Use signal system if available, otherwise direct kill
+    if g_oIpc then
+        nSignal = nSignal or g_oIpc.SIGTERM
+        return g_oIpc.SignalSend(nTargetPid, nSignal)
+    end
     tTarget.status = "dead"
-    -- Also kill all threads of the target
     for _, nTid in ipairs(tTarget.threads or {}) do
       if kernel.tProcessTable[nTid] then
         kernel.tProcessTable[nTid].status = "dead"
@@ -1278,6 +1354,252 @@ kernel.tSyscallTable["synapse_rotate"] = {
 }
 
 -- ==========================================
+-- IPC SYSCALLS
+-- ==========================================
+
+-- IRQL
+kernel.tSyscallTable["ke_raise_irql"] = {
+    func = function(nPid, nLevel)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeRaiseIrql(nPid, nLevel)
+    end, allowed_rings = {0, 1, 2}
+}
+kernel.tSyscallTable["ke_lower_irql"] = {
+    func = function(nPid, nLevel)
+        if not g_oIpc then return end
+        g_oIpc.KeLowerIrql(nPid, nLevel)
+    end, allowed_rings = {0, 1, 2}
+}
+kernel.tSyscallTable["ke_get_irql"] = {
+    func = function(nPid)
+        if not g_oIpc then return 0 end
+        return g_oIpc.KeGetCurrentIrql(nPid)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Events
+kernel.tSyscallTable["ke_create_event"] = {
+    func = function(nPid, bManual, bInit)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateEvent(nPid, bManual, bInit)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_set_event"] = {
+    func = function(nPid, sH)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeSetEvent(nPid, sH)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_reset_event"] = {
+    func = function(nPid, sH)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeResetEvent(nPid, sH)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_pulse_event"] = {
+    func = function(nPid, sH)
+        if not g_oIpc then return nil end
+        return g_oIpc.KePulseEvent(nPid, sH)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Mutexes
+kernel.tSyscallTable["ke_create_mutex"] = {
+    func = function(nPid, bOwned)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateMutex(nPid, bOwned)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_release_mutex"] = {
+    func = function(nPid, sH)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeReleaseMutex(nPid, sH)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Semaphores
+kernel.tSyscallTable["ke_create_semaphore"] = {
+    func = function(nPid, nInit, nMax)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateSemaphore(nPid, nInit, nMax)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_release_semaphore"] = {
+    func = function(nPid, sH, nCount)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeReleaseSemaphore(nPid, sH, nCount)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Timers
+kernel.tSyscallTable["ke_create_timer"] = {
+    func = function(nPid)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateTimer(nPid)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_set_timer"] = {
+    func = function(nPid, sH, nDelay, nPeriod)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeSetTimer(nPid, sH, nDelay, nPeriod)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_cancel_timer"] = {
+    func = function(nPid, sH)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCancelTimer(nPid, sH)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Pipes
+kernel.tSyscallTable["ke_create_pipe"] = {
+    func = function(nPid, nBuf)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreatePipe(nPid, nBuf)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_create_named_pipe"] = {
+    func = function(nPid, sName, nBuf)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateNamedPipe(nPid, sName, nBuf)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_connect_named_pipe"] = {
+    func = function(nPid, sName)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeConnectNamedPipe(nPid, sName)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_pipe_write"] = {
+    func = function(nPid, sH, sData)
+        if not g_oIpc then return nil end
+        local pH = g_oObManager.ObReferenceObjectByHandle(
+            nPid, sH, 0x0002, kernel.tProcessTable[nPid].synapseToken)
+        if not pH or not pH.pBody then return nil, "Invalid pipe handle" end
+        return g_oIpc.PipeWrite(nPid, pH.pBody, sData)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_pipe_read"] = {
+    func = function(nPid, sH, nCount)
+        if not g_oIpc then return nil end
+        local pH = g_oObManager.ObReferenceObjectByHandle(
+            nPid, sH, 0x0001, kernel.tProcessTable[nPid].synapseToken)
+        if not pH or not pH.pBody then return nil, "Invalid pipe handle" end
+        return g_oIpc.PipeRead(nPid, pH.pBody, nCount)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_pipe_close"] = {
+    func = function(nPid, sH, bIsWrite)
+        if not g_oIpc then return nil end
+        return g_oIpc.PipeClose(nPid, sH, bIsWrite)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Wait
+kernel.tSyscallTable["ke_wait_single"] = {
+    func = function(nPid, sH, nTimeout)
+        if not g_oIpc then return -1 end
+        return g_oIpc.KeWaitSingle(nPid, sH, nTimeout)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_wait_multiple"] = {
+    func = function(nPid, tHandles, bAll, nTimeout)
+        if not g_oIpc then return -1 end
+        return g_oIpc.KeWaitMultiple(nPid, tHandles, bAll, nTimeout)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Shared Memory
+kernel.tSyscallTable["ke_create_section"] = {
+    func = function(nPid, sName, nSize)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateSection(nPid, sName, nSize)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_open_section"] = {
+    func = function(nPid, sName)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeOpenSection(nPid, sName)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_map_section"] = {
+    func = function(nPid, sH)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeMapSection(nPid, sH)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Message Queues
+kernel.tSyscallTable["ke_create_mqueue"] = {
+    func = function(nPid, sName, nMax, nSize)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateMqueue(nPid, sName, nMax, nSize)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_open_mqueue"] = {
+    func = function(nPid, sName)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeOpenMqueue(nPid, sName)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_mq_send"] = {
+    func = function(nPid, sH, sMsg, nPri)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeMqSend(nPid, sH, sMsg, nPri)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_mq_receive"] = {
+    func = function(nPid, sH, nTimeout)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeMqReceive(nPid, sH, nTimeout)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Signals
+kernel.tSyscallTable["ke_signal_send"] = {
+    func = function(nPid, nTarget, nSig)
+        if not g_oIpc then return nil end
+        return g_oIpc.SignalSend(nTarget, nSig)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_signal_handler"] = {
+    func = function(nPid, nSig, fHandler)
+        if not g_oIpc then return nil end
+        return g_oIpc.SignalSetHandler(nPid, nSig, fHandler)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_signal_mask"] = {
+    func = function(nPid, tMask)
+        if not g_oIpc then return nil end
+        return g_oIpc.SignalSetMask(nPid, tMask)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_signal_group"] = {
+    func = function(nPid, nPgid, nSig)
+        if not g_oIpc then return nil end
+        return g_oIpc.SignalSendGroup(nPgid, nSig)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_setpgid"] = {
+    func = function(nPid, nTarget, nPgid)
+        if not g_oIpc then return nil end
+        return g_oIpc.SetProcessGroup(nTarget or nPid, nPgid)
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_getpgid"] = {
+    func = function(nPid)
+        local p = kernel.tProcessTable[nPid]
+        return p and (p.nPgid or nPid) or nil
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+kernel.tSyscallTable["ke_ipc_stats"] = {
+    func = function(nPid)
+        if not g_oIpc then return nil end
+        return g_oIpc.GetStats()
+    end, allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- ==========================================
 -- SCHEDULER DIAGNOSTICS
 -- ==========================================
 
@@ -1491,6 +1813,28 @@ else
     kprint("warn", "Preemptive scheduling unavailable — cooperative only.")
 end
 
+-- Load Kernel IPC subsystem
+g_oIpc = __load_ke_ipc()
+if g_oIpc and g_oObManager then
+    g_oIpc.Initialize({
+        tProcessTable = kernel.tProcessTable,
+        fUptime       = raw_computer.uptime,
+        fLog          = function(s) kprint("info", s) end,
+        oObManager    = g_oObManager,
+        fYield        = coroutine.yield,
+    })
+    -- Register new object types
+    g_oObManager.ObCreateObjectType("KeMutex",          {})
+    g_oObManager.ObCreateObjectType("KeSemaphore",      {})
+    g_oObManager.ObCreateObjectType("KeTimer",          {})
+    g_oObManager.ObCreateObjectType("IoPipeObject",     {})
+    g_oObManager.ObCreateObjectType("IpcMessageQueue",  {})
+    kprint("ok", "Kernel IPC subsystem online (Events, Mutexes, Semaphores,")
+    kprint("ok", "  Pipes, Sections, MQueues, Signals, WaitMultiple, DPC, IRQL)")
+else
+    kprint("warn", "Kernel IPC subsystem not available.")
+end
+
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")
 local tFstab = primitive_load_lua("/etc/fstab.lua")
@@ -1592,7 +1936,6 @@ while true do
       g_nCurrentPid = nPid
       tProcess.status = "running"
 
-      -- ---------- measure wall-clock time for this resume ----------
       local nResumeStart = raw_computer.uptime()
 
       local tResumeParams = tProcess.resume_args
@@ -1631,10 +1974,6 @@ while true do
       end
 
       -- ---------- PREEMPTION DETECTION ----------
-      -- If the process status is still "running" it means the
-      -- coroutine yielded WITHOUT going through a syscall (which
-      -- would have set status to "sleeping").  This happens when
-      -- __pc() fires.  Mark it "ready" so it runs again next tick.
       if tProcess.status == "running" then
           tProcess.status = "ready"
           tProcess.nPreemptCount = (tProcess.nPreemptCount or 0) + 1
@@ -1667,7 +2006,9 @@ while true do
 
       -- ---------- wake waiters / clean up dead ----------
       if tProcess.status == "dead" then
-        -- Object Handle cleanup
+        if g_oIpc then
+            g_oIpc.NotifyChildDeath(nPid)
+        end
         if g_oObManager then
           g_oObManager.ObDestroyProcess(nPid)
         end
@@ -1681,7 +2022,6 @@ while true do
           end
         end
 
-        -- Kill orphaned threads
         for _, nTid in ipairs(tProcess.threads or {}) do
           if kernel.tProcessTable[nTid]
              and kernel.tProcessTable[nTid].status ~= "dead" then
@@ -1693,10 +2033,9 @@ while true do
 
       -- ======================================================
       -- CRITICAL:  Reset the OC "too long without yielding"
-      -- timer between process resumes.  Also picks up any
-      -- pending hardware events (key_down, scroll, etc.) and
-      -- forwards them immediately — this makes the system feel
-      -- noticeably more responsive under load.
+      -- timer.  This MUST stay inside the per-process loop so
+      -- that each individual resume gets a fresh 5-second window.
+      -- Also picks up hardware events for responsiveness.
       -- ======================================================
       local sIntEvt, ip1, ip2, ip3, ip4, ip5 = computer.pullSignal(0)
       if sIntEvt then
@@ -1708,7 +2047,15 @@ while true do
     end  -- if status == "ready"
   end  -- for each process
 
-  -- 2. Pull external events  (block briefly if nothing was ready)
+  -- ====== IPC TICK: process DPCs and timers ONCE per iteration ======
+  -- This runs AFTER all ready processes have had their turn,
+  -- so DPCs queued during this tick's resumes execute here,
+  -- and timers are checked exactly once per scheduler pass.
+  if g_oIpc then
+      g_oIpc.Tick()
+  end
+
+  -- Pull external events (block briefly if idle)
   local nTimeout = (nWorkDone > 0) and 0 or 0.05
   local sEventName, p1, p2, p3, p4, p5 = computer.pullSignal(nTimeout)
 
