@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="https://axis-os.ru/img/icon.png">
+    <title>Axis OS | Repository</title>
+    
+    <!-- Prism Syntax Highlighting -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-lua.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;700&family=VT323&display=swap" rel="stylesheet">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://repo.axis-os.ru/">
+    <meta property="og:title" content="Axis OS | Repository">
+    <meta property="og:description" content="Axis OS Packages & Kernel Repository">
+
+    <meta property="og:image" content="https://axis-os.ru/img/banner.jpg">
+    
+    <!-- Twitter (X) specific -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Axis OS | Repository">
+    <meta name="twitter:description" content="Axis OS Packages & Kernel Repository">
+    <meta name="twitter:image" content="https://axis-os.ru/img/banner.jpg">
+
+    <style>
+        :root {
+            --bg-color: #050505;
+            --surface-color: #0a0a0a;
+            --border-color: #222;
+            --text-primary: #e0e0e0;
+            --text-secondary: #888;
+            --accent-color: #00bcd4;
+            --accent-dim: rgba(0, 188, 212, 0.1);
+            --accent-glow: rgba(0, 188, 212, 0.4);
+            --success-color: #55ff55;
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-sans: 'Inter', sans-serif;
+            --card-gradient: linear-gradient(145deg, var(--surface-color), var(--bg-color));
+        }
+
+        /* Theme Overrides */
+        [data-theme="sunset"] { --bg-color: #120b18; --surface-color: #1a0f24; --border-color: #3d2a4a; --accent-color: #ff9e42; --accent-glow: rgba(255,158,66,0.4); --accent-dim: rgba(255,158,66,0.1); }
+        [data-theme="crimson"] { --bg-color: #080202; --surface-color: #110505; --border-color: #331111; --text-primary: #fff; --accent-color: #ff3333; --accent-glow: rgba(255,51,51,0.4); --accent-dim: rgba(255,51,51,0.1); }
+        [data-theme="mint"] { --bg-color: #020805; --surface-color: #05140c; --border-color: #11291f; --accent-color: #00ff9d; --accent-glow: rgba(0,255,157,0.4); --accent-dim: rgba(0,255,157,0.1); }
+        [data-theme="award"] { --bg-color: #0000AA; --surface-color: #0000AA; --border-color: #FFFFFF; --text-primary: #FFFFFF; --text-secondary: #CCCCCC; --accent-color: #FFFF55; --font-sans: 'VT323', monospace; --font-mono: 'VT323', monospace; --card-gradient: none; }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background-color: var(--bg-color); color: var(--text-primary); font-family: var(--font-sans); height: 100vh; overflow: hidden; display: flex; flex-direction: column; user-select: none; }
+        
+        #bgCanvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: -1; pointer-events: none; opacity: 0.5; }
+
+        /* HEADER */
+        header { border-bottom: 1px solid var(--border-color); padding: 0 2rem; height: 60px; background: rgba(5,5,5,0.8); backdrop-filter: blur(10px); display: flex; justify-content: space-between; align-items: center; z-index: 10; }
+        .logo { font-family: var(--font-mono); font-weight: 700; font-size: 1.1rem; color: var(--text-primary); text-decoration: none; display: flex; align-items: center; }
+        .logo span { color: var(--accent-color); }
+        .repo-badge { font-size: 0.7rem; background: var(--accent-dim); color: var(--accent-color); padding: 2px 6px; border-radius: 2px; margin-left: 8px; border: 1px solid var(--accent-color); }
+        
+        .nav-links { display: flex; gap: 1.5rem; align-items: center; margin-right: 2rem; }
+        .nav-link { color: var(--text-secondary); text-decoration: none; font-size: 0.9rem; transition: color 0.2s; font-family: var(--font-mono); cursor: pointer; }
+        .nav-link:hover { color: var(--accent-color); }
+
+        .header-controls { display: flex; align-items: center; gap: 1rem; }
+        .btn-icon { background: transparent; border: 1px solid var(--border-color); color: var(--text-primary); width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 2px; transition: all 0.2s; }
+        .btn-icon:hover, .btn-icon.active { border-color: var(--accent-color); color: var(--accent-color); background: var(--accent-dim); }
+
+        /* BROWSER AREA */
+        .browser-container { flex: 1; display: flex; flex-direction: column; padding: 2rem; max-width: 1400px; margin: 0 auto; width: 100%; overflow: hidden; }
+        
+        .toolbar { display: flex; gap: 1rem; margin-bottom: 1.5rem; justify-content: space-between; align-items: center; }
+        .path-bar { flex: 1; display: flex; align-items: center; gap: 0.5rem; background: var(--surface-color); border: 1px solid var(--border-color); padding: 0.6rem 1rem; border-radius: 2px; font-family: var(--font-mono); font-size: 0.9rem; overflow-x: auto; white-space: nowrap; }
+        .path-segment { color: var(--text-secondary); cursor: pointer; transition: color 0.2s; }
+        .path-segment:hover { color: var(--accent-color); text-decoration: underline; }
+        .path-sep { color: var(--border-color); }
+        .path-current { color: var(--text-primary); font-weight: 600; }
+        
+        .keyboard-hint { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-secondary); opacity: 0.7; }
+        .key { border: 1px solid var(--border-color); padding: 2px 6px; border-radius: 3px; font-size: 0.65rem; margin: 0 2px; }
+
+        /* GRID VIEW */
+        .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; overflow-y: auto; padding-bottom: 2rem; padding-right: 5px; outline: none; }
+        
+        .file-card { 
+            background: var(--card-gradient); border: 1px solid var(--border-color); padding: 1rem; 
+            border-radius: 2px; cursor: pointer; transition: all 0.1s; display: flex; flex-direction: column;
+            position: relative; overflow: hidden;
+        }
+        .file-card:hover, .file-card.selected { border-color: var(--accent-color); transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); background: rgba(255,255,255,0.03); }
+        .file-card.selected::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--accent-color); box-shadow: inset 0 0 15px var(--accent-dim); pointer-events: none; }
+        .file-card::before { content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%; background: var(--accent-color); transform: scaleY(0); transition: transform 0.2s; }
+        .file-card:hover::before, .file-card.selected::before { transform: scaleY(1); }
+        
+        .card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 0.8rem; }
+        .file-icon { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; background: rgba(255,255,255,0.03); color: var(--text-primary); flex-shrink: 0; }
+        .file-icon svg { width: 18px; height: 18px; }
+        .file-ext { font-size: 0.6rem; font-family: var(--font-mono); color: var(--text-secondary); text-transform: uppercase; margin-top: 4px; text-align: center; }
+        
+        .file-name { font-family: var(--font-mono); font-size: 0.95rem; word-break: break-all; margin-bottom: auto; line-height: 1.3; }
+        .file-meta { font-size: 0.75rem; color: var(--text-secondary); margin-top: 1rem; display: flex; justify-content: space-between; }
+        .is-dir .file-icon { color: var(--accent-color); background: var(--accent-dim); }
+        .is-dir .file-name { font-weight: 600; color: var(--accent-color); }
+
+        /* LIST VIEW OVERRIDES */
+        .file-grid.list-view { grid-template-columns: 1fr; gap: 0.5rem; }
+        .file-grid.list-view .file-card { flex-direction: row; align-items: center; padding: 0.5rem 1rem; gap: 1rem; height: auto; min-height: 40px; }
+        .file-grid.list-view .card-header { margin-bottom: 0; margin-right: 0.5rem; }
+        .file-grid.list-view .file-ext { display: none; } 
+        .file-grid.list-view .file-name { flex: 1; margin-bottom: 0; }
+        .file-grid.list-view .file-meta { margin-top: 0; width: 80px; text-align: right; }
+        .file-grid.list-view .file-card::before { width: 2px; }
+
+        /* MODALS */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); z-index: 100; display: none; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s; }
+        .modal-overlay.open { display: flex; opacity: 1; }
+        
+        .modal-window { width: 90%; max-width: 1000px; height: 85%; background: var(--bg-color); border: 1px solid var(--border-color); display: flex; flex-direction: column; box-shadow: 0 0 50px rgba(0,0,0,0.5); transform: scale(0.98); transition: transform 0.2s; position: relative; }
+        .modal-overlay.open .modal-window { transform: scale(1); }
+        [data-theme="award"] .modal-window { border: 2px solid white; box-shadow: none; }
+
+        .modal-header { padding: 1rem; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; background: var(--surface-color); }
+        .modal-title { font-family: var(--font-mono); font-weight: 600; color: var(--accent-color); }
+        .modal-actions { display: flex; gap: 0.5rem; }
+        
+        .modal-content { flex: 1; overflow: auto; padding: 0; position: relative; background: #0e0e0e; }
+        .modal-content pre { margin: 0; padding: 1.5rem; min-height: 100%; font-size: 0.9rem; pointer-events: none; }
+
+        /* SETTINGS POPUP */
+        .settings-popup { 
+            position: absolute; top: 70px; right: 2rem; width: 320px; background: var(--bg-color); border: 1px solid var(--border-color); 
+            z-index: 90; padding: 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.5); border-radius: 4px;
+            display: none; opacity: 0; transform: translateY(-10px); transition: all 0.2s;
+        }
+        .settings-popup.open { display: block; opacity: 1; transform: translateY(0); }
+        .settings-group { margin-bottom: 1.5rem; }
+        .settings-group:last-child { margin-bottom: 0; }
+        .settings-label { display: block; font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.5rem; }
+        
+        .settings-input, .settings-select { width: 100%; background: var(--surface-color); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.6rem; font-family: var(--font-mono); font-size: 0.85rem; outline: none; border-radius: 2px; }
+        .settings-input:focus, .settings-select:focus { border-color: var(--accent-color); }
+        
+        /* Range Slider */
+        input[type=range] { width: 100%; -webkit-appearance: none; background: transparent; margin-top: 10px; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; background: var(--accent-color); cursor: pointer; margin-top: -6px; box-shadow: 0 0 10px var(--accent-dim); }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: var(--border-color); border-radius: 2px; }
+
+        /* SMOOTH CHECKBOX (TOGGLE) */
+        .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--border-color); transition: .4s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: var(--text-secondary); transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--accent-dim); border: 1px solid var(--accent-color); }
+        input:checked + .slider:before { transform: translateX(20px); background-color: var(--accent-color); }
+        input:focus + .slider { box-shadow: 0 0 1px var(--accent-color); }
+
+        /* EDITOR (Textarea) */
+        .editor-textarea {
+            width: 100%; height: 100%; background: #0e0e0e; color: #e0e0e0; border: none; padding: 1.5rem; 
+            font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; resize: none; outline: none; line-height: 1.5;
+        }
+
+        /* OC COPY BOX */
+        .oc-copy-box { margin-right: 1rem; display: flex; align-items: center; gap: 0.5rem; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); padding: 4px 8px; border-radius: 2px; cursor: pointer; transition: border-color 0.2s; }
+        .oc-copy-box:hover { border-color: var(--success-color); }
+        .oc-cmd { font-family: var(--font-mono); font-size: 0.8rem; color: var(--success-color); }
+        .oc-label { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; }
+
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-color); }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent-color); }
+        [data-theme="award"] ::-webkit-scrollbar-thumb { background: white; }
+
+        .loading-state { grid-column: 1 / -1; text-align: center; padding: 3rem; color: var(--text-secondary); font-family: var(--font-mono); }
+        .spinner { display: inline-block; animation: spin 1s linear infinite; color: var(--accent-color); font-size: 1.5rem; margin-bottom: 1rem; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        .toast { position: fixed; bottom: 30px; right: 30px; background: var(--surface-color); border: 1px solid var(--accent-color); color: var(--text-primary); padding: 1rem 1.5rem; font-family: var(--font-mono); z-index: 200; transform: translateY(100px); transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); pointer-events: none; }
+        .toast.show { transform: translateY(0); }
+    </style>
+</head>
+<body data-theme="xen">
+
+    <canvas id="bgCanvas"></canvas>
+
+    <header>
+        <div style="display: flex; align-items: center;">
+            <a href="/" class="logo" onmouseenter="playSfx('hover')" onclick="playSfx('click')">AXIS<span>OS</span> <span class="repo-badge">REPO</span></a>
+        </div>
+        
+        <div style="display: flex; align-items: center;">
+            <div class="nav-links">
+                <a href="https://axis-os.ru/" class="nav-link" target="_blank" onmouseenter="playSfx('hover')">HOME</a>
+                <a href="https://axis-os.ru/docs.html" class="nav-link" target="_blank" onmouseenter="playSfx('hover')">DOCS</a>
+            </div>
+
+            <div class="header-controls">
+                <button class="btn-icon" id="settingsBtn" onclick="toggleSettings(); playSfx('click')" onmouseenter="playSfx('hover')">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- SETTINGS POPUP -->
+    <div class="settings-popup" id="settingsPopup">
+        <div class="settings-group">
+            <label class="settings-label">Interface Volume</label>
+            <input type="range" id="volumeSlider" min="0" max="100" value="25" oninput="updateVolume(this.value)">
+        </div>
+        <div class="settings-group">
+            <label class="settings-label">Theme</label>
+            <select class="settings-select" id="themeSelect" onchange="setTheme(this.value)">
+                <option value="xen">XEN // Default</option>
+                <option value="sunset">SUNSET</option>
+                <option value="crimson">CRIMSON</option>
+                <option value="mint">MINT</option>
+                <option value="award">AWARD BIOS</option>
+            </select>
+        </div>
+        <div class="settings-group">
+            <label class="settings-label">View Mode</label>
+            <select class="settings-select" id="layoutSelect" onchange="setLayout(this.value)">
+                <option value="grid">Grid (Icons)</option>
+                <option value="list">List (Details)</option>
+            </select>
+        </div>
+        <div class="settings-group" style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <label class="settings-label" style="margin-bottom:0;">Enable Editor</label>
+                <div style="font-size:0.7rem; color:var(--text-secondary); margin-top:2px;">Modify files before DL</div>
+            </div>
+            <label class="toggle-switch">
+                <input type="checkbox" id="editorToggle" onchange="toggleEditorMode(this.checked)">
+                <span class="slider"></span>
+            </label>
+        </div>
+    </div>
+
+    <div class="browser-container">
+        <div class="toolbar">
+            <div class="path-bar" id="pathBar">
+                <span class="path-current">/</span>
+            </div>
+            <div class="keyboard-hint desktop-only">
+                Use <span class="key">↑</span> <span class="key">↓</span> <span class="key">←</span> <span class="key">→</span> to nav, <span class="key">Enter</span> to open, <span class="key">BkSp</span> back
+            </div>
+        </div>
+
+        <div class="file-grid" id="fileGrid" tabindex="0">
+            <div class="loading-state">
+                <div class="spinner">⟳</div>
+                <div>Accessing Neural Network...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CODE PREVIEW/EDITOR MODAL -->
+    <div class="modal-overlay" id="previewModal">
+        <div class="modal-window">
+            <div class="modal-header">
+                <div class="modal-title" id="modalTitle">filename.lua</div>
+                <div style="display: flex; align-items: center;">
+                    <div class="oc-copy-box" id="ocBox" style="display:none" onclick="copyOcCmd(); playSfx('success')" onmouseenter="playSfx('hover')">
+                        <span class="oc-label">OC WGET</span>
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn-icon" title="Copy Content" onclick="copyModalContent(); playSfx('click')" onmouseenter="playSfx('hover')">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                        <button class="btn-icon" title="Download" onclick="downloadFile(); playSfx('click')" onmouseenter="playSfx('hover')">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        </button>
+                        <button class="btn-icon" title="Close" onclick="closeModal(); playSfx('back')" onmouseenter="playSfx('hover')" style="border-color: var(--border-color); color: var(--text-secondary)">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-content" id="modalBody">
+                <!-- Content injected here (pre+code OR textarea) -->
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast">Command Copied!</div>
+
+<script>
+        const API_PREFIX = "/_sys/list";
+        let currentPath = "/";
+        let currentFileUrl = "";
+        let currentFileName = "";
+        let currentIsBinary = false;
+        let currentFiles = [];
+        let selectedIndex = -1;
+        
+        // Settings State
+        let settings = {
+            volume: 0.25,
+            theme: 'xen',
+            layout: 'grid',
+            editor: false
+        };
+
+        const ICONS = {
+            folder_default: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
+            folder_core: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><rect x="9" y="11" width="6" height="4" rx="1"></rect></svg>`,
+            folder_bin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><polyline points="9 12 11 14 15 10"></polyline></svg>`,
+            lua: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><circle cx="16" cy="8" r="2" fill="currentColor"></circle></svg>`,
+            c: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><text x="8" y="17" font-size="10" font-weight="bold" fill="currentColor">C</text></svg>`,
+            cpp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><text x="7" y="17" font-size="8" font-weight="bold" fill="currentColor">C++</text></svg>`,
+            js: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path></svg>`,
+            json: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M10 12h4M10 15h4M10 9h2"></path></svg>`,
+            txt: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>`,
+            img: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`,
+            archive: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`,
+            file_default: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path></svg>`
+        };
+
+        const BINARY_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'iso', 'img', 'bin', 'exe', 'dll', 'so', 'pdf', 'jpg', 'png', 'gif', 'jpeg', 'webp', 'mp3', 'wav', 'mp4'];
+
+        function isBinaryFile(name) {
+            const ext = name.split('.').pop().toLowerCase();
+            return BINARY_EXTENSIONS.includes(ext);
+        }
+
+        function getIcon(isDir, name) {
+            if (isDir) {
+                const n = name.toLowerCase();
+                if (['kernel', 'eeprom', 'os', 'sys'].includes(n)) return ICONS.folder_core;
+                if (['bin', 'usr', 'lib'].includes(n)) return ICONS.folder_bin;
+                return ICONS.folder_default;
+            }
+            const ext = name.split('.').pop().toLowerCase();
+            if (['lua'].includes(ext)) return ICONS.lua;
+            if (['c', 'h'].includes(ext)) return ICONS.c;
+            if (['cpp', 'hpp'].includes(ext)) return ICONS.cpp;
+            if (['js', 'ts'].includes(ext)) return ICONS.js;
+            if (['json', 'cfg'].includes(ext)) return ICONS.json;
+            if (['txt', 'md', 'log'].includes(ext)) return ICONS.txt;
+            if (['png', 'jpg', 'gif', 'jpeg'].includes(ext)) return ICONS.img;
+            if (['zip', 'tar', 'gz', 'rar', '7z'].includes(ext)) return ICONS.archive;
+            return ICONS.file_default;
+        }
+
+        let audioCtx = null;
+        function playSfx(type) {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            const now = audioCtx.currentTime;
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            const vol = settings.volume; 
+            if (vol <= 0.001) return;
+
+            switch (type) {
+                case 'hover':
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(800, now);
+                    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.03);
+                    gain.gain.setValueAtTime(vol * 0.5, now);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.03);
+                    osc.start(now); osc.stop(now + 0.03);
+                    break;
+                case 'click':
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(300, now);
+                    osc.frequency.linearRampToValueAtTime(600, now + 0.1);
+                    gain.gain.setValueAtTime(vol, now);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.1);
+                    osc.start(now); osc.stop(now + 0.1);
+                    break;
+                case 'back':
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(400, now);
+                    osc.frequency.linearRampToValueAtTime(200, now + 0.15);
+                    gain.gain.setValueAtTime(vol, now);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.15);
+                    osc.start(now); osc.stop(now + 0.15);
+                    break;
+                case 'success':
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(500, now);
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(vol, now + 0.05);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.3);
+                    osc.start(now); osc.stop(now + 0.3);
+                    break;
+            }
+        }
+
+        function loadSettings() {
+            const saved = localStorage.getItem('axis-repo-settings');
+            if(saved) {
+                const parsed = JSON.parse(saved);
+                settings = { ...settings, ...parsed }; 
+            }
+            document.getElementById('volumeSlider').value = settings.volume * 100;
+            document.getElementById('themeSelect').value = settings.theme;
+            document.getElementById('layoutSelect').value = settings.layout;
+            document.getElementById('editorToggle').checked = settings.editor;
+            setTheme(settings.theme);
+            setLayout(settings.layout);
+        }
+
+        function saveSettings() { localStorage.setItem('axis-repo-settings', JSON.stringify(settings)); }
+        function toggleSettings() {
+            const popup = document.getElementById('settingsPopup');
+            const btn = document.getElementById('settingsBtn');
+            const isOpen = popup.classList.contains('open');
+            if(isOpen) { popup.classList.remove('open'); btn.classList.remove('active'); } 
+            else { popup.classList.add('open'); btn.classList.add('active'); }
+        }
+        function updateVolume(val) { settings.volume = parseFloat(val) / 100; saveSettings(); }
+        function setTheme(theme) { document.body.setAttribute('data-theme', theme); settings.theme = theme; saveSettings(); }
+        function setLayout(mode) {
+            settings.layout = mode;
+            const grid = document.getElementById('fileGrid');
+            if(mode === 'list') grid.classList.add('list-view'); else grid.classList.remove('list-view');
+            saveSettings();
+        }
+        function toggleEditorMode(checked) { settings.editor = checked; saveSettings(); }
+
+        function init() {
+            loadSettings();
+            const initialPath = window.location.pathname;
+            if (initialPath === '/' || initialPath === '/index.html') {
+                fetchDirectory('/');
+            } else {
+                if (initialPath.endsWith('/')) {
+                    fetchDirectory(initialPath);
+                } else {
+                    const parts = initialPath.split('/');
+                    const fileName = parts.pop();
+                    const parentDir = parts.join('/') + '/';
+                    fetchDirectory(parentDir).then(() => {
+                        openFile(initialPath, fileName);
+                    });
+                }
+            }
+        }
+
+        async function fetchDirectory(path) {
+            currentPath = path;
+            if (path !== window.location.pathname && path !== window.location.pathname + '/') {
+                history.pushState(null, '', path);
+            }
+
+            const grid = document.getElementById('fileGrid');
+            grid.innerHTML = `<div class="loading-state"><div class="spinner">⟳</div><div>Scanning Sector ${path}...</div></div>`;
+            updateBreadcrumbs(path);
+            
+            try {
+                const response = await fetch(`${API_PREFIX}${path}`);
+                if (!response.ok) throw new Error("Sector inaccessible");
+                const data = await response.json();
+                renderFiles(data, path);
+            } catch (e) {
+                grid.innerHTML = `<div class="loading-state" style="color:var(--accent-color)">Error accessing directory.<br><small>${e.message}</small></div>`;
+            }
+        }
+
+        function renderFiles(files, path) {
+            const grid = document.getElementById('fileGrid');
+            grid.innerHTML = '';
+            
+            files = files.filter(f => f.name !== 'index.html');
+            files.sort((a, b) => {
+                const typeA = a.type === 'directory' ? 0 : 1;
+                const typeB = b.type === 'directory' ? 0 : 1;
+                if (typeA !== typeB) return typeA - typeB;
+                return a.name.localeCompare(b.name);
+            });
+            currentFiles = []; 
+
+            if (path !== '/') {
+                const parts = path.split('/').filter(p => p);
+                parts.pop();
+                const parentPath = parts.length > 0 ? '/' + parts.join('/') + '/' : '/';
+                
+                const parentObj = { name: '..', type: 'parent', path: parentPath };
+                currentFiles.push(parentObj);
+                grid.appendChild(createCard(parentObj, true));
+            }
+
+            files.forEach((f, index) => {
+                const fullPath = path + f.name;
+                const isDir = f.type === 'directory';
+                const fileObj = { ...f, fullPath, isDir, index: currentFiles.length };
+                currentFiles.push(fileObj);
+                grid.appendChild(createCard(fileObj, false));
+            });
+            selectedIndex = -1;
+        }
+
+        function createCard(file, isParent) {
+            const isDir = file.type === 'directory' || isParent;
+            const ext = !isDir ? file.name.split('.').pop() : '';
+            const icon = isParent ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>` : getIcon(isDir, file.name);
+            const card = document.createElement('div');
+            card.className = `file-card ${isDir ? 'is-dir' : ''}`;
+            card.dataset.index = file.index;
+            let sizeStr = '';
+            if (!isParent && !isDir) { if (file.size < 1024) sizeStr = file.size + ' B'; else sizeStr = (file.size / 1024).toFixed(1) + ' KB'; } 
+            else if (isParent) sizeStr = 'UP'; else sizeStr = 'DIR';
+            card.innerHTML = `<div class="card-header"><div class="file-icon">${icon}</div>${!isDir ? `<div class="file-ext">${ext}</div>` : ''}</div><div class="file-name">${file.name}</div><div class="file-meta"><span>${sizeStr}</span></div>`;
+            card.onclick = () => { activateFile(file); };
+            card.onmouseenter = () => { playSfx('hover'); setSelection(file.index); };
+            return card;
+        }
+
+        function activateFile(file) {
+            if (file.type === 'parent') { playSfx('back'); fetchDirectory(file.path); } 
+            else if (file.isDir) { playSfx('click'); fetchDirectory(file.fullPath + '/'); } 
+            else { playSfx('click'); openFile(file.fullPath, file.name); }
+        }
+
+        function setSelection(index) {
+            const cards = document.querySelectorAll('.file-card');
+            cards.forEach(c => c.classList.remove('selected'));
+            if (index >= 0 && index < cards.length) {
+                selectedIndex = index; const target = cards[index]; target.classList.add('selected'); target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (document.getElementById('previewModal').classList.contains('open')) { if (e.key === 'Escape') closeModal(); return; }
+            const grid = document.getElementById('fileGrid');
+            const colWidth = 240 + 16;
+            let cols = Math.floor(grid.offsetWidth / colWidth);
+            if(settings.layout === 'list') cols = 1;
+            if (e.key === 'ArrowRight') { e.preventDefault(); setSelection(Math.min(selectedIndex + 1, currentFiles.length - 1)); playSfx('hover'); }
+            else if (e.key === 'ArrowLeft') { e.preventDefault(); setSelection(Math.max(selectedIndex - 1, 0)); playSfx('hover'); }
+            else if (e.key === 'ArrowDown') { e.preventDefault(); setSelection(Math.min(selectedIndex + cols, currentFiles.length - 1)); playSfx('hover'); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); setSelection(Math.max(selectedIndex - cols, 0)); playSfx('hover'); }
+            else if (e.key === 'Enter') { e.preventDefault(); if (selectedIndex >= 0) activateFile(currentFiles[selectedIndex]); }
+            else if (e.key === 'Backspace') { e.preventDefault(); if (currentPath !== '/') { const parent = currentFiles.find(f => f.type === 'parent'); if (parent) activateFile(parent); } }
+        });
+
+        function updateBreadcrumbs(path) {
+            const bar = document.getElementById('pathBar');
+            bar.innerHTML = '';
+            const rootSpan = document.createElement('span');
+            rootSpan.className = 'path-segment'; rootSpan.innerText = 'ROOT';
+            rootSpan.onclick = () => { playSfx('back'); fetchDirectory('/'); }; rootSpan.onmouseenter = () => playSfx('hover');
+            bar.appendChild(rootSpan);
+            const parts = path.split('/').filter(p => p);
+            let builtPath = '/'; 
+            parts.forEach((p, i) => {
+                bar.innerHTML += ` <span class="path-sep">/</span> `;
+                builtPath += p + '/';
+                const span = document.createElement('span');
+                const targetPath = builtPath; 
+                if (i === parts.length - 1) { span.className = 'path-current'; span.innerText = p; } 
+                else { span.className = 'path-segment'; span.innerText = p; span.onclick = () => { playSfx('click'); fetchDirectory(targetPath); }; span.onmouseenter = () => playSfx('hover'); }
+                bar.appendChild(span);
+            });
+        }
+
+        // === MODAL / EDITOR / RAW FETCH ===
+        async function openFile(path, name) {
+            history.pushState(null, '', path);
+
+            const modal = document.getElementById('previewModal');
+            const modalBody = document.getElementById('modalBody');
+            const titleEl = document.getElementById('modalTitle');
+            const ocBox = document.getElementById('ocBox');
+
+            titleEl.innerText = name;
+            currentFileName = name;
+            currentFileUrl = window.location.origin + path;
+            
+            currentIsBinary = isBinaryFile(name);
+            
+            ocBox.style.display = 'flex';
+            modal.classList.add('open');
+
+            if (currentIsBinary) {
+                const ext = name.split('.').pop().toUpperCase();
+                modalBody.innerHTML = `
+                    <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; color:var(--text-secondary); text-align:center;">
+                        <div style="font-size:4rem; margin-bottom:1rem; color:var(--accent-color); animation: pulse 2s infinite;">📦</div>
+                        <div style="font-family:var(--font-mono); font-size:1.5rem; color:var(--text-primary); margin-bottom:0.5rem;">${ext} ARCHIVE</div>
+                        <div style="font-family:var(--font-mono); font-size:0.9rem; margin-bottom:2rem; max-width:400px;">
+                            Binary or archive file detected. Preview not available in text mode.
+                        </div>
+                        <button onclick="downloadFile(); playSfx('click')" style="
+                            background: transparent; border: 1px solid var(--accent-color); color: var(--accent-color);
+                            padding: 10px 20px; font-family: var(--font-mono); cursor: pointer; transition: all 0.2s;
+                            display: flex; align-items: center; gap: 8px; font-size: 1rem;
+                        " onmouseenter="this.style.background='var(--accent-dim)'" onmouseleave="this.style.background='transparent'">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                            DOWNLOAD FILE
+                        </button>
+                    </div>
+                `;
+                return;
+            }
+
+            modalBody.innerHTML = `<div style="padding:2rem; text-align:center;">Loading...</div>`;
+
+            try {
+                const res = await fetch(path, {
+                    headers: { 
+                        'X-Raw-Mode': 'true',
+                        'Accept': 'text/plain' 
+                    },
+                    cache: 'no-store'
+                });
+                
+                const contentType = res.headers.get("content-type");
+
+                if(!res.ok || (contentType && contentType.includes("text/html"))) {
+                    throw new Error("File not found (404)");
+                }
+
+                const text = await res.text();
+                
+                if (text.trim().startsWith("<!DOCTYPE")) {
+                    throw new Error("File not found (Is Directory?)");
+                }
+                
+                if (settings.editor) {
+                    modalBody.innerHTML = `<textarea id="fileEditor" class="editor-textarea" spellcheck="false"></textarea>`;
+                    document.getElementById('fileEditor').value = text;
+                } else {
+                    modalBody.innerHTML = `<pre><code id="codeView" class="language-none"></code></pre>`;
+                    const codeEl = document.getElementById('codeView');
+                    codeEl.textContent = text;
+                    
+                    const ext = name.split('.').pop().toLowerCase();
+                    let lang = 'none';
+                    if(ext === 'lua') lang = 'lua';
+                    else if(['c','h'].includes(ext)) lang = 'c';
+                    else if(['cpp','hpp'].includes(ext)) lang = 'cpp';
+                    else if(['js','ts'].includes(ext)) lang = 'javascript';
+                    else if(['json','cfg'].includes(ext)) lang = 'json';
+                    else if(ext === 'sh') lang = 'bash';
+                    
+                    codeEl.className = `language-${lang}`;
+                    Prism.highlightElement(codeEl);
+                }
+            } catch (e) {
+                modalBody.innerHTML = `
+                    <div style="padding:3rem; text-align:center; color:var(--text-secondary)">
+                        <div style="font-size:3rem; margin-bottom:1rem; color:var(--accent-color)">404</div>
+                        <div style="font-family:var(--font-mono)">FILE NOT FOUND</div>
+                        <div style="font-size:0.8rem; margin-top:10px; opacity:0.5">${path}</div>
+                    </div>`;
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('previewModal').classList.remove('open');
+            history.pushState(null, '', currentPath);
+        }
+
+        function getCurrentContent() {
+            if (settings.editor) { const el = document.getElementById('fileEditor'); return el ? el.value : ""; } 
+            else { const el = document.getElementById('codeView'); return el ? el.textContent : ""; }
+        }
+        
+        function copyModalContent() { 
+            if(currentIsBinary) {
+                 showToast("Cannot copy binary content");
+                 return;
+            }
+            navigator.clipboard.writeText(getCurrentContent()); 
+            showToast(settings.editor ? "Edited Content Copied!" : "Content Copied!"); 
+        }
+
+        function copyOcCmd() { 
+            const name = document.getElementById('modalTitle').innerText; 
+            navigator.clipboard.writeText(`wget ${currentFileUrl} ${name}`); 
+            showToast("OC Command Copied!"); 
+        }
+
+        function downloadFile() { 
+            if (currentIsBinary) {
+                const a = document.createElement('a');
+                a.href = currentFileUrl;
+                a.download = currentFileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            } else {
+                const blob = new Blob([getCurrentContent()], {type: "text/plain;charset=utf-8"}); 
+                const a = document.createElement('a'); 
+                a.href = URL.createObjectURL(blob); 
+                a.download = currentFileName; 
+                a.click(); 
+            }
+        }
+
+        function showToast(msg) { const t = document.getElementById('toast'); t.innerText = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2000); }
+
+        const canvas = document.getElementById('bgCanvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+        function resize() { width = canvas.width = window.innerWidth; height = canvas.height = window.innerHeight; draw(); }
+        window.addEventListener('resize', resize);
+        function draw() {
+            ctx.clearRect(0,0,width,height);
+            const style = getComputedStyle(document.body);
+            ctx.strokeStyle = style.getPropertyValue('--border-color').trim() || '#333';
+            ctx.lineWidth = 1;
+            const step = 50;
+            for(let x=0; x<width; x+=step) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,height); ctx.stroke(); }
+            for(let y=0; y<height; y+=step) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(width,y); ctx.stroke(); }
+        }
+        setInterval(draw, 1000);
+        resize();
+
+        window.onpopstate = () => { init(); };
+
+        init();
+    </script>
+</body>
+</html>

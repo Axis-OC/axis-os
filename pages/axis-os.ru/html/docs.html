@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="./img/icon.png">
     <title>Axis OS | Documentation</title>
     
     <!-- Markdown & Highlighting -->
@@ -18,17 +19,17 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;700&family=VT323&display=swap" rel="stylesheet">
 
     <meta property="og:type" content="website">
-    <meta property="og:url" content="https://axis-oc.github.io/axis-os/">
+    <meta property="og:url" content="https://axis-os.ru/">
     <meta property="og:title" content="Axis OS | Docs">
     <meta property="og:description" content="Axis OS Programming & Architecture Documentation">
 
-    <meta property="og:image" content="https://raw.githubusercontent.com/Axis-OC/axis-os/main/img/banner.jpg">
+    <meta property="og:image" content="./img/banner.jpg">
     
     <!-- Twitter (X) specific -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Axis OS | Docs">
     <meta name="twitter:description" content="Axis OS Programming & Architecture Documentation.">
-    <meta name="twitter:image" content="https://raw.githubusercontent.com/Axis-OC/axis-os/main/img/banner.jpg">
+    <meta name="twitter:image" content="./img/banner.jpg">
 
     <meta name="theme-color" content="#00bcd4">
     
@@ -322,8 +323,9 @@
             <a href="index.html" class="logo">
                 AXIS<span>OS</span> <span class="bread">/ DOCS</span>
             </a>
+            
         </div>
-        
+
         <select id="themeSelector" class="theme-select" onchange="setTheme(this.value)">
             <option value="xen">XEN</option>
             <option value="sunset">SUNSET</option>
@@ -396,8 +398,8 @@
 
         
 <script>
-        const REPO_BASE = "https://raw.githubusercontent.com/Axis-OC/axis-os/main/doc";
-        const GITHUB_LINK_BASE = "https://github.com/Axis-OC/axis-os/blob/main/doc/";
+        const REPO_BASE = "https://axis-os.ru/doc";
+        const SITE_LINK_BASE = "https://axis-os.ru/doc/";
         
         const MENU = [
             {
@@ -614,7 +616,7 @@
                     const parsedContent = this.parser.parseInline(token.tokens);
                     
                     if (depth === 1) {
-                        return `<h1>${parsedContent}<a href="${GITHUB_LINK_BASE}${file}" target="_blank" class="edit-link">Edit on GitHub</a></h1>`;
+                        return `<h1>${parsedContent}<a href="${SITE_LINK_BASE}${file}" target="_blank" class="edit-link">Edit on SITE</a></h1>`;
                     }
 
                     const slug = safeSlug(text.replace(/<[^>]*>?/gm, '')); 

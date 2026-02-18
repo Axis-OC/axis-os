@@ -149,3 +149,13 @@
 [info] Process 41 exited normally.
 [info] Creating process 42 ('/usr/commands/id.lua') at Ring 3
 [info] Process 42 exited normally.
+[info] Creating process 43 ('/usr/commands/sched.lua') at Ring 3
+[info] Process 43 exited normally.
+[info] Creating process 44 ('/usr/commands/sched.lua') at Ring 3
+[info] Process 44 exited normally.
+[info] Creating process 45 ('/usr/commands/sched.lua') at Ring 3
+[info] Process 45 exited normally.
+[info] Creating process 46 ('/usr/commands/sched.lua') at Ring 3
+[info] Process 46 exited normally.
+[info] Creating process 47 ('/usr/commands/sched.lua') at Ring 3
+[info] Process 47 exited normally.

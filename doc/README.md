@@ -1,39 +1,29 @@
-    
-# AxisOS Technical Documentation
+# AxisOS Xen XKA — Developer Reference Manual
+
+**Version 0.32-alpha1**
+
+---
 
 ## Table of Contents
 
-### Part I: Core Concepts
-*   **[1. Introduction](./01_Introduction/01_Architectural_Overview.md)**
-    *   [1.1. Architectural Overview](./01_Introduction/01_Architectural_Overview.md)
-    *   [1.2. Core Design Philosophies](./01_Introduction/02_Core_Philosophies.md)
+| # | Chapter | Description |
+|---|---------|-------------|
+| 1 | [Kernel Architecture](./01_kernel-architecture/kernel-architecture.md)) | Ring model, component map, data flow |
+| 2 | [Boot Sequence](./02_boot-sequence/boot-sequence.md) | EEPROM → Kernel → PM → DKMS → Userspace |
+| 3 | [Ring Model & Process Security](#3-ring-model--process-security) | Privilege levels, sandboxes, sMLTR |
+| 4 | [Process Management & Scheduling](#4-process-management--scheduling) | Lifecycle, threads, scheduler loop |
+| 5 | [Preemptive Multitasking](#5-preemptive-multitasking) | Source instrumentation, `__pc()`, quantum |
+| 6 | [Object Manager (Ob)](#6-object-manager-ob) | Handles, namespace, reference counting |
+| 7 | [Synapse Tokens (sMLTR)](#7-synapse-tokens-smltr) | Handle authentication, rotation, validation |
+| 8 | [Pipeline Manager (PM) & VFS](#8-pipeline-manager-pm--vfs) | Syscall routing, file I/O, permissions |
+| 9 | [Dynamic Kernel Module System (DKMS)](#9-dynamic-kernel-module-system-dkms) | Driver loading, device tree, symlinks |
+| 10 | [I/O Request Packets (IRPs)](#10-io-request-packets-irps) | Request lifecycle, dispatch, completion |
+| 11 | [Driver Objects & Structure](#11-driver-objects--structure) | DRIVER\_OBJECT, DEVICE\_OBJECT, dispatch tables |
+| 12 | [Driver Development Guide](#12-driver-development-guide) | Step-by-step, KMD, CMD, UMD |
+| 13 | [Synchronization & IPC](#13-synchronization--ipc) | Events, mutexes, semaphores, pipes, signals |
+| 14 | [Virtual Registry (@VT)](#14-virtual-registry-vt) | Hierarchical key-value store |
+| 15 | [Syscall Reference](#15-syscall-reference) | Complete syscall table |
+| 16 | [Error Codes](#16-error-codes) | STATUS codes and meaning |
+| 17 | [User-Space Libraries](#17-user-space-libraries) | filesystem, http, thread, sync, etc. |
 
-### Part II: The Kernel
-*   **[2. The AxisOS Kernel](./02_Kernel/01_Kernel_Architecture.md)**
-    *   [2.1. Kernel Architecture](./02_Kernel/01_Kernel_Architecture.md)
-    *   [2.2. The Boot Sequence](./02_Kernel/02_Boot_Sequence.md)
-    *   [2.3. The Process Model and Lifecycle](./02_Kernel/03_Process_Model.md)
-
-### Part III: System Programming Interfaces
-*   **[3. The System Call Interface](./03_System_Calls/README.md)**
-*   **[4. The AxisOS Driver Model (ADM)](./04_Driver_Model_ADM/README.md)**
-    *   [4.1. Kernel-Mode Driver Framework (KMDF) Reference](./04_Driver_Model_ADM/01_KMDF_Reference.md)
-    *   [4.2. User-Mode Driver Framework (UMDF) Reference](./04_Driver_Model_ADM/02_UMDF_Reference.md)
-
-### Part IV: Subsystems
-*   **[5. The Virtual File System (VFS) and I/O Subsystem](./05_VFS_and_IO/01_VFS_Architecture.md)**
-    *   [5.1. VFS Architecture](./05_VFS_and_IO/01_VFS_Architecture.md)
-    *   [5.2. The I/O Request Flow](./05_VFS_and_IO/02_IO_Request_Flow.md)
-
-### Part V: The User Environment
-*   **[6. User Space](./06_User_Space/01_Init_Process.md)**
-    *   [6.1. The `init` Process (PID 1)](./06_User_Space/01_Init_Process.md)
-    *   [6.2. Standard Libraries](./06_User_Space/02_Standard_Libraries.md)
-    *   [6.3. The Shell and Execution Environment](./06_User_Space/03_Shell_and_Execution_Environment.md)
-
-### Part VI: Security
-*   **[7. The AxisOS Security Model](./07_Security/01_Ring_Model.md)**
-    *   [7.1. The Ring Model](./07_Security/01_Ring_Model.md)
-    *   [7.2. Process Sandboxing](./07_Security/02_Process_Sandboxing.md)
-
-  
+---

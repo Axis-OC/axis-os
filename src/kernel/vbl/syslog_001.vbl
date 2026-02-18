@@ -186,4 +186,14 @@
 [dev] Preempt: /usr/commands/echo.lua — no loops/branches to instrument
 [dev]   PID 41 synapse token: SYN-d514-3c4c-06...[info] Process 41 exited normally.[info] Creating process 42 ('/usr/commands/id.lua') at Ring 3
 [dev] Preempt: /usr/commands/id.lua — no loops/branches to instrument
-[dev]   PID 42 synapse token: SYN-a052-bd83-a6...[info] Process 42 exited normally.
+[dev]   PID 42 synapse token: SYN-a052-bd83-a6...[info] Process 42 exited normally.[info] Creating process 43 ('/usr/commands/sched.lua') at Ring 3
+[dev] Preempt: /usr/commands/sched.lua → 10 yield checkpoints injected
+[dev]   PID 43 synapse token: SYN-8b32-8cb9-95...[info] Process 43 exited normally.[info] Creating process 44 ('/usr/commands/sched.lua') at Ring 3
+[dev] Preempt: /usr/commands/sched.lua → 10 yield checkpoints injected
+[dev]   PID 44 synapse token: SYN-c42c-56f0-47...[info] Process 44 exited normally.[info] Creating process 45 ('/usr/commands/sched.lua') at Ring 3
+[dev] Preempt: /usr/commands/sched.lua → 10 yield checkpoints injected
+[dev]   PID 45 synapse token: SYN-9d81-f1e3-18...[info] Process 45 exited normally.[info] Creating process 46 ('/usr/commands/sched.lua') at Ring 3
+[dev] Preempt: /usr/commands/sched.lua → 10 yield checkpoints injected
+[dev]   PID 46 synapse token: SYN-b987-1966-3c...[info] Process 46 exited normally.[info] Creating process 47 ('/usr/commands/sched.lua') at Ring 3
+[dev] Preempt: /usr/commands/sched.lua → 10 yield checkpoints injected
+[dev]   PID 47 synapse token: SYN-9d13-47bc-9e...[info] Process 47 exited normally.
