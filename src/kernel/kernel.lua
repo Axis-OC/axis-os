@@ -572,137 +572,247 @@ local function fStripAnsi(s)
 end
 
 
+local function shallowCopy(t)
+  local c = {}
+  for k, v in pairs(t) do c[k] = v end
+  return c
+end
+
 function kernel.create_sandbox(nPid, nRing)
-  local tSandbox = {
-    assert = assert,
-    error = error,
-    ipairs = ipairs,
-    next = next,
-    pairs = pairs,
-    pcall = pcall,
-    select = select,
-    tonumber = tonumber,
-    tostring = tostring,
-    type = type,
-    unpack = unpack,
-    _VERSION = _VERSION,
-    xpcall = xpcall,
-    coroutine = coroutine,
-    string = string,
-    table = table,
-    math = math,
-    debug = debug,
-
-    syscall = function(...)
-        return kernel.syscall_dispatch(...)
-    end,
-
-    require = function(sModulePath)
-        local mod, sErr = kernel.custom_require(sModulePath, nPid)
-        if not mod then error(sErr, 2) end
-        return mod
-    end,
-  }
-
   -- =========================================================
-  -- PREEMPTIVE SCHEDULING:  __pc()  yield checkpoint
+  -- THREE-LAYER PROXY SANDBOX
   --
-  -- For Ring ≥ 2.5 processes the instrumenter rewrites source
-  -- to call __pc() inside every loop / branch.  The function
-  -- keeps a fast counter and only checks the wall clock every
-  -- CHECK_INTERVAL calls.  When the quantum is exhausted it
-  -- does a bare coroutine.yield() which the scheduler treats
-  -- as "preempted → reschedule immediately".
+  -- The sandbox table itself is ALWAYS EMPTY.  Every global
+  -- read goes through __index, every global write through
+  -- __newindex.  This is possible because:
+  --
+  --   a) rawset / rawget are NOT exposed to Ring ≥ 2.5
+  --   b) debug library is NOT exposed to Ring ≥ 1
+  --   c) __metatable = "protected" blocks getmetatable() and
+  --      setmetatable() on the sandbox itself
+  --
+  -- Three layers (checked in order by __index):
+  --
+  --   1. tProtected   — kernel-owned, IMMUTABLE from user code
+  --                     (__pc, syscall, load, require, print, io,
+  --                      standard library names, etc.)
+  --
+  --   2. tUserGlobals — user-writable globals
+  --                     (anything user code assigns goes here;
+  --                      writes to protected names are silently
+  --                      dropped)
+  --
+  --   3. tSafeGlobals — read-only platform APIs
+  --                     (computer, unicode, bit32; ring-gated)
   -- =========================================================
-  if g_oPreempt and nRing >= 2.5 then
-      local nPcCounter   = 0
-      local nPcLastYield = raw_computer.uptime()
-      local nPcQuantum   = g_oPreempt.DEFAULT_QUANTUM
-      local nPcInterval  = g_oPreempt.CHECK_INTERVAL
-      local fUptime      = raw_computer.uptime   -- captured ref
 
-      tSandbox.__pc = function()
-          nPcCounter = nPcCounter + 1
-          if nPcCounter < nPcInterval then return end
-          nPcCounter = 0
-          -- Signal delivery (if any pending)
-          if g_oIpc then
-              local tProc = kernel.tProcessTable[nPid]
-              if tProc and tProc.tPendingSignals and #tProc.tPendingSignals > 0 then
-                  g_oIpc.DeliverSignals(nPid)
-                  if tProc.status == "dead" then
-                      coroutine.yield()
-                      return
-                  end
-              end
-          end
-          -- Time quantum check
-          local nNow = fUptime()
-          if nNow - nPcLastYield >= nPcQuantum then
-              coroutine.yield()
-              nPcLastYield = fUptime()
-          end
-      end
+  local tProtected   = {}   -- immutable kernel symbols
+  local tUserGlobals = {}   -- user-writable globals
+  local tSandbox     = {}   -- EMPTY proxy — MUST never gain direct keys
 
-      -- Wrap load() so that dynamically compiled code is also
-      -- instrumented  (e.g.  load("while true do end")  ).
-      local fKernelLoad = load
-      tSandbox.load = function(sChunk, sName, sMode, tLoadEnv)
-          if type(sChunk) == "string" then
-              local sInst, nInj = g_oPreempt.instrument(sChunk, sName or "[dynamic]")
-              if nInj > 0 then sChunk = sInst end
-          end
-          return fKernelLoad(sChunk, sName, sMode, tLoadEnv or tSandbox)
+  -- Capture real functions before any user code can replace them.
+  -- These upvalues are used inside __pc() and can never be reached
+  -- or modified by user code.
+  local fRealYield  = coroutine.yield
+  local fRealUptime = raw_computer.uptime
+
+  -- =============================================
+  -- LAYER 1: Protected kernel symbols
+  -- =============================================
+
+  -- Standard Lua (safe subset — NO rawset, rawget, debug)
+  tProtected.assert   = assert
+  tProtected.error    = error
+  tProtected.ipairs   = ipairs
+  tProtected.next     = next
+  tProtected.pairs    = pairs
+  tProtected.pcall    = pcall
+  tProtected.select   = select
+  tProtected.tonumber = tonumber
+  tProtected.tostring = tostring
+  tProtected.type     = type
+  tProtected.unpack   = unpack
+  tProtected._VERSION = _VERSION
+  tProtected.xpcall   = xpcall
+
+  -- Library tables
+  tProtected.coroutine = coroutine
+  tProtected.string = shallowCopy(string)
+  tProtected.table  = shallowCopy(table)
+  tProtected.math   = shallowCopy(math)
+
+
+  -- Safe os (no exit/execute/remove/rename)
+  do
+    local tSafeOs = {}
+    for k, v in pairs(os) do
+      if k ~= "exit" and k ~= "execute"
+         and k ~= "remove" and k ~= "rename" then
+        tSafeOs[k] = v
       end
-  else
-      tSandbox.__pc = function() end          -- no-op for system rings
+    end
+    tProtected.os = tSafeOs
   end
 
-  -- print / io  (defined AFTER tSandbox so closures can read env)
-  tSandbox.print = function(...)
+  -- setmetatable / getmetatable are safe to expose because the
+  -- sandbox has __metatable = "protected", so:
+  --   getmetatable(sandbox) → "protected"  (not the real mt)
+  --   setmetatable(sandbox, x) → error     (can't override __metatable)
+  -- All other tables work normally.
+  tProtected.setmetatable = setmetatable
+  tProtected.getmetatable = getmetatable
+
+  -- ---- Kernel interfaces ----
+
+  tProtected.syscall = function(...)
+    return kernel.syscall_dispatch(...)
+  end
+
+  tProtected.require = function(sModulePath)
+    local mod, sErr = kernel.custom_require(sModulePath, nPid)
+    if not mod then error(sErr, 2) end
+    return mod
+  end
+
+  -- ---- Preemptive checkpoint: __pc() ----
+
+  if g_oPreempt and nRing >= 2.5 then
+    local nPcCounter   = 0
+    local nPcLastYield = fRealUptime()
+    local nPcQuantum   = g_oPreempt.DEFAULT_QUANTUM
+    local nPcInterval  = g_oPreempt.CHECK_INTERVAL
+
+    tProtected.__pc = function()
+      nPcCounter = nPcCounter + 1
+      if nPcCounter < nPcInterval then return end
+      nPcCounter = 0
+      -- Signal delivery
+      if g_oIpc then
+        local tProc = kernel.tProcessTable[nPid]
+        if tProc and tProc.tPendingSignals
+           and #tProc.tPendingSignals > 0 then
+          g_oIpc.DeliverSignals(nPid)
+          if tProc.status == "dead" then
+            fRealYield()
+            return
+          end
+        end
+      end
+      -- Time quantum check (uses captured upvalue, not global)
+      local nNow = fRealUptime()
+      if nNow - nPcLastYield >= nPcQuantum then
+        fRealYield()
+        nPcLastYield = fRealUptime()
+      end
+    end
+
+    -- Wrapped load() — instruments source and forces text mode
+    local fKernelLoad = load
+    tProtected.load = function(sChunk, sName, sMode, tLoadEnv)
+      if type(sChunk) == "string" then
+        local sInst, nInj = g_oPreempt.instrument(
+            sChunk, sName or "[dynamic]")
+        if nInj > 0 then sChunk = sInst end
+      end
+      -- Force "t" (text mode) — prevents loading raw bytecode
+      -- which would skip instrumentation entirely.
+      return fKernelLoad(sChunk, sName, "t", tLoadEnv or tSandbox)
+    end
+  else
+    tProtected.__pc = function() end          -- no-op for system rings
+  end
+
+  -- ---- print / io ----
+
+  tProtected.print = function(...)
+    local tP = {}
+    for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
+    local sOut = table.concat(tP, "\t") .. "\n"
+    local tE = tUserGlobals.env
+    if tE and tE.NO_COLOR then sOut = fStripAnsi(sOut) end
+    kernel.syscall_dispatch("vfs_write", -11, sOut)
+  end
+
+  tProtected.io = {
+    write = function(...)
       local tP = {}
       for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
-      local sOut = table.concat(tP, "\t") .. "\n"
-      if tSandbox.env and tSandbox.env.NO_COLOR then
-          sOut = fStripAnsi(sOut)
-      end
+      local sOut = table.concat(tP)
+      local tE = tUserGlobals.env
+      if tE and tE.NO_COLOR then sOut = fStripAnsi(sOut) end
       kernel.syscall_dispatch("vfs_write", -11, sOut)
-  end
-
-  tSandbox.io = {
-      write = function(...)
-          local tP = {}
-          for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
-          local sOut = table.concat(tP)
-          if tSandbox.env and tSandbox.env.NO_COLOR then
-              sOut = fStripAnsi(sOut)
-          end
-          kernel.syscall_dispatch("vfs_write", -11, sOut)
-      end,
-      read = function()
-          local _, _, data = kernel.syscall_dispatch("vfs_read", -10)
-          return data
-      end,
+    end,
+    read = function()
+      local _, _, data = kernel.syscall_dispatch("vfs_read", -10)
+      return data
+    end,
   }
 
-  -- Safe os table
-  local tSafeOs = {}
-  for sKey, vValue in pairs(os) do
-    if sKey ~= "exit" and sKey ~= "execute" and sKey ~= "remove" and sKey ~= "rename" then
-      tSafeOs[sKey] = vValue
-    end
-  end
-  tSandbox.os = tSafeOs
+  -- =============================================
+  -- LAYER 3: Safe platform globals (ring-gated)
+  -- =============================================
 
-  -- Ring 0 gets god-mode
+  local tSafeGlobals = {
+    computer  = computer,
+    unicode   = unicode,
+    bit32     = bit32,
+    checkArg  = checkArg,
+    rawequal  = rawequal,
+    rawlen    = rawlen,
+  }
+
   if nRing == 0 then
-    tSandbox.kernel = kernel
-    tSandbox.raw_component = raw_component
-    tSandbox.raw_computer = raw_computer
+    -- God-mode
+    tProtected.kernel        = kernel
+    tProtected.raw_component = raw_component
+    tProtected.raw_computer  = raw_computer
+    tProtected.rawset        = rawset
+    tProtected.rawget        = rawget
+    tProtected.debug         = debug
+    tSafeGlobals.component   = component
+  elseif nRing <= 2 then
+    -- Drivers / Pipeline Manager need component and raw ops
+    tSafeGlobals.component   = component
+    tSafeGlobals.rawset      = rawset
+    tSafeGlobals.rawget      = rawget
   end
+  -- Ring 2.5, 3: NO rawset, rawget, debug, raw_component, raw_computer
 
-  setmetatable(tSandbox, { __index = _G })
-  tSandbox._G = tSandbox
+  -- =============================================
+  -- METATABLE — the core of the protection
+  -- =============================================
+
+  -- Fast-lookup set of all protected key names
+  local tProtectedSet = {}
+  for k in pairs(tProtected) do tProtectedSet[k] = true end
+  tProtectedSet["_G"] = true
+
+  setmetatable(tSandbox, {
+    __index = function(_, key)
+      -- Priority 1: protected kernel symbols (ALWAYS win)
+      local pv = tProtected[key]
+      if pv ~= nil then return pv end
+      -- Priority 2: _G self-reference
+      if key == "_G" then return tSandbox end
+      -- Priority 3: user-defined globals
+      local uv = tUserGlobals[key]
+      if uv ~= nil then return uv end
+      -- Priority 4: safe platform globals
+      return tSafeGlobals[key]
+    end,
+
+    __newindex = function(_, key, value)
+      -- Writes to protected names are silently dropped.
+      -- (Cannot error — instrumented code like `for i=1,10 do __pc();`
+      --  must not break if some bizarre edge case tries to assign.)
+      if tProtectedSet[key] then return end
+      tUserGlobals[key] = value
+    end,
+
+    -- Makes getmetatable(sandbox) return "protected" (not the real mt).
+    -- Makes setmetatable(sandbox, ...) raise an error.
+    __metatable = "protected",
+  })
 
   return tSandbox
 end
