@@ -170,6 +170,17 @@ function kprint(sLevel, ...)
   g_oGpu.set(nPrintX, nPrintY, sMessage)
 end
 
+local function rawtostring(v)
+    local t = type(v)
+    if t == "string"  then return v end
+    if t == "number"  then return tostring(v) end
+    if t == "boolean" then return v and "true" or "false" end
+    if t == "nil"     then return "nil" end
+    local sAddr = "?"
+    pcall(function() sAddr = string.format("%p", v) end)
+    return t .. ": " .. sAddr
+end
+
 -------------------------------------------------
 -- KERNEL PANIC
 -------------------------------------------------
@@ -539,38 +550,54 @@ end
 -------------------------------------------------
 
 function kernel.custom_require(sModulePath, nCallingPid)
-  if kernel.tLoadedModules[sModulePath] then
-    return kernel.tLoadedModules[sModulePath]
-  end
-  
-  local tPathsToTry = {
-    "/lib/" .. sModulePath .. ".lua",
-    "/usr/lib/" .. sModulePath .. ".lua",
-    "/drivers/" .. sModulePath .. ".lua",
-    "/drivers/" .. sModulePath .. ".sys.lua",
-    "/system/" .. sModulePath .. ".lua",
-    "/system/lib/dk/" .. sModulePath .. ".lua",
-    "/sys/security/" .. sModulePath .. ".lua",
-  }
-  
-  local sCode, sErr
-  local sFoundPath
-  for _, sPath in ipairs(tPathsToTry) do
-    sCode, sErr = kernel.syscalls.vfs_read_file(nCallingPid, sPath)
-    if sCode then sFoundPath = sPath; break end
-  end
-  
-  if not sCode then return nil, "Module not found: " .. sModulePath end
-  
-  local tEnv = kernel.tProcessTable[nCallingPid].env
-  local fFunc, sLoadErr = load(sCode, "@" .. sFoundPath, "t", tEnv)
-  if not fFunc then return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr end
-  
-  local bIsOk, result = pcall(fFunc)
-  if not bIsOk then return nil, "Failed to initialize module " .. sModulePath .. ": " .. result end
-  
-  kernel.tLoadedModules[sModulePath] = result
-  return result
+    local tProc = kernel.tProcessTable[nCallingPid]
+    if not tProc then return nil, "No such process" end
+    
+    -- Per-process cache
+    if not tProc._moduleCache then tProc._moduleCache = {} end
+    if tProc._moduleCache[sModulePath] then
+        return tProc._moduleCache[sModulePath]
+    end
+    
+    -- Load from global cache or disk
+    if not kernel.tLoadedModules[sModulePath] then
+        local tPathsToTry = {
+            "/lib/" .. sModulePath .. ".lua",
+            "/usr/lib/" .. sModulePath .. ".lua",
+            "/drivers/" .. sModulePath .. ".lua",
+            "/drivers/" .. sModulePath .. ".sys.lua",
+            "/system/" .. sModulePath .. ".lua",
+            "/system/lib/dk/" .. sModulePath .. ".lua",
+            "/sys/security/" .. sModulePath .. ".lua",
+        }
+        local sCode, sFoundPath
+        for _, sPath in ipairs(tPathsToTry) do
+            sCode = kernel.syscalls.vfs_read_file(nCallingPid, sPath)
+            if sCode then sFoundPath = sPath; break end
+        end
+        if not sCode then return nil, "Module not found: " .. sModulePath end
+        
+        local fFunc, sLoadErr = load(sCode, "@" .. sFoundPath, "t", tProc.env)
+        if not fFunc then
+            return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr
+        end
+        local bOk, result = pcall(fFunc)
+        if not bOk then
+            return nil, "Failed to init module " .. sModulePath .. ": " .. result
+        end
+        kernel.tLoadedModules[sModulePath] = result
+    end
+    
+    -- Give this process its own copy if it's a table
+    local cached = kernel.tLoadedModules[sModulePath]
+    if type(cached) == "table" then
+        local tCopy = {}
+        for k, v in pairs(cached) do tCopy[k] = v end
+        tProc._moduleCache[sModulePath] = tCopy
+        return tCopy
+    end
+    tProc._moduleCache[sModulePath] = cached
+    return cached
 end
 
 -- ANSI escape code stripper for NO_COLOR support
@@ -1045,13 +1072,57 @@ end
 -------------------------------------------------
 kernel.syscalls = {}
 
+-- =============================================
+-- CROSS-BOUNDARY DATA SANITIZATION
+-- =============================================
+
+local SANITIZE_MAX_DEPTH = 16
+local SANITIZE_MAX_ITEMS = 4096
+
+local function deepSanitize(vValue, nDepth, tCounter)
+    nDepth   = nDepth or 0
+    tCounter = tCounter or { n = 0 }
+    if nDepth > SANITIZE_MAX_DEPTH then return nil end
+    if tCounter.n > SANITIZE_MAX_ITEMS then return nil end
+
+    local sType = type(vValue)
+    if sType == "string" or sType == "number"
+       or sType == "boolean" or sType == "nil" then
+        tCounter.n = tCounter.n + 1
+        return vValue
+    end
+    if sType == "table" then
+        tCounter.n = tCounter.n + 1
+        local tClean = {}
+        local key = nil
+        while true do
+            key = next(vValue, key)
+            if key == nil then break end
+            if tCounter.n > SANITIZE_MAX_ITEMS then break end
+            local vRaw = rawget(vValue, key)
+            local vCleanKey = deepSanitize(key, nDepth + 1, tCounter)
+            local vCleanVal = deepSanitize(vRaw, nDepth + 1, tCounter)
+            if vCleanKey ~= nil then
+                tClean[vCleanKey] = vCleanVal
+            end
+        end
+        return tClean
+    end
+    -- functions, userdata, threads: stripped
+    return nil
+end
+
 function kernel.syscall_dispatch(sName, ...)
-  local coCurrent = coroutine.running()
-  local nPid = kernel.tPidMap[coCurrent]
-  
-  if not nPid then
-    kernel.panic("Untracked coroutine tried to syscall: " .. sName)
-  end
+    if type(sName) ~= "string" then
+        return nil, "Syscall name must be a string"
+    end
+
+    local coCurrent = coroutine.running()
+    local nPid = kernel.tPidMap[coCurrent]
+
+    if not nPid then
+        kernel.panic("Untracked coroutine tried to syscall: " .. sName)
+    end
   
   g_nCurrentPid = nPid
   local nRing = kernel.tRings[nPid]
@@ -1081,28 +1152,41 @@ function kernel.syscall_dispatch(sName, ...)
   end
 
   -- Check for ring 1 overrides
+-- Find this existing block and REPLACE it:
   local nOverridePid = kernel.tSyscallOverrides[sName]
   if nOverridePid then
-    local tProcess = kernel.tProcessTable[nPid]
-    tProcess.status = "sleeping"
-    tProcess.wait_reason = "syscall"
-    
-    -- sMLTR: Include the caller's synapse token in the IPC message
-    local sSynapseToken = tProcess.synapseToken or "NO_TOKEN"
-    
-    local bIsOk, sErr = pcall(kernel.syscalls.signal_send, 0, nOverridePid, "syscall", {
-      name = sName,
-      args = {...},
-      sender_pid = nPid,
-      synapse_token = sSynapseToken,  -- sMLTR
-    })
-    
-    if not bIsOk then
-      tProcess.status = "ready"
-      return nil, "Syscall IPC failed: " .. sErr
-    end
-    
-    return coroutine.yield()
+      local tProcess = kernel.tProcessTable[nPid]
+      tProcess.status = "sleeping"
+      tProcess.wait_reason = "syscall"
+      
+      local sSynapseToken = tProcess.synapseToken or "NO_TOKEN"
+      
+      -- SANITIZE when Ring >= 2.5 sends to Ring 1 PM
+      local tArgs
+      if kernel.tRings[nPid] >= 2.5 then
+          tArgs = deepSanitize({...})
+      else
+          tArgs = {...}
+      end
+      
+      if type(sName) ~= "string" then
+          tProcess.status = "ready"
+          return nil, "Syscall name must be a string"
+      end
+      
+      local bIsOk, sErr = pcall(kernel.syscalls.signal_send, 0, nOverridePid, "syscall", {
+          name          = sName,
+          args          = tArgs,
+          sender_pid    = nPid,
+          synapse_token = sSynapseToken,
+      })
+      
+      if not bIsOk then
+          tProcess.status = "ready"
+          return nil, "Syscall IPC failed: " .. tostring(sErr)
+      end
+      
+      return coroutine.yield()
   end
   
   local tHandler = kernel.tSyscallTable[sName]
@@ -1977,25 +2061,41 @@ kernel.tSyscallTable["raw_component_proxy"] = {
 }
 
 -- IPC
+-- REPLACE the entire kernel.syscalls.signal_send function:
 kernel.syscalls.signal_send = function(nPid, nTargetPid, ...)
-  local tTarget = kernel.tProcessTable[nTargetPid]
-  if not tTarget then return nil, "Invalid PID" end
-  
-  local tSignal = {nPid, ...}
-  
-  if tTarget.status == "sleeping" and (tTarget.wait_reason == "signal" or tTarget.wait_reason == "syscall") then
-    tTarget.status = "ready"
-    if tTarget.wait_reason == "syscall" then
-        tTarget.resume_args = {tSignal[3], table.unpack(tSignal, 4)}
+    local tTarget = kernel.tProcessTable[nTargetPid]
+    if not tTarget then return nil, "Invalid PID" end
+    
+    local nSenderRing = kernel.tRings[nPid] or 3
+    local nTargetRing = kernel.tRings[nTargetPid] or 3
+    
+    -- Sanitize when untrusted → trusted
+    local tSignal
+    if nSenderRing > nTargetRing or nSenderRing >= 3 then
+        tSignal = {nPid}
+        local tRawArgs = {...}
+        for i = 1, #tRawArgs do
+            tSignal[i + 1] = deepSanitize(tRawArgs[i])
+        end
     else
-        tTarget.resume_args = tSignal
+        tSignal = {nPid, ...}
     end
-  else
-    if not tTarget.signal_queue then tTarget.signal_queue = {} end
-    table.insert(tTarget.signal_queue, tSignal)
-  end
-  
-  return true
+    
+    if tTarget.status == "sleeping"
+       and (tTarget.wait_reason == "signal"
+            or tTarget.wait_reason == "syscall") then
+        tTarget.status = "ready"
+        if tTarget.wait_reason == "syscall" then
+            tTarget.resume_args = {tSignal[3], table.unpack(tSignal, 4)}
+        else
+            tTarget.resume_args = tSignal
+        end
+    else
+        if not tTarget.signal_queue then tTarget.signal_queue = {} end
+        table.insert(tTarget.signal_queue, tSignal)
+    end
+    
+    return true
 end
 
 kernel.tSyscallTable["signal_send"] = {
@@ -2373,6 +2473,30 @@ while true do
   -- and timers are checked exactly once per scheduler pass.
   if g_oIpc then
       g_oIpc.Tick()
+  end
+
+  -- ====== OOM KILLER ======
+  local FREE_MEMORY_FLOOR = 32768
+  local nFreeMem = computer.freeMemory()
+  if nFreeMem < FREE_MEMORY_FLOOR then
+      local nVictimPid = nil
+      local nVictimCpu = 0
+      for nKillPid, tKillProc in pairs(kernel.tProcessTable) do
+          if tKillProc.status ~= "dead" and tKillProc.ring >= 3
+            and (tKillProc.nCpuTime or 0) > nVictimCpu then
+              nVictimCpu = tKillProc.nCpuTime or 0
+              nVictimPid = nKillPid
+          end
+      end
+      if nVictimPid then
+          kprint("fail", string.format(
+              "OOM KILLER: PID %d (free=%dB)", nVictimPid, nFreeMem))
+          kernel.tProcessTable[nVictimPid].status = "dead"
+          if g_oObManager then
+              g_oObManager.ObDestroyProcess(nVictimPid)
+          end
+          collectgarbage("collect")
+      end
   end
 
   -- Pull external events (block briefly if idle)
