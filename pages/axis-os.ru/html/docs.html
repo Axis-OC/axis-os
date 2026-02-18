@@ -403,36 +403,45 @@
         
         const MENU = [
             {
-                title: "Core Concepts",
+                title: "Kernel Fundamentals",
                 items: [
-                    { name: "Architectural Overview", file: "01_Introduction/01_Architectural_Overview.md" },
-                    { name: "Design Philosophies", file: "01_Introduction/02_Core_Philosophies.md" }
+                    { name: "Architectural Overview", file: "01_kernel-architecture/kernel-architecture.md" },
+                    { name: "Boot Sequence", file: "02_Boot/boot-sequence.md" },
+                    { name: "Object Manager", file: "06_ObjectManager/object-manager-ob.md" }
                 ]
             },
             {
-                title: "The Kernel",
+                title: "Execution Model",
                 items: [
-                    { name: "XKA Architecture", file: "02_Kernel/01_Kernel_Architecture.md" },
-                    { name: "Boot Sequence", file: "02_Kernel/02_Boot_Sequence.md" },
-                    { name: "Process Model", file: "02_Kernel/03_Process_Model.md" }
+                    { name: "Process Management", file: "04_Process_Management/process-management--scheduling.md" },
+                    { name: "Preemptive Multitasking", file: "05_Preemptive-Multitasking/preemptive-multitasking.md" },
+                    { name: "Pipeline Manager (VFS)", file: "08_PipelineManager/pipeline-manager-pm--vfs.md" }
                 ]
             },
             {
-                title: "System Interfaces",
+                title: "Driver Framework",
                 items: [
-                    { name: "System Calls", file: "03_System_Calls/README.MD" },
-                    { name: "AXON Driver Model", file: "04_Driver_Model_ADM/README.md" },
-                    { name: "Shared Structures", file: "04_Driver_Model_ADM/00_Shared_Structures.md" },
-                    { name: "KMDF Reference", file: "04_Driver_Model_ADM/01_KMDF_Reference.md" },
-                    { name: "UMDF Reference", file: "04_Driver_Model_ADM/02_UMDF_Reference.md" },
-                    { name: "KCMD Reference", file: "04_Driver_Model_ADM/03_KCMD_Reference.md" }
+                    { name: "DKMS System", file: "09_DKMS/dynamic-kernel-module-system-dkms.md" },
+                    { name: "I/O Request Packets (IRP)", file: "10_IRP/io-request-packets-irps.md" },
+                    { name: "Driver Objects Structure", file: "11_DriverObjects/driver-objects--structure.md" },
+                    { name: "Synapse Protocol", file: "07_SynapseProtocol/synapse-tokens-smltr.md" }
+                ]
+            },
+            {
+                title: "Development Reference",
+                items: [
+                    { name: "Driver Development Guide", file: "12_DriverDevelopment/driver-development-guide.md" },
+                    { name: "System Call Reference", file: "12_DriverDevelopment/syscall-reference.md" },
+                    { name: "Synchronization & IPC", file: "12_DriverDevelopment/synchronization--ipc.md" },
+                    { name: "User-space Libraries", file: "12_DriverDevelopment/user-space-libraries.md" },
+                    { name: "Virtual Registry", file: "12_DriverDevelopment/virtual-registry-vt.md" },
+                    { name: "Error Codes", file: "12_DriverDevelopment/error-codes.md" }
                 ]
             },
             {
                 title: "Security",
                 items: [
-                    { name: "RKA Model", file: "07_Security/01_Ring_Model.md" },
-                    { name: "Sandboxing", file: "07_Security/02_Process_Sandboxing.md" }
+                    { name: "Ring Model & Security", file: "03_Ring_Model/ring-model--process-security.MD" }
                 ]
             }
         ];

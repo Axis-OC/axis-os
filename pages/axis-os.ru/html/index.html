@@ -471,9 +471,6 @@
         }
         drawGrid();
 
-
-        // --- ADVANCED AUDIO SYSTEM ---
-        // Инициализируем контекст лениво, чтобы не пугать браузер при загрузке
         let audioCtx = null;
 
         function initAudio() {
@@ -487,7 +484,7 @@
         }
 
         function playSound(type) {
-            initAudio(); // Пробуждаем аудио при попытке воспроизведения
+            initAudio();
             
             const now = audioCtx.currentTime;
             const osc = audioCtx.createOscillator();
@@ -524,7 +521,7 @@
                 osc.stop(now + 0.3);
             }
             else {
-                // Default beep (для кнопки copy)
+                // Default beep
                 osc.type = 'sine';
                 osc.frequency.setValueAtTime(800, now); 
                 osc.frequency.exponentialRampToValueAtTime(0.01, now + 0.15);
@@ -563,14 +560,12 @@
         const savedTheme = localStorage.getItem('axis-theme');
         if (savedTheme) { setTheme(savedTheme); document.getElementById('themeSelector').value = savedTheme; }
 
-        // --- INSTALLER LOGIC (Кнопка Quick Install) ---
         const installBtn = document.getElementById('installBtn');
         const installerBox = document.getElementById('installerBox');
         const cmdBox = document.getElementById('cmdBox');
         const copyHint = document.getElementById('copyHint');
         const cmdText = "wget https://repo.axis-os.ru/install/installer.lua";
         
-        // Исправленный обработчик клика
         if (installBtn) {
             installBtn.addEventListener('click', () => { 
                 installerBox.classList.toggle('open'); 
@@ -678,7 +673,6 @@
             for (const file of fileManifest) {
                 const logEl = log(`Downloading ${file}...`, "info", true);
                 
-                // Имитация скорости
                 await new Promise(r => setTimeout(r, 10)); 
                 
                 try {

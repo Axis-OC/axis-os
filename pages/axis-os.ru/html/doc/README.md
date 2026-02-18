@@ -1,39 +1,29 @@
-    
-# AxisOS Technical Documentation
+# AxisOS Xen XKA — Developer Reference Manual
+
+**Version 0.32-alpha1**
+
+---
 
 ## Table of Contents
 
-### Part I: Core Concepts
-*   **[1. Introduction](./01_Introduction/01_Architectural_Overview.md)**
-    *   [1.1. Architectural Overview](./01_Introduction/01_Architectural_Overview.md)
-    *   [1.2. Core Design Philosophies](./01_Introduction/02_Core_Philosophies.md)
+| # | Chapter | Description |
+|---|---------|-------------|
+| 1 | [Kernel Architecture](./01_kernel-architecture/kernel-architecture.md)) | Ring model, component map, data flow |
+| 2 | [Boot Sequence](./02_boot-sequence/boot-sequence.md) | EEPROM → Kernel → PM → DKMS → Userspace |
+| 3 | [Ring Model & Process Security](./03_Ring_Model/ring-model--process-security.MD) | Privilege levels, sandboxes, sMLTR |
+| 4 | [Process Management & Scheduling](./04_Process_Management/process-management--scheduling.md) | Lifecycle, threads, scheduler loop |
+| 5 | [Preemptive Multitasking](./05_Preemptive-Multitasking/preemptive-multitasking.md) | Source instrumentation, `__pc()`, quantum |
+| 6 | [Object Manager (Ob)](./06_ObjectManager/object-manager-ob.md) | Handles, namespace, reference counting |
+| 7 | [Synapse Tokens (sMLTR)](./07_SynapseProtocol/synapse-tokens-smltr.md) | Handle authentication, rotation, validation |
+| 8 | [Pipeline Manager (PM) & VFS](./08_PipelineManager/pipeline-manager-pm--vfs.md) | Syscall routing, file I/O, permissions |
+| 9 | [Dynamic Kernel Module System (DKMS)](./09_DKMS/dynamic-kernel-module-system-dkms.md) | Driver loading, device tree, symlinks |
+| 10 | [I/O Request Packets (IRPs)](./10_IRP/io-request-packets-irps.md) | Request lifecycle, dispatch, completion |
+| 11 | [Driver Objects & Structure](./11_DriverObjects/driver-objects--structure.md) | DRIVER\_OBJECT, DEVICE\_OBJECT, dispatch tables |
+| 12 | [Driver Development Guide](./12_DriverDevelopment/driver-development-guide.md) | Step-by-step, KMD, CMD, UMD |
+| 13 | [Synchronization & IPC](./12_DriverDevelopment/synchronization--ipc.md) | Events, mutexes, semaphores, pipes, signals |
+| 14 | [Virtual Registry (@VT)](./12_DriverDevelopment/virtual-registry-vt.md) | Hierarchical key-value store |
+| 15 | [Syscall Reference](./12_DriverDevelopment/syscall-reference.md) | Complete syscall table |
+| 16 | [Error Codes](./12_DriverDevelopment/error-codes.md) | STATUS codes and meaning |
+| 17 | [User-Space Libraries](./12_DriverDevelopment/user-space-libraries.md) | filesystem, http, thread, sync, etc. |
 
-### Part II: The Kernel
-*   **[2. The AxisOS Kernel](./02_Kernel/01_Kernel_Architecture.md)**
-    *   [2.1. Kernel Architecture](./02_Kernel/01_Kernel_Architecture.md)
-    *   [2.2. The Boot Sequence](./02_Kernel/02_Boot_Sequence.md)
-    *   [2.3. The Process Model and Lifecycle](./02_Kernel/03_Process_Model.md)
-
-### Part III: System Programming Interfaces
-*   **[3. The System Call Interface](./03_System_Calls/README.md)**
-*   **[4. The AxisOS Driver Model (ADM)](./04_Driver_Model_ADM/README.md)**
-    *   [4.1. Kernel-Mode Driver Framework (KMDF) Reference](./04_Driver_Model_ADM/01_KMDF_Reference.md)
-    *   [4.2. User-Mode Driver Framework (UMDF) Reference](./04_Driver_Model_ADM/02_UMDF_Reference.md)
-
-### Part IV: Subsystems
-*   **[5. The Virtual File System (VFS) and I/O Subsystem](./05_VFS_and_IO/01_VFS_Architecture.md)**
-    *   [5.1. VFS Architecture](./05_VFS_and_IO/01_VFS_Architecture.md)
-    *   [5.2. The I/O Request Flow](./05_VFS_and_IO/02_IO_Request_Flow.md)
-
-### Part V: The User Environment
-*   **[6. User Space](./06_User_Space/01_Init_Process.md)**
-    *   [6.1. The `init` Process (PID 1)](./06_User_Space/01_Init_Process.md)
-    *   [6.2. Standard Libraries](./06_User_Space/02_Standard_Libraries.md)
-    *   [6.3. The Shell and Execution Environment](./06_User_Space/03_Shell_and_Execution_Environment.md)
-
-### Part VI: Security
-*   **[7. The AxisOS Security Model](./07_Security/01_Ring_Model.md)**
-    *   [7.1. The Ring Model](./07_Security/01_Ring_Model.md)
-    *   [7.2. Process Sandboxing](./07_Security/02_Process_Sandboxing.md)
-
-  
+---
