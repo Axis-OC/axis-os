@@ -26,14 +26,14 @@
 >- [x] DKMS & Dynamic Driver Loader
 >- [x] Virtual File System (VFS)
 >- [x] Handling frozen drivers
->- [ ] Synapse Message Layer Token Randomization (sMLTR)
->- [ ] Own Object Handles implementation
+>- [x] Synapse Message Layer Token Randomization (sMLTR)
+>- [x] Own Object Handles implementation
 >- [ ] Simulated Amiga RDB Disk Partition System
 >- [ ] Kernel Paravirtualization over Lua VM
->- [ ] Pipes and flow redirection
+>- [x] Pipes and flow redirection
 >- [ ] Network Stack (Modem / Linked Card)
->- [ ] Memory Management (Garbage Collection & Limits)
->- [ ] Multitasking in User-space (Ring 3)
+>- [x] Memory Management (Garbage Collection & Limits)
+>- [x] Multitasking in User-space (Ring 3)
 >- [x] Namespace Separation (Sandboxing)
 ---
 
