@@ -56,9 +56,9 @@ local function getPromptString()
   return string.format("\27[32m%s@%s\27[37m:\27[34m%s\27[37m%s ", ENV.USER, ENV.HOSTNAME, path, char)
 end
 
-local function getPrompt()
-  return "\n" .. getPromptString()
-end
+-- local function getPrompt()
+--  return "\n" .. getPromptString()
+-- end
 
 -- =============================================
 -- COMMAND RESOLUTION
@@ -285,52 +285,51 @@ local function handleTab(sCurrentBuffer)
 
   local tMatches = getCompletions(sLastWord, bIsCommand)
 
-  if #tMatches == 0 then
-    -- No matches — restore buffer silently and continue
-    local bOk = oFs.deviceControl(hStdin, "set_buffer", {sCurrentBuffer})
-    if not bOk then
-      -- deviceControl failed — write buffer back manually
-      -- TTY buffer is empty after Tab, so just re-display
-      oFs.write(hStdout, sCurrentBuffer)
-      oFs.flush(hStdout)
+  -- For file paths, extract just the filename prefix (after last /)
+  -- Commands: sTypedPrefix == sLastWord (no slashes)
+  -- Files:    "/etc/p" → sTypedPrefix = "p"
+  local sTypedPrefix = sLastWord
+  if not bIsCommand then
+    for i = #sLastWord, 1, -1 do
+      if sLastWord:sub(i, i) == "/" then
+        sTypedPrefix = sLastWord:sub(i + 1)
+        break
+      end
     end
+  end
+
+  if #tMatches == 0 then
+    -- No matches — restore buffer, no visual change
+    oFs.deviceControl(hStdin, "set_buffer", {sCurrentBuffer})
 
   elseif #tMatches == 1 then
     local sCompletion = tMatches[1]
-    local sToAdd = sCompletion:sub(#sLastWord + 1)
-    if bIsCommand and sToAdd:sub(-1) ~= "/" then sToAdd = sToAdd .. " " end
-    local sNewBuffer = sCurrentBuffer .. sToAdd
-    oFs.write(hStdout, sToAdd)
-    oFs.flush(hStdout)
-    local bOk = oFs.deviceControl(hStdin, "set_buffer", {sNewBuffer})
-    if not bOk then
-      -- Fallback: erase and redraw
-      oFs.write(hStdout, "\n" .. getPromptString() .. sNewBuffer)
-      oFs.flush(hStdout)
+    local sToAdd = sCompletion:sub(#sTypedPrefix + 1)
+    if bIsCommand and sToAdd:sub(-1) ~= "/" then
+      sToAdd = sToAdd .. " "
     end
+    local sNewBuffer = sCurrentBuffer .. sToAdd
+    if #sToAdd > 0 then
+      io.write(sToAdd)
+    end
+    oFs.deviceControl(hStdin, "set_buffer", {sNewBuffer})
 
   else
     -- Multiple matches
-    oFs.write(hStdout, "\n")
+    io.write("\n")
     for _, s in ipairs(tMatches) do
-      oFs.write(hStdout, "\27[32m" .. s .. "\27[37m  ")
+      io.write("\27[32m" .. s .. "\27[37m  ")
     end
 
     local sCommon = findCommonPrefix(tMatches)
     local sToAdd = ""
-    if #sCommon > #sLastWord then
-      sToAdd = sCommon:sub(#sLastWord + 1)
+    if #sCommon > #sTypedPrefix then
+      sToAdd = sCommon:sub(#sTypedPrefix + 1)
     end
 
     local sNewBuffer = sCurrentBuffer .. sToAdd
-    -- Always redraw prompt on new line after showing matches
-    oFs.write(hStdout, "\n" .. getPromptString() .. sNewBuffer)
-    oFs.flush(hStdout)
-    local bOk = oFs.deviceControl(hStdin, "set_buffer", {sNewBuffer})
-    if not bOk then
-      -- deviceControl unsupported — buffer won't match screen
-      -- but we continue anyway, user can retype
-    end
+    io.write("\n" .. getPromptString() .. sNewBuffer)
+    oFs.deviceControl(hStdin, "set_buffer", {sNewBuffer})
   end
 end
 
@@ -630,8 +629,7 @@ end
 
 
 while true do
-  oFs.write(hStdout, getPrompt())
-  oFs.flush(hStdout)
+  io.write("\n" .. getPromptString())
 
   local line = readLine()
   if not line then break end

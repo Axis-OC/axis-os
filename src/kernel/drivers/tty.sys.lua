@@ -137,21 +137,24 @@ end
 
 local function scroll(pExt)
   if not g_oGpuProxy then return end
-  -- push top row (text + colors) into history
-  table.insert(pExt.tScrollback,   pExt.tScreenRows[1] or "")
-  table.insert(pExt.tScrollbackFg, pExt.tScreenFg[1]   or {})
-  table.insert(pExt.tScrollbackBg, pExt.tScreenBg[1]   or {})
 
-  if #pExt.tScrollback > SCROLLBACK_MAX then
-    table.remove(pExt.tScrollback,   1)
-    table.remove(pExt.tScrollbackFg, 1)
-    table.remove(pExt.tScrollbackBg, 1)
-    if pExt.nScrollOffset > #pExt.tScrollback then
-      pExt.nScrollOffset = #pExt.tScrollback
+  -- ONLY push to scrollback on main screen
+  if not pExt.bAltScreen then
+    table.insert(pExt.tScrollback,   pExt.tScreenRows[1] or "")
+    table.insert(pExt.tScrollbackFg, pExt.tScreenFg[1]   or {})
+    table.insert(pExt.tScrollbackBg, pExt.tScreenBg[1]   or {})
+
+    if #pExt.tScrollback > SCROLLBACK_MAX then
+      table.remove(pExt.tScrollback,   1)
+      table.remove(pExt.tScrollbackFg, 1)
+      table.remove(pExt.tScrollbackBg, 1)
+      if pExt.nScrollOffset > #pExt.tScrollback then
+        pExt.nScrollOffset = #pExt.tScrollback
+      end
     end
   end
 
-  -- shift live rows up
+  -- shift live rows up (unchanged)
   for y = 1, pExt.nHeight - 1 do
     pExt.tScreenRows[y] = pExt.tScreenRows[y + 1]
     pExt.tScreenFg[y]   = pExt.tScreenFg[y + 1]
@@ -161,7 +164,6 @@ local function scroll(pExt)
   pExt.tScreenFg[pExt.nHeight]   = {}
   pExt.tScreenBg[pExt.nHeight]   = {}
 
-  -- hardware scroll only when viewing live
   if pExt.nScrollOffset == 0 then
     g_oGpuProxy.copy(1, 2, pExt.nWidth, pExt.nHeight - 1, 0, -1)
     g_oGpuProxy.fill(1, pExt.nHeight, pExt.nWidth, 1, " ")
@@ -367,6 +369,13 @@ local function writeToScreen(pDeviceObject, sData)
                 if tAnsiColors[n] then
                   pExt.nCurrentFg = tAnsiColors[n]
                   bAny = true
+                elseif n >= 40 and n <= 47 then              -- ADD
+                  pExt.nCurrentBg = tAnsiColors[n - 10] or DEFAULT_BG  -- ADD
+                  bAny = true                                 -- ADD
+                elseif n == 7 then                            -- ADD (reverse)
+                  pExt.nCurrentFg, pExt.nCurrentBg =          -- ADD
+                    pExt.nCurrentBg, pExt.nCurrentFg           -- ADD
+                  bAny = true                                 -- ADD
                 elseif n == 0 then
                   pExt.nCurrentFg = DEFAULT_FG
                   pExt.nCurrentBg = DEFAULT_BG
@@ -438,6 +447,7 @@ local function fShowCursor(ext)
   if not g_oGpuProxy then return end
   if not ext.pPendingReadIrp then return end
   if ext.nScrollOffset > 0 then return end
+  if ext.bAltScreen then return end
 
   local nX, nY = ext.nCursorX, ext.nCursorY
   if nX < 1 or nX > ext.nWidth or nY < 1 or nY > ext.nHeight then return end
@@ -494,6 +504,88 @@ local function fHideCursor(ext)
 end
 
 -- =============================================
+-- 4c. TEXT SELECTION
+-- =============================================
+
+local function fIsShiftHeld(ext)
+  if not ext.oKbdProxy then return false end
+  local bOk, bShift = pcall(ext.oKbdProxy.isShiftDown)
+  return bOk and bShift
+end
+
+local function fIsCtrlHeld(ext)
+  if not ext.oKbdProxy then return false end
+  local bOk, bCtrl = pcall(ext.oKbdProxy.isControlDown)
+  return bOk and bCtrl
+end
+
+local function fSelGetRange(ext)
+  local tSel = ext.tSel
+  if not tSel.bActive then return nil, nil end
+  local nLo = math.min(tSel.nAnchor, tSel.nEnd)
+  local nHi = math.max(tSel.nAnchor, tSel.nEnd)
+  return nLo, nHi
+end
+
+local function fSelGetText(ext)
+  local nLo, nHi = fSelGetRange(ext)
+  if not nLo then return "" end
+  local sBuf = ext.sLineBuffer or ""
+  return sBuf:sub(nLo + 1, nHi)
+end
+
+local function fSelClear(ext)
+  ext.tSel.bActive = false
+  ext.tSel.nAnchor = 0
+  ext.tSel.nEnd = 0
+end
+
+-- Render the input line with selection highlighting.
+-- Called after any selection change.
+-- nPromptLen = number of visible chars in the prompt (before the input buffer).
+local function fSelRender(ext)
+  if not g_oGpuProxy then return end
+  if not ext.pPendingReadIrp then return end
+  if ext.nScrollOffset > 0 then return end
+
+  local sBuf = ext.sLineBuffer or ""
+  local nLo, nHi = fSelGetRange(ext)
+
+  -- We need to know where the input buffer starts on screen.
+  -- The buffer occupies screen positions starting from the cursor row,
+  -- at the column where input began. We approximate by using
+  -- (nCursorX - nBufCursorPos) as the start column.
+  -- This is the position of the first char of the buffer.
+  local nBufScreenCol = ext.nCursorX - (ext.nBufCursorPos or 0)
+  if nBufScreenCol < 1 then nBufScreenCol = 1 end
+  local nBufScreenRow = ext.nCursorY
+
+  -- Render each buffer character
+  for i = 1, #sBuf do
+    local nCol = nBufScreenCol + i - 1
+    if nCol > ext.nWidth then break end
+
+    local sChar = sBuf:sub(i, i)
+    local bSelected = nLo and (i > nLo and i <= nHi)
+
+    if bSelected then
+      g_oGpuProxy.setForeground(DEFAULT_BG)
+      g_oGpuProxy.setBackground(0x3399FF)  -- blue highlight
+    else
+      local nFg = (ext.tScreenFg[nBufScreenRow] and ext.tScreenFg[nBufScreenRow][nCol]) or DEFAULT_FG
+      local nBg = (ext.tScreenBg[nBufScreenRow] and ext.tScreenBg[nBufScreenRow][nCol]) or DEFAULT_BG
+      g_oGpuProxy.setForeground(nFg)
+      g_oGpuProxy.setBackground(nBg)
+    end
+    g_oGpuProxy.set(nCol, nBufScreenRow, sChar)
+  end
+
+  -- Restore write colors
+  g_oGpuProxy.setForeground(ext.nCurrentFg)
+  g_oGpuProxy.setBackground(ext.nCurrentBg)
+end
+
+-- =============================================
 -- 5. KEY PROCESSING
 -- =============================================
 
@@ -521,7 +613,10 @@ local function processKeyCooked(ext, ch, code)
   local sBuf = ext.sLineBuffer or ""
   local nCur = ext.nBufCursorPos
   local bHandled = false
-  local bIrpDone = false  -- true if IRP was completed (no cursor needed)
+  local bIrpDone = false
+  local bShift = fIsShiftHeld(ext)
+  local bCtrl  = fIsCtrlHeld(ext)
+  local tSel   = ext.tSel
 
   local function reRender(sText, nBacktrack)
     if #sText > 0 then writeToScreen(g_pDeviceObject, sText) end
@@ -530,7 +625,52 @@ local function processKeyCooked(ext, ch, code)
     end
   end
 
-  if code == 28 then -- ENTER
+  -- Helper: start or extend selection
+  local function selExtend(nNewCursorPos)
+    if not tSel.bActive then
+      tSel.bActive = true
+      tSel.nAnchor = nCur
+    end
+    tSel.nEnd = nNewCursorPos
+  end
+
+  -- Helper: clear selection on non-shift navigation or typing
+  local function selClearIfNeeded()
+    if tSel.bActive and not bShift then
+      fSelClear(ext)
+      fSelRender(ext)  -- un-highlight
+    end
+  end
+
+  -- =============================================
+  -- Ctrl+C: copy selection OR send interrupt
+  -- =============================================
+  if code == 46 and ch == 3 then
+    if tSel.bActive then
+      -- Copy selection to clipboard
+      ext.sClipboard = fSelGetText(ext)
+      fSelClear(ext)
+      fSelRender(ext)
+      bHandled = true
+    else
+      -- Normal Ctrl+C interrupt
+      local pIrp = ext.pPendingReadIrp
+      if pIrp then
+        ext.pPendingReadIrp = nil
+        ext.sLineBuffer = ""
+        ext.nBufCursorPos = 0
+        fSelClear(ext)
+        oKMD.DkCompleteRequest(pIrp, 0, "\3")
+        writeToScreen(g_pDeviceObject, "^C\n")
+      end
+      bHandled = true; bIrpDone = true
+    end
+
+  -- =============================================
+  -- ENTER
+  -- =============================================
+  elseif code == 28 then
+    fSelClear(ext)
     local pIrp = ext.pPendingReadIrp
     ext.pPendingReadIrp = nil
     ext.sLineBuffer = ""
@@ -539,8 +679,22 @@ local function processKeyCooked(ext, ch, code)
     oKMD.DkCompleteRequest(pIrp, 0, sBuf)
     bHandled = true; bIrpDone = true
 
-  elseif code == 14 then -- BACKSPACE
-    if nCur > 0 then
+  -- =============================================
+  -- BACKSPACE
+  -- =============================================
+  elseif code == 14 then
+    if tSel.bActive then
+      -- Delete selected text
+      local nLo, nHi = fSelGetRange(ext)
+      ext.sLineBuffer = sBuf:sub(1, nLo) .. sBuf:sub(nHi + 1)
+      ext.nBufCursorPos = nLo
+      fSelClear(ext)
+      -- Redraw from selection start
+      local nBack = nCur - nLo
+      if nBack > 0 then writeToScreen(g_pDeviceObject, "\27[" .. nBack .. "D") end
+      local sTail = ext.sLineBuffer:sub(nLo + 1) .. string.rep(" ", nHi - nLo)
+      reRender(sTail, #sTail)
+    elseif nCur > 0 then
       ext.sLineBuffer = sBuf:sub(1, nCur - 1) .. sBuf:sub(nCur + 1)
       ext.nBufCursorPos = nCur - 1
       writeToScreen(g_pDeviceObject, "\27[D")
@@ -549,44 +703,96 @@ local function processKeyCooked(ext, ch, code)
     end
     bHandled = true
 
-  elseif code == 211 then -- DELETE
-    if nCur < #sBuf then
+  -- =============================================
+  -- DELETE
+  -- =============================================
+  elseif code == 211 then
+    if tSel.bActive then
+      local nLo, nHi = fSelGetRange(ext)
+      ext.sLineBuffer = sBuf:sub(1, nLo) .. sBuf:sub(nHi + 1)
+      ext.nBufCursorPos = nLo
+      fSelClear(ext)
+      local nBack = nCur - nLo
+      if nBack > 0 then writeToScreen(g_pDeviceObject, "\27[" .. nBack .. "D") end
+      local sTail = ext.sLineBuffer:sub(nLo + 1) .. string.rep(" ", nHi - nLo)
+      reRender(sTail, #sTail)
+    elseif nCur < #sBuf then
       ext.sLineBuffer = sBuf:sub(1, nCur) .. sBuf:sub(nCur + 2)
       local sTail = ext.sLineBuffer:sub(nCur + 1) .. " "
       reRender(sTail, #sTail)
     end
     bHandled = true
 
-  elseif code == 203 then -- LEFT
+  -- =============================================
+  -- LEFT ARROW (+ Shift = select)
+  -- =============================================
+  elseif code == 203 then
     if nCur > 0 then
+      if bShift then
+        selExtend(nCur - 1)
+      else
+        selClearIfNeeded()
+      end
       ext.nBufCursorPos = nCur - 1
       writeToScreen(g_pDeviceObject, "\27[D")
+      if tSel.bActive then fSelRender(ext) end
     end
     bHandled = true
 
-  elseif code == 205 then -- RIGHT
+  -- =============================================
+  -- RIGHT ARROW (+ Shift = select)
+  -- =============================================
+  elseif code == 205 then
     if nCur < #sBuf then
+      if bShift then
+        selExtend(nCur + 1)
+      else
+        selClearIfNeeded()
+      end
       ext.nBufCursorPos = nCur + 1
       writeToScreen(g_pDeviceObject, "\27[C")
+      if tSel.bActive then fSelRender(ext) end
     end
     bHandled = true
 
-  elseif code == 199 then -- HOME
+  -- =============================================
+  -- HOME (+ Shift = select to start)
+  -- =============================================
+  elseif code == 199 then
+    if bShift then
+      selExtend(0)
+    else
+      selClearIfNeeded()
+    end
     if nCur > 0 then
       writeToScreen(g_pDeviceObject, "\27[" .. nCur .. "D")
       ext.nBufCursorPos = 0
     end
+    if tSel.bActive then fSelRender(ext) end
     bHandled = true
 
-  elseif code == 207 then -- END
+  -- =============================================
+  -- END (+ Shift = select to end)
+  -- =============================================
+  elseif code == 207 then
     local nToEnd = #sBuf - nCur
+    if bShift then
+      selExtend(#sBuf)
+    else
+      selClearIfNeeded()
+    end
     if nToEnd > 0 then
       writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
       ext.nBufCursorPos = #sBuf
     end
+    if tSel.bActive then fSelRender(ext) end
     bHandled = true
 
-  elseif code == 15 then -- TAB
+  -- =============================================
+  -- TAB
+  -- =============================================
+  elseif code == 15 then
+    fSelClear(ext)
     local nToEnd = #sBuf - nCur
     if nToEnd > 0 then
       writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
@@ -598,45 +804,47 @@ local function processKeyCooked(ext, ch, code)
     oKMD.DkCompleteRequest(pIrp, 0, "\t" .. sBuf)
     bHandled = true; bIrpDone = true
 
-  elseif code == 46 and ch == 3 then -- CTRL+C
-    local pIrp = ext.pPendingReadIrp
-    if pIrp then
-      ext.pPendingReadIrp = nil
-      ext.sLineBuffer = ""
-      ext.nBufCursorPos = 0
-      oKMD.DkCompleteRequest(pIrp, 0, "\3")
-      writeToScreen(g_pDeviceObject, "^C\n")
-    end
-    bHandled = true; bIrpDone = true
-
-  elseif code == 200 then -- UP (history)
+  -- =============================================
+  -- UP / DOWN (history)
+  -- =============================================
+  elseif code == 200 or code == 208 then
+    fSelClear(ext)
     local nToEnd = #sBuf - nCur
     if nToEnd > 0 then
       writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
     end
+    local sPrefix = (code == 200) and "\27[A" or "\27[B"
     local pIrp = ext.pPendingReadIrp
     ext.pPendingReadIrp = nil
     ext.sLineBuffer = ""
     ext.nBufCursorPos = 0
-    oKMD.DkCompleteRequest(pIrp, 0, "\27[A" .. sBuf)
+    oKMD.DkCompleteRequest(pIrp, 0, sPrefix .. sBuf)
     bHandled = true; bIrpDone = true
 
-  elseif code == 208 then -- DOWN (history)
-    local nToEnd = #sBuf - nCur
-    if nToEnd > 0 then
-      writeToScreen(g_pDeviceObject, "\27[" .. nToEnd .. "C")
+  -- =============================================
+  -- PRINTABLE CHARACTER
+  -- =============================================
+  elseif code ~= 0 and ch > 0 and ch < 256 then
+    -- If selection active, delete selected text first
+    if tSel.bActive then
+      local nLo, nHi = fSelGetRange(ext)
+      sBuf = sBuf:sub(1, nLo) .. sBuf:sub(nHi + 1)
+      nCur = nLo
+      ext.nBufCursorPos = nLo
+      fSelClear(ext)
+      -- Move screen cursor to selection start
+      local nBack = (ext.nBufCursorPos or 0) -- already at nLo
+      -- We need to visually reposition. This is approximate:
+      -- Move cursor left by (old nCur - nLo) positions
+      local nMoveLeft = (ext.nBufCursorPos or 0)
+      -- Actually, the cursor was at old nCur on screen. We need to go to nLo.
+      -- We already set nCur = nLo above.
     end
-    local pIrp = ext.pPendingReadIrp
-    ext.pPendingReadIrp = nil
-    ext.sLineBuffer = ""
-    ext.nBufCursorPos = 0
-    oKMD.DkCompleteRequest(pIrp, 0, "\27[B" .. sBuf)
-    bHandled = true; bIrpDone = true
 
-  elseif code ~= 0 and ch > 0 and ch < 256 then -- PRINTABLE
     local s = string.char(ch)
     ext.sLineBuffer = sBuf:sub(1, nCur) .. s .. sBuf:sub(nCur + 1)
     ext.nBufCursorPos = nCur + 1
+
     if nCur >= #sBuf then
       writeToScreen(g_pDeviceObject, s)
     else
@@ -650,9 +858,7 @@ local function processKeyCooked(ext, ch, code)
     bHandled = true
   end
 
-  -- =============================================
-  -- SINGLE EXIT: redraw cursor if read still active
-  -- =============================================
+  -- Single exit: redraw cursor if read still active
   if not bIrpDone then
     fShowCursor(ext)
   end
@@ -751,6 +957,14 @@ local function fDeviceControl(d, i)
   elseif sMethod == "scroll_up" then
     fScrollUp(ext, tArgs[1] or math.floor(ext.nHeight / 2))
     oKMD.DkCompleteRequest(i, 0)
+  elseif sMethod == "get_clipboard" then
+    oKMD.DkCompleteRequest(i, 0, ext.sClipboard or "")
+  elseif sMethod == "get_selection" then
+    if ext.tSel and ext.tSel.bActive then
+      oKMD.DkCompleteRequest(i, 0, fSelGetText(ext))
+    else
+      oKMD.DkCompleteRequest(i, 0, "")
+    end
   elseif sMethod == "scroll_down" then
     fScrollDown(ext, tArgs[1] or math.floor(ext.nHeight / 2))
     oKMD.DkCompleteRequest(i, 0)
@@ -766,6 +980,90 @@ local function fDeviceControl(d, i)
     else
       oKMD.DkCompleteRequest(i, tStatus.STATUS_INVALID_PARAMETER)
     end
+  elseif sMethod == "enter_alt_screen" then
+    -- Save main screen state
+    ext.tMainSave = {
+      tRows = ext.tScreenRows,
+      tFg   = ext.tScreenFg,
+      tBg   = ext.tScreenBg,
+      cx    = ext.nCursorX,
+      cy    = ext.nCursorY,
+      fg    = ext.nCurrentFg,
+      bg    = ext.nCurrentBg,
+      sb    = ext.tScrollback,
+      sbFg  = ext.tScrollbackFg,
+      sbBg  = ext.tScrollbackBg,
+      so    = ext.nScrollOffset,
+    }
+    ext.bAltScreen = true
+    ext.tScreenRows = {}
+    ext.tScreenFg   = {}
+    ext.tScreenBg   = {}
+    for y = 1, ext.nHeight do
+      ext.tScreenRows[y] = string.rep(" ", ext.nWidth)
+      ext.tScreenFg[y] = {}
+      ext.tScreenBg[y] = {}
+    end
+    ext.nScrollOffset = 0
+    if g_oGpuProxy then
+      g_oGpuProxy.setBackground(DEFAULT_BG)
+      g_oGpuProxy.setForeground(DEFAULT_FG)
+      g_oGpuProxy.fill(1, 1, ext.nWidth, ext.nHeight, " ")
+    end
+    oKMD.DkCompleteRequest(i, 0)
+
+  elseif sMethod == "leave_alt_screen" then
+    if ext.tMainSave then
+      ext.tScreenRows  = ext.tMainSave.tRows
+      ext.tScreenFg    = ext.tMainSave.tFg
+      ext.tScreenBg    = ext.tMainSave.tBg
+      ext.nCursorX     = ext.tMainSave.cx
+      ext.nCursorY     = ext.tMainSave.cy
+      ext.nCurrentFg   = ext.tMainSave.fg
+      ext.nCurrentBg   = ext.tMainSave.bg
+      ext.tScrollback  = ext.tMainSave.sb
+      ext.tScrollbackFg= ext.tMainSave.sbFg
+      ext.tScrollbackBg= ext.tMainSave.sbBg
+      ext.nScrollOffset= ext.tMainSave.so
+      ext.tMainSave = nil
+    end
+    ext.bAltScreen = false
+    fRenderLive(ext)
+    oKMD.DkCompleteRequest(i, 0)
+
+  elseif sMethod == "render_batch" then
+    -- tArgs = array of {x, y, text, fg, bg}
+    -- ONE round-trip, all GPU ops atomic, no ANSI parsing
+    if g_oGpuProxy then
+      local nLF, nLB = -1, -1
+      for _, t in ipairs(tArgs) do
+        local nX, nY, sT = t[1], t[2], t[3]
+        local nF = t[4] or DEFAULT_FG
+        local nB = t[5] or DEFAULT_BG
+        if nF ~= nLF then g_oGpuProxy.setForeground(nF); nLF = nF end
+        if nB ~= nLB then g_oGpuProxy.setBackground(nB); nLB = nB end
+        g_oGpuProxy.set(nX, nY, sT)
+        if nY >= 1 and nY <= ext.nHeight then
+          fUpdateShadow(ext, nX, nY, sT)
+        end
+      end
+      g_oGpuProxy.setForeground(ext.nCurrentFg)
+      g_oGpuProxy.setBackground(ext.nCurrentBg)
+    end
+    oKMD.DkCompleteRequest(i, 0)
+
+  elseif sMethod == "gpu_fill" then
+    -- {x, y, w, h, char, fg, bg}
+    if g_oGpuProxy then
+      if tArgs[6] then g_oGpuProxy.setForeground(tArgs[6]) end
+      if tArgs[7] then g_oGpuProxy.setBackground(tArgs[7]) end
+      g_oGpuProxy.fill(tArgs[1] or 1, tArgs[2] or 1,
+                        tArgs[3] or 1, tArgs[4] or 1, tArgs[5] or " ")
+      g_oGpuProxy.setForeground(ext.nCurrentFg)
+      g_oGpuProxy.setBackground(ext.nCurrentBg)
+    end
+    oKMD.DkCompleteRequest(i, 0)
+    
   elseif sMethod == "get_mode" then
     oKMD.DkCompleteRequest(i, 0, ext.sMode or "cooked")
   elseif sMethod == "get_size" then
@@ -831,9 +1129,28 @@ function DriverEntry(pObj)
   end
 
   fInitBuffers(dev.pDeviceExtension)
+  dev.pDeviceExtension.bAltScreen = false
+
+  -- Keyboard proxy for modifier detection (shift, ctrl)
+  local kbd
+  b, l = syscall("raw_component_list", "keyboard")
+  if b and l then for k in pairs(l) do kbd = k; break end end
+  if kbd then
+    local _, kp = oKMD.DkGetHardwareProxy(kbd)
+    dev.pDeviceExtension.oKbdProxy = kp
+  end
+
+  -- Selection state
+  dev.pDeviceExtension.tSel = {
+    bActive = false,
+    nAnchor = 0,     -- buffer index where selection started
+    nEnd    = 0,     -- buffer index where selection ends
+  }
+  dev.pDeviceExtension.sClipboard = ""
 
   oKMD.DkRegisterInterrupt("key_down")
   oKMD.DkRegisterInterrupt("scroll")
+  oKMD.DkRegisterInterrupt("clipboard")
   return 0
 end
 
