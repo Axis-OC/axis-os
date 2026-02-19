@@ -213,63 +213,91 @@ local function _setupLogRotation(tConfig)
   local bOk2, hVbl = syscall("raw_component_invoke", vfs_state.oRootFs.address, "open", sVblPath, "w")
 
   syscall("kernel_log", "[PM] Log rotation active:")
-  if bOk1 and hLog then syscall("kernel_log", "[PM]   .log -> " .. sLogPath) end
-  if bOk2 and hVbl then syscall("kernel_log", "[PM]   .vbl -> " .. sVblPath) end
+    if bOk1 and hLog then
+        local bT1, bT2, sT3 = syscall("raw_component_invoke",
+            vfs_state.oRootFs.address, "write", hLog,
+            "=== LOG SESSION START ===\n")
+        syscall("kernel_log", "[PM] .log test write: " ..
+            tostring(bT1) .. " " .. tostring(bT2) .. " " .. tostring(sT3))
+    end
+    if bOk2 and hVbl then
+        local bT1, bT2, sT3 = syscall("raw_component_invoke",
+            vfs_state.oRootFs.address, "write", hVbl,
+            "=== VBL SESSION START ===\n")
+        syscall("kernel_log", "[PM] .vbl test write: " ..
+            tostring(bT1) .. " " .. tostring(bT2) .. " " .. tostring(sT3))
+    end
 
-  return {
-    hLogFile = (bOk1 and hLog) or nil,
-    hVblFile = (bOk2 and hVbl) or nil,
-    sLogPath = sLogPath,
-    sVblPath = sVblPath,
-  }
+    return {
+        hLogFile = (bOk1 and hLog) or nil,
+        hVblFile = (bOk2 and hVbl) or nil,
+        sLogPath = sLogPath,
+        sVblPath = sVblPath,
+    }
 end
 
 local function _writeToLogFiles(sText)
-  if not g_tLogState or not sText or #sText == 0 then return end
+    if not g_tLogState or not sText or #sText == 0 then return end
 
-  -- .vbl gets EVERYTHING (verbose)
-  if g_tLogState.hVblFile then
-    pcall(function()
-      syscall("raw_component_invoke", vfs_state.oRootFs.address,
-              "write", g_tLogState.hVblFile, sText)
-    end)
-  end
-
-  -- .log gets only non-debug entries
-  if g_tLogState.hLogFile then
-    pcall(function()
-      local sFiltered = ""
-      for sLine in (sText .. "\n"):gmatch("([^\n]*)\n") do
-        if #sLine > 0 then
-          local bSkip = false
-          -- skip [dev], [debug], and [DK] (driver kit verbose) lines
-          if sLine:match("^%[dev%]")   then bSkip = true end
-          if sLine:match("^%[debug%]") then bSkip = true end
-          if sLine:match("%[DK%]")     then bSkip = true end
-          if not bSkip then
-            sFiltered = sFiltered .. sLine .. "\n"
-          end
+    -- .vbl gets EVERYTHING
+    if g_tLogState.hVblFile then
+        local bOk, bWriteOk, sErr = syscall("raw_component_invoke",
+            vfs_state.oRootFs.address, "write", g_tLogState.hVblFile, sText)
+        if not bOk or not bWriteOk then
+            -- Can't use kernel_log here (would recurse), so write directly
+            -- to ringfs if available
+            if g_nRingFsId then
+                pcall(function()
+                    _doInternalWrite(g_nRingFsId,
+                        "[PM] VBL WRITE FAILED: " .. tostring(sErr) .. "\n")
+                end)
+            end
         end
-      end
-      if #sFiltered > 0 then
-        syscall("raw_component_invoke", vfs_state.oRootFs.address,
-                "write", g_tLogState.hLogFile, sFiltered)
-      end
-    end)
-  end
+    end
+
+    -- .log gets INFO+ only
+    if g_tLogState.hLogFile then
+        local sFiltered = ""
+        for sLine in (sText .. "\n"):gmatch("([^\n]*)\n") do
+            if #sLine > 0 then
+                local bSkip = false
+                if sLine:find("%[DEBUG %]") then bSkip = true end
+                if sLine:find("%[ DEV  %]") then bSkip = true end
+                if sLine:find("%[SCHED %]") then bSkip = true end
+                if sLine:find("%[ IPC  %]") then bSkip = true end
+                if sLine:find("%[DK%]")     then bSkip = true end
+                if not bSkip then
+                    sFiltered = sFiltered .. sLine .. "\n"
+                end
+            end
+        end
+        if #sFiltered > 0 then
+            local bOk, bWriteOk, sErr = syscall("raw_component_invoke",
+                vfs_state.oRootFs.address, "write", g_tLogState.hLogFile, sFiltered)
+            if not bOk or not bWriteOk then
+                if g_nRingFsId then
+                    pcall(function()
+                        _doInternalWrite(g_nRingFsId,
+                            "[PM] LOG WRITE FAILED: " .. tostring(sErr) .. "\n")
+                    end)
+                end
+            end
+        end
+    end
 end
 
+
 local function _drainKernelLog()
-  local sNewLog = syscall("kernel_get_boot_log")
-  if not sNewLog or #sNewLog == 0 then return end
+    local sNewLog = syscall("kernel_get_boot_log")
+    if not sNewLog or #sNewLog == 0 then return end
 
-  -- write to ringfs live buffer
-  if g_nRingFsId then
-    pcall(function() _doInternalWrite(g_nRingFsId, sNewLog .. "\n") end)
-  end
+    -- write to ringfs live buffer
+    if g_nRingFsId then
+        pcall(function() _doInternalWrite(g_nRingFsId, sNewLog .. "\n") end)
+    end
 
-  -- write to permanent files
-  _writeToLogFiles(sNewLog)
+    -- write to permanent files
+    _writeToLogFiles(sNewLog)
 end
 
 

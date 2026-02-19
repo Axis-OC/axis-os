@@ -96,7 +96,6 @@ function oNF.RewriteHost(sUrl)
     return nil, "Blocked by /etc/hosts: " .. sHost
   end
 
-  -- Replace hostname in URL
   local sNewUrl = sUrl:gsub(sHost, sTarget, 1)
   return sNewUrl
 end

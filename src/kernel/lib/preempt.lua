@@ -34,7 +34,7 @@ oPreempt.DEFAULT_QUANTUM = 0.05   -- 50 ms
 -- __pc() call-count threshold.  We only read the wall clock every N
 -- calls to avoid the overhead of computer.uptime() on every loop
 -- iteration.  Higher = less overhead, slightly less responsive.
-oPreempt.CHECK_INTERVAL = 256
+oPreempt.CHECK_INTERVAL = 128
 
 -- =============================================
 -- STATISTICS  (read by the kernel for diagnostics)

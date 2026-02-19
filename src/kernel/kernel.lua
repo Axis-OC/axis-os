@@ -68,20 +68,59 @@ local C_CYAN   = 0x55FFFF
 local C_BLUE   = 0x5555FF
 
 local tLogLevels = {
-  ok    = { text = "[  OK  ]", color = C_GREEN },
-  fail  = { text = "[ FAIL ]", color = C_RED },
-  info  = { text = "[ INFO ]", color = C_CYAN },
-  warn  = { text = "[ WARN ]", color = C_YELLOW },
-  dev   = { text = "[ DEV  ]", color = C_BLUE },
-  none  = { text = "         ", color = C_WHITE },
+  ok    = { text = "[  OK  ]", color = C_GREEN,  pri = 3 },
+  fail  = { text = "[ FAIL ]", color = C_RED,    pri = 4 },
+  info  = { text = "[ INFO ]", color = C_CYAN,   pri = 2 },
+  warn  = { text = "[ WARN ]", color = C_YELLOW, pri = 3 },
+  dev   = { text = "[ DEV  ]", color = C_BLUE,   pri = 1 },
+  debug = { text = "[DEBUG ]", color = C_GRAY,   pri = 0 },
+  sec   = { text = "[ SEC  ]", color = 0xFF55FF, pri = 3 },
+  sched = { text = "[SCHED ]", color = 0x55AAFF, pri = 1 },
+  ipc   = { text = "[ IPC  ]", color = 0xAAAAFF, pri = 1 },
+  drv   = { text = "[ DRV  ]", color = 0xFFAA55, pri = 2 },
+  vfs   = { text = "[ VFS  ]", color = 0x55FFAA, pri = 2 },
+  mem   = { text = "[ MEM  ]", color = 0xFFFF55, pri = 2 },
+  proc  = { text = "[ PROC ]", color = 0xAAFFAA, pri = 2 },
+  none  = { text = "         ", color = C_WHITE,  pri = 5 },
 }
 
 local tLogLevelsPriority = {
-  debug = 0, info = 1, warn = 2, fail = 3, none = 4
+  debug = 0, dev = 1, sched = 1, ipc = 1, info = 2,
+  drv = 2, vfs = 2, mem = 2, proc = 2, warn = 3,
+  ok = 3, sec = 3, fail = 4, none = 5
 }
 
 local sCurrentLogLevel = string.lower(tBootArgs.loglevel or "info")
-local nMinPriority = tLogLevelsPriority[sCurrentLogLevel] or 1
+local nMinScreenPriority = tLogLevelsPriority[sCurrentLogLevel] or 2
+
+-- =============================================
+-- DMESG RING BUFFER
+-- Persistent kernel message buffer. Never drained.
+-- Accessed via syscall("dmesg_read").
+-- tBootLog is ALSO maintained for PM drain (backwards compat).
+-- =============================================
+
+local DMESG_MAX_ENTRIES = 1024
+local g_tDmesg = {}
+local g_nDmesgSeq = 0
+
+-- Structured log entry
+local function fDmesgPush(sLevel, sMessage, nPid, sSource)
+    g_nDmesgSeq = g_nDmesgSeq + 1
+    local tEntry = {
+        seq   = g_nDmesgSeq,
+        time  = raw_computer.uptime(),
+        level = sLevel,
+        msg   = sMessage,
+        pid   = nPid or g_nCurrentPid or 0,
+        src   = sSource,
+    }
+    g_tDmesg[#g_tDmesg + 1] = tEntry
+    if #g_tDmesg > DMESG_MAX_ENTRIES then
+        table.remove(g_tDmesg, 1)
+    end
+    return tEntry
+end
 
 -------------------------------------------------
 -- sMLTR: SYNAPSE TOKEN GENERATION
@@ -139,35 +178,79 @@ local function __logger_init()
 end
 
 function kprint(sLevel, ...)
-  local nMsgPriority = tLogLevelsPriority[sLevel] or 1
-  if nMsgPriority < nMinPriority then return end 
-  local tMsgParts = {...}
-  local sMessage = ""
-  for i, v in ipairs(tMsgParts) do
-    sMessage = sMessage .. tostring(v) .. (i < #tMsgParts and " " or "")
-  end
-  local sFullLogMessage = string.format("[%s] %s", sLevel, sMessage)
-  table.insert(kernel.tBootLog, sFullLogMessage)
-  if not g_bLogToScreen then return end
-  if not g_oGpu then return end
-  if g_nCurrentLine >= g_nHeight then
-    g_oGpu.copy(1, 2, g_nWidth, g_nHeight - 1, 0, -1)
-    g_oGpu.fill(1, g_nHeight, g_nWidth, 1, " ")
-  else
-    g_nCurrentLine = g_nCurrentLine + 1
-  end
-  local tLevelInfo = tLogLevels[sLevel] or tLogLevels.none
-  local nPrintY = g_nCurrentLine
-  local nPrintX = 1
-  g_oGpu.setForeground(C_GRAY)
-  local sTimestamp = string.format("[%8.4f]", raw_computer.uptime())
-  g_oGpu.set(nPrintX, nPrintY, sTimestamp)
-  nPrintX = nPrintX + #sTimestamp + 1
-  g_oGpu.setForeground(tLevelInfo.color)
-  g_oGpu.set(nPrintX, nPrintY, tLevelInfo.text)
-  nPrintX = nPrintX + #tLevelInfo.text + 1
-  g_oGpu.setForeground(C_WHITE)
-  g_oGpu.set(nPrintX, nPrintY, sMessage)
+    local tLevelInfo = tLogLevels[sLevel] or tLogLevels.none
+    local nMsgPriority = tLevelInfo.pri or 2
+
+    -- Build message string
+    local tMsgParts = {...}
+    local sMessage = ""
+    for i, v in ipairs(tMsgParts) do
+        if type(v) == "table" then
+            -- Inline structured data: {pid=5, ring=3} → "pid=5 ring=3"
+            local tKV = {}
+            for k, val in pairs(v) do
+                tKV[#tKV + 1] = tostring(k) .. "=" .. tostring(val)
+            end
+            table.sort(tKV)
+            sMessage = sMessage .. table.concat(tKV, " ")
+        else
+            sMessage = sMessage .. tostring(v)
+        end
+        if i < #tMsgParts then sMessage = sMessage .. " " end
+    end
+
+    -- Timestamp
+    local nTime = raw_computer.uptime()
+    local sTimestamp = string.format("[%9.4f]", nTime)
+
+    -- Full structured line for .vbl / dmesg
+    local sFullLine = string.format("%s %s PID=%-3d %s",
+        sTimestamp, tLevelInfo.text, g_nCurrentPid or 0, sMessage)
+
+    -- Always push to dmesg ring buffer (ALL levels)
+    fDmesgPush(sLevel, sMessage, g_nCurrentPid)
+
+    -- Always push to boot log drain (PM picks these up)
+    table.insert(kernel.tBootLog, sFullLine)
+
+    -- Screen output (filtered by boot arg log level)
+    if nMsgPriority < nMinScreenPriority then return end
+    if not g_bLogToScreen then return end
+    if not g_oGpu then return end
+
+    if g_nCurrentLine >= g_nHeight then
+        g_oGpu.copy(1, 2, g_nWidth, g_nHeight - 1, 0, -1)
+        g_oGpu.fill(1, g_nHeight, g_nWidth, 1, " ")
+    else
+        g_nCurrentLine = g_nCurrentLine + 1
+    end
+
+    local nPrintY = g_nCurrentLine
+    local nPrintX = 1
+
+    -- Timestamp
+    g_oGpu.setForeground(C_GRAY)
+    g_oGpu.set(nPrintX, nPrintY, sTimestamp)
+    nPrintX = nPrintX + #sTimestamp + 1
+
+    -- Level tag
+    g_oGpu.setForeground(tLevelInfo.color)
+    g_oGpu.set(nPrintX, nPrintY, tLevelInfo.text)
+    nPrintX = nPrintX + #tLevelInfo.text + 1
+
+    -- PID (if not kernel)
+    if g_nCurrentPid and g_nCurrentPid > 1 then
+        g_oGpu.setForeground(0x888888)
+        local sPid = string.format("P%-3d ", g_nCurrentPid)
+        g_oGpu.set(nPrintX, nPrintY, sPid)
+        nPrintX = nPrintX + #sPid
+    end
+
+    -- Message
+    g_oGpu.setForeground(C_WHITE)
+    local nMaxMsg = g_nWidth - nPrintX + 1
+    if #sMessage > nMaxMsg then sMessage = sMessage:sub(1, nMaxMsg - 3) .. "..." end
+    g_oGpu.set(nPrintX, nPrintY, sMessage)
 end
 
 local function rawtostring(v)
@@ -270,10 +353,36 @@ end
 ------------------------------------------------
 
 __logger_init()
+
+local g_tFrozenString, g_tFrozenTable, g_tFrozenMath, g_tFrozenOs
+
 do
-    local sMT = getmetatable("")
-    if sMT then
-        sMT.__metatable = "string"   -- locks the metatable
+    -- String (minus dump, with bounded rep)
+    local fRealRep = string.rep
+    g_tFrozenString = {}
+    for k, v in pairs(string) do g_tFrozenString[k] = v end
+    g_tFrozenString.dump = nil
+    g_tFrozenString.rep = function(s, n, sep)
+        local nEst = #s * n + (sep and #sep * (n - 1) or 0)
+        if nEst > 1048576 then error("string.rep: result too large", 2) end
+        return fRealRep(s, n, sep)
+    end
+
+    -- Table
+    g_tFrozenTable = {}
+    for k, v in pairs(table) do g_tFrozenTable[k] = v end
+
+    -- Math
+    g_tFrozenMath = {}
+    for k, v in pairs(math) do g_tFrozenMath[k] = v end
+
+    -- Os (safe subset)
+    g_tFrozenOs = {}
+    for k, v in pairs(os) do
+        if k ~= "exit" and k ~= "execute"
+           and k ~= "remove" and k ~= "rename" then
+            g_tFrozenOs[k] = v
+        end
     end
 end
 
@@ -613,6 +722,7 @@ local function shallowCopy(t)
 end
 
 function kernel.create_sandbox(nPid, nRing)
+  kprint("debug", "Creating sandbox", {pid=nPid, ring=nRing})
   -- =========================================================
   -- THREE-LAYER PROXY SANDBOX
   --
@@ -673,6 +783,7 @@ function kernel.create_sandbox(nPid, nRing)
   tProtected.type     = type
   tProtected.unpack   = unpack
   tProtected._VERSION = _VERSION
+  -- tProtected.collectgarbage = collectgarbage
   tProtected.xpcall   = xpcall
 
   do
@@ -730,15 +841,6 @@ function kernel.create_sandbox(nPid, nRing)
     tProtected.os = tSafeOs
   end
 
-  -- setmetatable / getmetatable are safe to expose because the
-  -- sandbox has __metatable = "protected", so:
-  --   getmetatable(sandbox) → "protected"  (not the real mt)
-  --   setmetatable(sandbox, x) → error     (can't override __metatable)
-  -- All other tables work normally.
-  -- REPLACE THIS:
-  tProtected.setmetatable = setmetatable
-
-  -- WITH THIS:
   do
       local fRealSetmt = setmetatable
       tProtected.setmetatable = function(tbl, mt)
@@ -776,6 +878,7 @@ function kernel.create_sandbox(nPid, nRing)
           nPcCounter = nPcCounter + 1
           if nPcCounter < nPcInterval then return end
           nPcCounter = 0
+          -- Signal delivery
           if g_oIpc then
               local tProc = kernel.tProcessTable[nPid]
               if tProc and tProc.tPendingSignals
@@ -918,12 +1021,15 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
   kernel.nNextPid = kernel.nNextPid + 1
 
   kprint("info", "Creating process " .. nPid .. " ('" .. sPath .. "') at Ring " .. nRing)
+  kprint("proc", "spawn", {pid=nPid, ring=nRing, parent=nParentPid or 0, image=sPath})
 
   local sCode, sErr = kernel.syscalls.vfs_read_file(0, sPath)
   if not sCode then
     kprint("fail", "Failed to create process: " .. sErr)
     return nil, sErr
   end
+
+  kprint("debug", "Loaded source", {pid=nPid, bytes=#sCode})
 
   -- =========================================================
   -- PREEMPTIVE SCHEDULING:  instrument source for Ring ≥ 2.5
@@ -933,6 +1039,7 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
   if g_oPreempt and nRing >= 2.5 then
       local sInstrumented, nInjections = g_oPreempt.instrument(sCode, sPath)
       if nInjections > 0 then
+          kprint("sched", "Instrumented", {pid=nPid, checkpoints=nInjections, image=sPath})
           kprint("dev", string.format(
               "Preempt: %s → %d yield checkpoints injected", sPath, nInjections))
           sCode = sInstrumented
@@ -1000,13 +1107,14 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
       g_oObManager.ObInheritHandles(nParentPid, nPid, sSynapseToken)
     end
   end
-
+  kprint("debug", "Process ready", {pid=nPid, token=sSynapseToken:sub(1,12).."..."})
   kprint("dev", "  PID " .. nPid .. " synapse token: " .. sSynapseToken:sub(1, 16) .. "...")
 
   return nPid
 end
 
 function kernel.create_thread(fFunc, nParentPid)
+  kprint("proc", "thread spawn", {tid=nPid, parent=nParentPid, ring=tParentProcess.ring})
   local nPid = kernel.nNextPid
   kernel.nNextPid = kernel.nNextPid + 1
   
@@ -1082,8 +1190,14 @@ local SANITIZE_MAX_ITEMS = 4096
 local function deepSanitize(vValue, nDepth, tCounter)
     nDepth   = nDepth or 0
     tCounter = tCounter or { n = 0 }
-    if nDepth > SANITIZE_MAX_DEPTH then return nil end
-    if tCounter.n > SANITIZE_MAX_ITEMS then return nil end
+    if nDepth > SANITIZE_MAX_DEPTH then 
+      kprint("sec", "Sanitize depth exceeded", {depth=nDepth})
+      return nil 
+    end
+    if tCounter.n > SANITIZE_MAX_ITEMS then 
+      kprint("sec", "Sanitize item limit", {items=tCounter.n})
+      return nil 
+    end
 
     local sType = type(vValue)
     if sType == "string" or sType == "number"
@@ -1114,6 +1228,7 @@ end
 
 function kernel.syscall_dispatch(sName, ...)
     if type(sName) ~= "string" then
+        kprint("sec", "Non-string syscall name rejected", {pid=g_nCurrentPid, type=type(sName)})
         return nil, "Syscall name must be a string"
     end
 
@@ -1152,7 +1267,6 @@ function kernel.syscall_dispatch(sName, ...)
   end
 
   -- Check for ring 1 overrides
--- Find this existing block and REPLACE it:
   local nOverridePid = kernel.tSyscallOverrides[sName]
   if nOverridePid then
       local tProcess = kernel.tProcessTable[nPid]
@@ -1163,7 +1277,7 @@ function kernel.syscall_dispatch(sName, ...)
       
       -- SANITIZE when Ring >= 2.5 sends to Ring 1 PM
       local tArgs
-      if kernel.tRings[nPid] >= 2.5 then
+      if kernel.tRings[nPid] >= 3 then
           tArgs = deepSanitize({...})
       else
           tArgs = {...}
@@ -1202,6 +1316,7 @@ function kernel.syscall_dispatch(sName, ...)
   
   if not bIsAllowed then
     kprint("fail", "Ring violation: PID " .. nPid .. " (Ring " .. nRing .. ") tried to call " .. sName)
+    kprint("sec", "RING VIOLATION", {pid=nPid, ring=nRing, syscall=sName})
     kernel.tProcessTable[nPid].status = "dead"
     return coroutine.yield()
   end
@@ -2013,6 +2128,121 @@ kernel.tSyscallTable["sched_get_stats"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["mem_info"] = {
+    func = function(nPid)
+        local nTotal = computer.totalMemory()
+        local nFree  = computer.freeMemory()
+        local nUsed  = nTotal - nFree
+
+        -- Count per-process overhead estimates
+        local tProcs = {}
+        for nProcPid, tProc in pairs(kernel.tProcessTable) do
+            if tProc.status ~= "dead" then
+                local nModules = 0
+                if tProc._moduleCache then
+                    for _ in pairs(tProc._moduleCache) do nModules = nModules + 1 end
+                end
+                local nHandles = 0
+                if g_oObManager then
+                    local tH = g_oObManager.ObListHandles(nProcPid)
+                    if tH then nHandles = #tH end
+                end
+                local nSignalQ = 0
+                if tProc.signal_queue then nSignalQ = #tProc.signal_queue end
+
+                table.insert(tProcs, {
+                    pid      = nProcPid,
+                    ring     = tProc.ring or -1,
+                    status   = tProc.status or "?",
+                    modules  = nModules,
+                    handles  = nHandles,
+                    signals  = nSignalQ,
+                    threads  = tProc.threads and #tProc.threads or 0,
+                    cpu      = tProc.nCpuTime or 0,
+                })
+            end
+        end
+        table.sort(tProcs, function(a, b) return a.pid < b.pid end)
+
+        -- Global overhead estimates
+        local nDmesgEntries = #g_tDmesg
+        local nBootLogEntries = #kernel.tBootLog
+        local nLoadedModules = 0
+        for _ in pairs(kernel.tLoadedModules) do nLoadedModules = nLoadedModules + 1 end
+
+        return {
+            nTotal         = nTotal,
+            nFree          = nFree,
+            nUsed          = nUsed,
+            nUsedPct       = math.floor((nUsed / nTotal) * 100),
+            nProcesses     = #tProcs,
+            nDmesgEntries  = nDmesgEntries,
+            nBootLogPending= nBootLogEntries,
+            nGlobalModules = nLoadedModules,
+            tProcesses     = tProcs,
+        }
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["dmesg_read"] = {
+    func = function(nPid, nLastSeq, nMaxEntries, sLevelFilter)
+        nLastSeq = nLastSeq or 0
+        nMaxEntries = nMaxEntries or 200
+        if nMaxEntries > 500 then nMaxEntries = 500 end
+        
+        local tResult = {}
+        local nCount = 0
+        for i = #g_tDmesg, 1, -1 do
+            local tEntry = g_tDmesg[i]
+            if tEntry.seq <= nLastSeq then break end
+            if sLevelFilter and tEntry.level ~= sLevelFilter then
+                goto dmesg_next
+            end
+            table.insert(tResult, 1, {
+                seq   = tEntry.seq,
+                time  = tEntry.time,
+                level = tEntry.level,
+                msg   = tEntry.msg,
+                pid   = tEntry.pid,
+                src   = tEntry.src,
+            })
+            nCount = nCount + 1
+            if nCount >= nMaxEntries then break end
+            ::dmesg_next::
+        end
+        return tResult
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["dmesg_clear"] = {
+    func = function(nPid)
+        local nCleared = #g_tDmesg
+        g_tDmesg = {}
+        kprint("info", "dmesg cleared", {by=nPid, entries=nCleared})
+        return nCleared
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["dmesg_stats"] = {
+    func = function(nPid)
+        local tCounts = {}
+        for _, tEntry in ipairs(g_tDmesg) do
+            tCounts[tEntry.level] = (tCounts[tEntry.level] or 0) + 1
+        end
+        return {
+            nTotal    = #g_tDmesg,
+            nMaxSize  = DMESG_MAX_ENTRIES,
+            nFirstSeq = g_tDmesg[1] and g_tDmesg[1].seq or 0,
+            nLastSeq  = g_nDmesgSeq,
+            tLevelCounts = tCounts,
+        }
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
 kernel.tSyscallTable["process_cpu_stats"] = {
     func = function(nPid, nTargetPid)
         local tTarget = kernel.tProcessTable[nTargetPid or nPid]
@@ -2061,7 +2291,6 @@ kernel.tSyscallTable["raw_component_proxy"] = {
 }
 
 -- IPC
--- REPLACE the entire kernel.syscalls.signal_send function:
 kernel.syscalls.signal_send = function(nPid, nTargetPid, ...)
     local tTarget = kernel.tProcessTable[nTargetPid]
     if not tTarget then return nil, "Invalid PID" end
@@ -2069,9 +2298,11 @@ kernel.syscalls.signal_send = function(nPid, nTargetPid, ...)
     local nSenderRing = kernel.tRings[nPid] or 3
     local nTargetRing = kernel.tRings[nTargetPid] or 3
     
-    -- Sanitize when untrusted → trusted
+    -- ONLY sanitize Ring 3+ user code sending to lower rings.
+    -- Ring 0-2 are trusted system code that passes functions
+    -- (driver dispatch tables, callbacks, etc.)
     local tSignal
-    if nSenderRing > nTargetRing or nSenderRing >= 3 then
+    if nSenderRing >= 3 and nTargetRing < 3 then
         tSignal = {nPid}
         local tRawArgs = {...}
         for i = 1, #tRawArgs do
@@ -2449,7 +2680,9 @@ while true do
             if g_oObManager then g_oObManager.ObDestroyProcess(nTid) end
           end
         end
+        -- fKernelGC("step", 100)
       end
+      
 
       -- ======================================================
       -- CRITICAL:  Reset the OC "too long without yielding"
@@ -2495,7 +2728,7 @@ while true do
           if g_oObManager then
               g_oObManager.ObDestroyProcess(nVictimPid)
           end
-          collectgarbage("collect")
+          -- fKernelGC("collect")
       end
   end
 

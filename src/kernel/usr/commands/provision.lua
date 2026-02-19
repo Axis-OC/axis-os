@@ -241,7 +241,6 @@ while true do
 end
 oFs.close(bh)
 
--- Replace placeholders
 local boot_code = boot_template
 boot_code = boot_code:gsub("%%%%PK_FP%%%%", pk_fp)
 boot_code = boot_code:gsub("%%%%KERN_H%%%%", kernel_hash)

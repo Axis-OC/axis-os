@@ -369,13 +369,13 @@ local function writeToScreen(pDeviceObject, sData)
                 if tAnsiColors[n] then
                   pExt.nCurrentFg = tAnsiColors[n]
                   bAny = true
-                elseif n >= 40 and n <= 47 then              -- ADD
-                  pExt.nCurrentBg = tAnsiColors[n - 10] or DEFAULT_BG  -- ADD
-                  bAny = true                                 -- ADD
-                elseif n == 7 then                            -- ADD (reverse)
-                  pExt.nCurrentFg, pExt.nCurrentBg =          -- ADD
-                    pExt.nCurrentBg, pExt.nCurrentFg           -- ADD
-                  bAny = true                                 -- ADD
+                elseif n >= 40 and n <= 47 then              
+                  pExt.nCurrentBg = tAnsiColors[n - 10] or DEFAULT_BG  
+                  bAny = true                                 
+                elseif n == 7 then
+                  pExt.nCurrentFg, pExt.nCurrentBg =          
+                    pExt.nCurrentBg, pExt.nCurrentFg           
+                  bAny = true                                 
                 elseif n == 0 then
                   pExt.nCurrentFg = DEFAULT_FG
                   pExt.nCurrentBg = DEFAULT_BG
@@ -1032,8 +1032,6 @@ local function fDeviceControl(d, i)
     oKMD.DkCompleteRequest(i, 0)
 
   elseif sMethod == "render_batch" then
-    -- tArgs = array of {x, y, text, fg, bg}
-    -- ONE round-trip, all GPU ops atomic, no ANSI parsing
     if g_oGpuProxy then
       local nLF, nLB = -1, -1
       for _, t in ipairs(tArgs) do
@@ -1047,20 +1045,19 @@ local function fDeviceControl(d, i)
           fUpdateShadow(ext, nX, nY, sT)
         end
       end
-      g_oGpuProxy.setForeground(ext.nCurrentFg)
-      g_oGpuProxy.setBackground(ext.nCurrentBg)
+      -- DO NOT restore ext.nCurrentFg/nCurrentBg here.
+      -- The caller controls all colors via the batch.
+      -- Restoring old colors causes sepia between frames.
     end
     oKMD.DkCompleteRequest(i, 0)
 
   elseif sMethod == "gpu_fill" then
-    -- {x, y, w, h, char, fg, bg}
     if g_oGpuProxy then
       if tArgs[6] then g_oGpuProxy.setForeground(tArgs[6]) end
       if tArgs[7] then g_oGpuProxy.setBackground(tArgs[7]) end
       g_oGpuProxy.fill(tArgs[1] or 1, tArgs[2] or 1,
                         tArgs[3] or 1, tArgs[4] or 1, tArgs[5] or " ")
-      g_oGpuProxy.setForeground(ext.nCurrentFg)
-      g_oGpuProxy.setBackground(ext.nCurrentBg)
+      -- DO NOT restore colors here either
     end
     oKMD.DkCompleteRequest(i, 0)
     
