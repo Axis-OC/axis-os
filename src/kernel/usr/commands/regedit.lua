@@ -1,569 +1,374 @@
 --
 -- /usr/commands/regedit.lua
--- AxisOS Visual Registry Editor v2
--- Batched rendering — single write per frame.
+-- AxisOS Registry Editor v3
+-- Alt-screen, batch-rendered, memory-lean.
 --
 -- Controls:
 --   Up/Down      Navigate
---   Right/Enter  Expand node
---   Left         Collapse / go to parent
+--   Right/Enter  Expand node / enter values
+--   Left         Collapse / go to parent / back to tree
 --   Tab          Switch panel (Tree <-> Values)
---   R            Refresh
---   Q/Ctrl+C     Quit
---   /            Search (type then Enter)
---   F5           Force full refresh
+--   /            Search (type term, Enter applies, Esc cancels)
+--   R / F5       Refresh (clears search)
+--   Q / Ctrl+C   Quit
+--   PgUp/PgDn   Page scroll
+--   Home/End     Jump top/bottom
 --
 
-local fs  = require("filesystem")
-local sys = require("syscall")
+local fs = require("filesystem")
+
+local hIn  = fs.open("/dev/tty", "r")
+local hOut = fs.open("/dev/tty", "w")
+if not hIn or not hOut then print("regedit: no tty"); return end
+
+fs.deviceControl(hIn, "set_mode", {"raw"})
+local bSz, tSz = fs.deviceControl(hIn, "get_size", {})
+local W = (bSz and tSz and tSz.w) or 80
+local H = (bSz and tSz and tSz.h) or 25
 
 -- =============================================
--- TERMINAL SETUP
+-- PALETTE & LAYOUT
 -- =============================================
 
-local hStdin  = fs.open("/dev/tty", "r")
-local hStdout = fs.open("/dev/tty", "w")
-if not hStdin or not hStdout then print("regedit: cannot open /dev/tty"); return end
+local FG      = 0xFFFFFF
+local BG      = 0x000000
+local SEL     = 0xFFFF00
+local DIM     = 0x555555
+local KEY_C   = 0x5599FF
+local STR_C   = 0x55DD55
+local NUM_C   = 0xFFFF55
+local BOOL_C  = 0xFF55FF
+local HDR_C   = 0x55FFFF
+local BAR_FG  = 0xFFFFFF
+local BAR_BG  = 0x0000AA
 
-local nWidth, nHeight = 80, 25
-local bOkSize, tSize = fs.deviceControl(hStdin, "get_size", {})
-if bOkSize and type(tSize) == "table" then
-  nWidth  = tSize.w or 80
-  nHeight = tSize.h or 25
-end
+local TW = math.max(20, math.floor(W * 0.38))
+local VX = TW + 2
+local VW = math.max(10, W - VX + 1)
+local BY = 3
+local BH = H - 4
 
-fs.deviceControl(hStdin, "set_mode", {"raw"})
-
-local function cleanup()
-  fs.deviceControl(hStdin, "set_mode", {"cooked"})
-  fs.write(hStdout, "\27[0m\27[2J\27[1;1H")
-  fs.flush(hStdout)
-  fs.close(hStdin)
-  fs.close(hStdout)
-end
-
--- =============================================
--- FRAME BUFFER
--- All rendering goes into this table.
--- One concat + one write at the end of each frame.
--- =============================================
-
-local tFrameBuf = {}
-local nFrameParts = 0
-
-local function fbReset()
-  tFrameBuf = {}
-  nFrameParts = 0
-end
-
-local function fb(s)
-  nFrameParts = nFrameParts + 1
-  tFrameBuf[nFrameParts] = s
-end
-
-local function fbCursor(x, y)
-  nFrameParts = nFrameParts + 1
-  tFrameBuf[nFrameParts] = "\27[" .. y .. ";" .. x .. "H"
-end
-
-local function fbFlush()
-  local sFrame = table.concat(tFrameBuf)
-  fs.write(hStdout, sFrame)
-  fs.flush(hStdout)
-  fbReset()
-end
-
--- =============================================
--- INPUT (non-blocking-ish via raw mode)
--- =============================================
-
-local function readKey()
-  return fs.read(hStdin)
-end
-
--- =============================================
--- ANSI CONSTANTS
--- =============================================
-
-local A = {
-  RESET   = "\27[0m",
-  R       = "\27[37m",
-  RED     = "\27[31m",
-  GRN     = "\27[32m",
-  YLW     = "\27[33m",
-  BLU     = "\27[34m",
-  MAG     = "\27[35m",
-  CYN     = "\27[36m",
-  GRY     = "\27[90m",
-  INV     = "\27[7m",
-  NINV    = "\27[27m",
-  CLR     = "\27[2J",
-  HOME    = "\27[1;1H",
-}
-
--- =============================================
--- STRING HELPERS
--- =============================================
-
-local function padRight(s, n)
-  local sLen = #s
-  if sLen >= n then return s:sub(1, n) end
-  return s .. string.rep(" ", n - sLen)
-end
-
--- strip ANSI for length calculation
-local function visLen(s)
-  return #(s:gsub("\27%[[%d;]*[a-zA-Z]", ""))
-end
-
--- pad a string that may contain ANSI codes
-local function padRightAnsi(s, n)
-  local nVis = visLen(s)
-  if nVis >= n then return s end
-  return s .. string.rep(" ", n - nVis)
-end
+-- Value column widths
+local CN = 20
+local CT = 6
+local CV = math.max(1, VW - CN - CT)
 
 -- =============================================
 -- STATE
 -- =============================================
 
-local tExpanded   = { ["@VT"] = true }
-local nTreeSel    = 1
-local nTreeScroll = 0
-local nValSel     = 1
-local nValScroll  = 0
-local bTreeFocus  = true
-local bRunning    = true
-local sSearchTerm = nil
+local tExp     = { ["@VT"] = true }
+local nTSel    = 1
+local nTTop    = 0
+local nVSel    = 1
+local nVTop    = 0
+local bTFocus  = true
+local bRun     = true
+local sMsg     = ""
+local sSearch  = nil
+
+local bSearchMode = false
+local sSearchBuf  = ""
+
+-- Tree: entries are {depth, name, path, hasKids, expanded}
+local tTree = {}
+local nTree = 0
+
+-- Values for selected node
+local tVals = {}
+local nVals = 0
 
 -- =============================================
--- LAYOUT
+-- BATCH RENDERER (reuses tables across frames)
 -- =============================================
 
-local HEADER_H = 2
-local STATUS_H = 2
-local TREE_W   = math.floor(nWidth * 0.38)
-if TREE_W < 22 then TREE_W = 22 end
-local VAL_X    = TREE_W + 2
-local VAL_W    = nWidth - VAL_X + 1
-if VAL_W < 20 then VAL_W = 20 end
-local BODY_TOP = HEADER_H + 1
-local BODY_H   = nHeight - HEADER_H - STATUS_H
-local BODY_BOT = BODY_TOP + BODY_H - 1
+local tBatch = {}
+local nBatch = 0
+
+local function bp(x, y, s, fg, bg)
+  nBatch = nBatch + 1
+  local e = tBatch[nBatch]
+  if e then
+    e[1] = x; e[2] = y; e[3] = s
+    e[4] = fg or FG; e[5] = bg or BG
+  else
+    tBatch[nBatch] = { x, y, s, fg or FG, bg or BG }
+  end
+end
+
+local function bFlush()
+  if nBatch > 0 then
+    for i = nBatch + 1, #tBatch do tBatch[i] = nil end
+    fs.deviceControl(hIn, "render_batch", tBatch)
+    nBatch = 0
+  end
+end
+
+local function gFill(x, y, w, h, fg, bg)
+  fs.deviceControl(hIn, "gpu_fill", { x, y, w, h, " ", fg or FG, bg or BG })
+end
+
+local function pad(s, n)
+  local len = #s
+  if len >= n then return s:sub(1, n) end
+  return s .. string.rep(" ", n - len)
+end
 
 -- =============================================
--- DATA MODEL
+-- DATA: TREE
 -- =============================================
-
-local tVisibleTree   = {}
-local tCurrentValues = {}
 
 local function buildTree()
-  tVisibleTree = {}
+  for i = 1, #tTree do tTree[i] = nil end
+  nTree = 0
 
-  local function walk(sPath, nDepth)
+  local function walk(sPath, depth)
     local tKeys = syscall("reg_enum_keys", sPath)
     if not tKeys then return end
     for _, sKey in ipairs(tKeys) do
       local sChild = sPath .. "\\" .. sKey
-      local tChildKeys = syscall("reg_enum_keys", sChild)
-      local bHas = tChildKeys and #tChildKeys > 0
-      local bExp = tExpanded[sChild] or false
 
-      -- search filter
-      local bShow = true
-      if sSearchTerm then
-        local sLower = sChild:lower()
-        if not sLower:find(sSearchTerm, 1, true) then
-          -- check if any descendant matches
-          local tDesc = syscall("reg_dump_tree", sChild, 5)
-          bShow = false
-          if tDesc then
-            for _, tN in ipairs(tDesc) do
-              if tN.sPath:lower():find(sSearchTerm, 1, true) then
-                bShow = true; break
-              end
-            end
-          end
-        end
+      if sSearch and not sChild:lower():find(sSearch, 1, true) then
+        goto skip
       end
 
-      if bShow then
-        table.insert(tVisibleTree, {
-          nDepth       = nDepth,
-          sName        = sKey,
-          sPath        = sChild,
-          bExpanded    = bExp,
-          bHasChildren = bHas,
-        })
-        if bExp then walk(sChild, nDepth + 1) end
-      end
+      local tI = syscall("reg_query_info", sChild)
+      local bHas = tI and tI.nSubKeys > 0
+      local bEx  = tExp[sChild] or false
+      nTree = nTree + 1
+      tTree[nTree] = { depth, sKey, sChild, bHas, bEx }
+      if bEx and bHas then walk(sChild, depth + 1) end
+      ::skip::
     end
   end
 
-  local tRootKeys = syscall("reg_enum_keys", "@VT")
-  table.insert(tVisibleTree, {
-    nDepth       = 0,
-    sName        = "@VT",
-    sPath        = "@VT",
-    bExpanded    = true,
-    bHasChildren = tRootKeys and #tRootKeys > 0,
-  })
+  local tRK = syscall("reg_enum_keys", "@VT") or {}
+  nTree = 1
+  tTree[1] = { 0, "@VT", "@VT", #tRK > 0, true }
   walk("@VT", 1)
-end
 
-local function loadValues()
-  tCurrentValues = {}
-  nValSel = 1
-  nValScroll = 0
-  if nTreeSel < 1 or nTreeSel > #tVisibleTree then return end
-  local sPath = tVisibleTree[nTreeSel].sPath
-  local tVals = syscall("reg_enum_values", sPath)
-  if tVals then tCurrentValues = tVals end
+  if nTSel > nTree then nTSel = nTree end
+  if nTSel < 1 then nTSel = 1 end
 end
 
 -- =============================================
--- RENDERING (all into frame buffer)
+-- DATA: VALUES
 -- =============================================
 
-local function renderHeader()
-  fbCursor(1, 1)
-  fb(A.INV)
-  local sTitle = "  AxisOS Registry Editor"
-  local sPanel = bTreeFocus and " [Tree] " or " [Values] "
-  local sSearch = sSearchTerm and (" Filter: " .. sSearchTerm .. " ") or ""
-  local sLine = sTitle .. sPanel .. sSearch
-  fb(padRight(sLine, nWidth))
-  fb(A.NINV .. A.R)
-
-  fbCursor(1, 2)
-  local sPath = ""
-  if nTreeSel >= 1 and nTreeSel <= #tVisibleTree then
-    sPath = tVisibleTree[nTreeSel].sPath
-  end
-  local sInfo = ""
-  if nTreeSel >= 1 and nTreeSel <= #tVisibleTree then
-    local tI = syscall("reg_query_info", tVisibleTree[nTreeSel].sPath)
-    if tI then
-      sInfo = A.GRY .. " [" .. tI.nSubKeys .. " keys, " .. tI.nValues .. " vals]" .. A.R
-    end
-  end
-  local sPathLine = A.GRY .. " " .. A.CYN .. sPath .. sInfo
-  fb(padRightAnsi(sPathLine, nWidth))
-end
-
-local function renderTree()
-  for screenRow = 1, BODY_H do
-    local screenY = BODY_TOP + screenRow - 1
-    fbCursor(1, screenY)
-
-    local nIdx = screenRow + nTreeScroll
-    if nIdx >= 1 and nIdx <= #tVisibleTree then
-      local tNode = tVisibleTree[nIdx]
-      local bSel = (nIdx == nTreeSel)
-
-      -- build the line
-      local sIndent = string.rep("  ", tNode.nDepth)
-      local sIcon
-      if not tNode.bHasChildren then
-        sIcon = "-"
-      elseif tNode.bExpanded then
-        sIcon = "v"
-      else
-        sIcon = ">"
-      end
-
-      local sLabel = tNode.sName
-      local nMax = TREE_W - #sIndent - 3
-      if nMax < 4 then nMax = 4 end
-      if #sLabel > nMax then sLabel = sLabel:sub(1, nMax - 2) .. ".." end
-
-      -- colorize
-      if bSel and bTreeFocus then
-        -- selected + focused: yellow inverse-ish
-        fb(A.YLW)
-        fb(padRight(sIndent .. sIcon .. " " .. sLabel, TREE_W))
-        fb(A.R)
-      elseif bSel then
-        -- selected but not focused: gray highlight
-        fb(A.GRY)
-        fb(padRight(sIndent .. sIcon .. " " .. sLabel, TREE_W))
-        fb(A.R)
-      else
-        -- normal: icon gray, name blue
-        fb(A.GRY .. sIndent .. sIcon .. " " .. A.BLU .. sLabel .. A.R)
-        -- pad remainder
-        local nUsed = #sIndent + 2 + #sLabel
-        if nUsed < TREE_W then
-          fb(string.rep(" ", TREE_W - nUsed))
-        end
-      end
-    else
-      fb(string.rep(" ", TREE_W))
+local function loadVals()
+  for i = 1, #tVals do tVals[i] = nil end
+  nVals = 0; nVSel = 1; nVTop = 0
+  if nTSel >= 1 and nTSel <= nTree then
+    local tv = syscall("reg_enum_values", tTree[nTSel][3])
+    if tv then
+      for i = 1, #tv do tVals[i] = tv[i] end
+      nVals = #tv
     end
   end
 end
 
-local function renderDivider()
-  for screenRow = 1, BODY_H do
-    fbCursor(TREE_W + 1, BODY_TOP + screenRow - 1)
-    fb(A.GRY .. "|" .. A.R)
-  end
+-- =============================================
+-- SCROLL
+-- =============================================
+
+local function treeVis()
+  if nTSel < nTTop + 1 then nTTop = nTSel - 1 end
+  if nTSel > nTTop + BH then nTTop = nTSel - BH end
+  if nTTop < 0 then nTTop = 0 end
 end
 
-local function typeColor(sType)
-  if sType == "NUM" then return A.YLW
-  elseif sType == "BOOL" then return A.MAG
-  elseif sType == "TAB" then return A.CYN
-  else return A.GRN end
+local function valVis()
+  local dh = math.max(1, BH - 2)
+  if nVSel < nVTop + 1 then nVTop = nVSel - 1 end
+  if nVSel > nVTop + dh then nVTop = nVSel - dh end
+  if nVTop < 0 then nVTop = 0 end
 end
 
-local function renderValues()
-  -- column header
-  fbCursor(VAL_X, BODY_TOP)
-  local sHdr = A.GRY
-  local sN = "Name"
-  local sT = "Type"
-  local sV = "Value"
-  -- fixed column widths
-  local COL_NAME = 22
-  local COL_TYPE = 6
-  local COL_VAL  = VAL_W - COL_NAME - COL_TYPE - 2
-
-  sHdr = sHdr .. padRight(sN, COL_NAME) .. padRight(sT, COL_TYPE) .. sV
-  fb(padRight(sHdr, VAL_W) .. A.R)
-
-  fbCursor(VAL_X, BODY_TOP + 1)
-  fb(A.GRY .. string.rep("-", VAL_W) .. A.R)
-
-  local nDataTop = BODY_TOP + 2
-  local nDataH   = BODY_BOT - nDataTop + 1
-  if nDataH < 1 then nDataH = 1 end
-
-  for i = 1, nDataH do
-    local screenY = nDataTop + i - 1
-    fbCursor(VAL_X, screenY)
-
-    local nIdx = i + nValScroll
-    if nIdx >= 1 and nIdx <= #tCurrentValues then
-      local tVal = tCurrentValues[nIdx]
-      local bSel = (nIdx == nValSel) and not bTreeFocus
-
-      local sName = tVal.sName or "?"
-      if #sName > COL_NAME - 1 then sName = sName:sub(1, COL_NAME - 4) .. "..." end
-
-      local sType = tVal.sType or "?"
-      local sTC   = typeColor(sType)
-
-      local sValue = tostring(tVal.value or "")
-      if type(tVal.value) == "table" then sValue = "{...}" end
-      if COL_VAL > 0 and #sValue > COL_VAL then
-        sValue = sValue:sub(1, COL_VAL - 3) .. "..."
-      end
-
-      if bSel then
-        fb(A.YLW)
-        fb(padRight(sName, COL_NAME))
-        fb(padRight(sType, COL_TYPE))
-        fb(padRight(sValue, math.max(0, COL_VAL)))
-        fb(A.R)
-      else
-        fb(padRight(sName, COL_NAME))
-        fb(sTC .. padRight(sType, COL_TYPE) .. A.R)
-        fb(padRight(sValue, math.max(0, COL_VAL)))
-      end
-    else
-      fb(string.rep(" ", VAL_W))
-    end
-  end
-end
-
-local function renderStatus()
-  fbCursor(1, nHeight - 1)
-  fb(A.GRY .. string.rep("-", nWidth) .. A.R)
-
-  fbCursor(1, nHeight)
-  fb(A.INV)
-
-  local sHelp = " Up/Dn:Move L/R:Expand Tab:Panel /:Search R:Refresh Q:Quit"
-  local sInfo = string.format(" %d/%d keys  %d vals ",
-        nTreeSel, #tVisibleTree, #tCurrentValues)
-
-  local nPad = nWidth - #sHelp - #sInfo
-  if nPad < 0 then nPad = 0 end
-  fb(sHelp .. string.rep(" ", nPad) .. sInfo)
-  fb(A.NINV .. A.R)
-end
+-- =============================================
+-- RENDER
+-- =============================================
 
 local function render()
-  fbReset()
-  fb(A.RESET .. A.CLR .. A.HOME)
-  renderHeader()
-  renderTree()
-  renderDivider()
-  renderValues()
-  renderStatus()
-  fbFlush()
-end
+  treeVis(); valVis()
 
--- =============================================
--- SCROLL HELPERS
--- =============================================
+  -- Header
+  local sPanel  = bTFocus and "[Tree]" or "[Values]"
+  local sFilter = sSearch and (" /" .. sSearch) or ""
+  bp(1, 1, pad(" Registry " .. sPanel .. sFilter, W), BAR_FG, BAR_BG)
 
-local function ensureTreeVisible()
-  if nTreeSel < nTreeScroll + 1 then
-    nTreeScroll = nTreeSel - 1
-  end
-  if nTreeSel > nTreeScroll + BODY_H then
-    nTreeScroll = nTreeSel - BODY_H
-  end
-  if nTreeScroll < 0 then nTreeScroll = 0 end
-end
+  -- Path
+  local sPath = (nTSel >= 1 and nTSel <= nTree) and tTree[nTSel][3] or "@VT"
+  if #sPath > W - 4 then sPath = ".." .. sPath:sub(-(W - 6)) end
+  bp(1, 2, pad(" " .. sPath, W), HDR_C, BG)
 
-local function ensureValVisible()
-  local nDataH = math.max(1, BODY_H - 2)
-  if nValSel < nValScroll + 1 then
-    nValScroll = nValSel - 1
-  end
-  if nValSel > nValScroll + nDataH then
-    nValScroll = nValSel - nDataH
-  end
-  if nValScroll < 0 then nValScroll = 0 end
-end
+  -- Tree rows
+  for row = 1, BH do
+    local y   = BY + row - 1
+    local idx = row + nTTop
 
--- =============================================
--- SEARCH
--- =============================================
-
-local function doSearch()
-  -- show a prompt on the status bar
-  fbReset()
-  fbCursor(1, nHeight)
-  fb(A.INV .. padRight(" Search: ", nWidth) .. A.NINV .. A.R)
-  fbCursor(10, nHeight)
-  fbFlush()
-
-  -- switch back to cooked mode for line input
-  fs.deviceControl(hStdin, "set_mode", {"cooked"})
-  fs.deviceControl(hStdin, "set_buffer", {""})
-
-  local sInput = fs.read(hStdin)
-
-  -- back to raw mode
-  fs.deviceControl(hStdin, "set_mode", {"raw"})
-
-  if sInput then
-    sInput = sInput:gsub("\n", ""):gsub("\r", "")
-    if #sInput > 0 then
-      sSearchTerm = sInput:lower()
+    if idx >= 1 and idx <= nTree then
+      local t  = tTree[idx]
+      local sI = string.rep(" ", t[1] * 2)
+      local sC = t[4] and (t[5] and "v" or ">") or "-"
+      local sN = t[2]
+      local nM = TW - #sI - 3
+      if nM < 1 then nM = 1 end
+      if #sN > nM then sN = sN:sub(1, math.max(1, nM - 2)) .. ".." end
+      local fg = (idx == nTSel) and (bTFocus and SEL or DIM) or KEY_C
+      bp(1, y, pad(sI .. sC .. " " .. sN, TW), fg, BG)
     else
-      sSearchTerm = nil
+      bp(1, y, pad("", TW), FG, BG)
     end
-  else
-    sSearchTerm = nil
+
+    -- Divider
+    bp(TW + 1, y, "|", DIM, BG)
   end
 
-  buildTree()
-  nTreeSel = 1
-  nTreeScroll = 0
-  loadValues()
+  -- Value header + separator
+  bp(VX, BY,     pad(pad("Name", CN) .. pad("Type", CT) .. "Value", VW), DIM, BG)
+  bp(VX, BY + 1, pad(string.rep("-", math.min(VW, 60)), VW), DIM, BG)
+
+  -- Value rows
+  local dh = math.max(1, BH - 2)
+  for i = 1, dh do
+    local y   = BY + 1 + i
+    local idx = i + nVTop
+
+    if idx >= 1 and idx <= nVals then
+      local v  = tVals[idx]
+      local sN = v.sName or "?"
+      if #sN > CN - 1 then sN = sN:sub(1, CN - 3) .. ".." end
+      local sT = v.sType or "?"
+      local sV = tostring(v.value or "")
+      if type(v.value) == "table" then sV = "{..}" end
+      if #sV > CV then sV = sV:sub(1, math.max(1, CV - 2)) .. ".." end
+
+      local bS = (idx == nVSel) and not bTFocus
+      local fN = bS and SEL or FG
+      local fT = bS and SEL
+                 or (sT == "NUM" and NUM_C or (sT == "BOOL" and BOOL_C or STR_C))
+
+      bp(VX,           y, pad(sN, CN), fN, BG)
+      bp(VX + CN,      y, pad(sT, CT), fT, BG)
+      bp(VX + CN + CT, y, pad(sV, CV), fN, BG)
+    else
+      bp(VX, y, pad("", VW), FG, BG)
+    end
+  end
+
+  -- Status
+  bp(1, H - 1, pad(string.rep("-", W), W), DIM, BG)
+
+  if bSearchMode then
+    bp(1, H, pad(" /" .. sSearchBuf .. "_", W), SEL, BAR_BG)
+  elseif #sMsg > 0 then
+    bp(1, H, pad(" " .. sMsg, W), SEL, BAR_BG)
+    sMsg = ""
+  else
+    local sL = " Arrows:Nav Tab:Panel /:Find R:Refresh Q:Quit"
+    local sR = string.format(" %d/%d ", nTSel, nTree)
+    local nP = math.max(0, W - #sL - #sR)
+    bp(1, H, pad(sL .. string.rep(" ", nP) .. sR, W), BAR_FG, BAR_BG)
+  end
+
+  bFlush()
 end
 
 -- =============================================
--- INPUT
+-- INPUT: SEARCH MODE
 -- =============================================
 
-local function handleInput(sKey)
-  if not sKey then return end
-
-  if sKey == "\3" or sKey == "q" or sKey == "Q" then
-    bRunning = false; return
-  end
-
-  if sKey == "\t" then
-    bTreeFocus = not bTreeFocus; return
-  end
-
-  if sKey == "r" or sKey == "R" or sKey == "\27[15~" then -- R or F5
-    sSearchTerm = nil
-    buildTree()
-    if nTreeSel > #tVisibleTree then nTreeSel = #tVisibleTree end
-    if nTreeSel < 1 then nTreeSel = 1 end
-    loadValues()
+local function handleSearch(k)
+  if k == "\27" then
+    bSearchMode = false; sSearchBuf = ""
     return
   end
+  if k == "\n" then
+    bSearchMode = false
+    sSearch = (#sSearchBuf > 0) and sSearchBuf:lower() or nil
+    sSearchBuf = ""
+    buildTree(); nTSel = 1; nTTop = 0; loadVals()
+    return
+  end
+  if k == "\b" then
+    if #sSearchBuf > 0 then sSearchBuf = sSearchBuf:sub(1, -2)
+    else bSearchMode = false end
+    return
+  end
+  if #k == 1 and k:byte() >= 32 and k:byte() < 127 then
+    sSearchBuf = sSearchBuf .. k
+  end
+end
 
-  if sKey == "/" then
-    doSearch(); return
+-- =============================================
+-- INPUT: NORMAL MODE
+-- =============================================
+
+local function handleNormal(k)
+  if k == "\3" or k == "q" or k == "Q" then bRun = false; return end
+  if k == "\t" then bTFocus = not bTFocus; return end
+
+  if k == "/" then bSearchMode = true; sSearchBuf = ""; return end
+
+  if k == "r" or k == "R" or k == "\27[15~" then
+    sSearch = nil; buildTree(); loadVals(); sMsg = "Refreshed"; return
   end
 
-  if bTreeFocus then
-    -- === TREE ===
-    if sKey == "\27[A" then -- Up
-      nTreeSel = math.max(1, nTreeSel - 1)
-      ensureTreeVisible(); loadValues()
+  if bTFocus then
+    -- ---- TREE NAVIGATION ----
+    if k == "\27[A" then                               -- Up
+      nTSel = math.max(1, nTSel - 1); loadVals()
 
-    elseif sKey == "\27[B" then -- Down
-      nTreeSel = math.min(#tVisibleTree, nTreeSel + 1)
-      ensureTreeVisible(); loadValues()
+    elseif k == "\27[B" then                           -- Down
+      nTSel = math.min(nTree, nTSel + 1); loadVals()
 
-    elseif sKey == "\27[C" or sKey == "\n" then -- Right / Enter
-      if nTreeSel >= 1 and nTreeSel <= #tVisibleTree then
-        local tN = tVisibleTree[nTreeSel]
-        if tN.bHasChildren and not tN.bExpanded then
-          tExpanded[tN.sPath] = true
-          buildTree(); loadValues()
-        elseif not tN.bHasChildren then
-          -- leaf: switch to values panel
-          bTreeFocus = false
+    elseif k == "\27[C" or k == "\n" then              -- Right / Enter
+      if nTSel >= 1 and nTSel <= nTree then
+        local t = tTree[nTSel]
+        if t[4] and not t[5] then                      -- has kids, collapsed
+          tExp[t[3]] = true; buildTree(); loadVals()
+        elseif not t[4] then                           -- leaf → jump to values
+          bTFocus = false
         end
       end
 
-    elseif sKey == "\27[D" then -- Left
-      if nTreeSel >= 1 and nTreeSel <= #tVisibleTree then
-        local tN = tVisibleTree[nTreeSel]
-        if tN.bExpanded then
-          tExpanded[tN.sPath] = nil
-          buildTree(); loadValues()
-        elseif nTreeSel > 1 then
-          local nD = tN.nDepth
-          for i = nTreeSel - 1, 1, -1 do
-            if tVisibleTree[i].nDepth < nD then
-              nTreeSel = i
-              ensureTreeVisible(); loadValues()
-              break
+    elseif k == "\27[D" then                           -- Left
+      if nTSel >= 1 and nTSel <= nTree then
+        local t = tTree[nTSel]
+        if t[5] then                                   -- expanded → collapse
+          tExp[t[3]] = nil; buildTree(); loadVals()
+        elseif nTSel > 1 then                          -- go to parent
+          local d = t[1]
+          for i = nTSel - 1, 1, -1 do
+            if tTree[i][1] < d then
+              nTSel = i; loadVals(); break
             end
           end
         end
       end
 
-    elseif sKey == "\27[5~" then -- PgUp
-      nTreeSel = math.max(1, nTreeSel - BODY_H)
-      ensureTreeVisible(); loadValues()
-
-    elseif sKey == "\27[6~" then -- PgDn
-      nTreeSel = math.min(#tVisibleTree, nTreeSel + BODY_H)
-      ensureTreeVisible(); loadValues()
-
-    elseif sKey == "\27[H" then -- Home
-      nTreeSel = 1; nTreeScroll = 0; loadValues()
-
-    elseif sKey == "\27[F" then -- End
-      nTreeSel = #tVisibleTree; ensureTreeVisible(); loadValues()
+    elseif k == "\27[5~" then                          -- PgUp
+      nTSel = math.max(1, nTSel - BH); loadVals()
+    elseif k == "\27[6~" then                          -- PgDn
+      nTSel = math.min(nTree, nTSel + BH); loadVals()
+    elseif k == "\27[H" then                           -- Home
+      nTSel = 1; nTTop = 0; loadVals()
+    elseif k == "\27[F" then                           -- End
+      nTSel = nTree; loadVals()
     end
 
   else
-    -- === VALUES ===
-    if sKey == "\27[A" then
-      nValSel = math.max(1, nValSel - 1); ensureValVisible()
-    elseif sKey == "\27[B" then
-      nValSel = math.min(#tCurrentValues, nValSel + 1); ensureValVisible()
-    elseif sKey == "\27[5~" then
-      nValSel = math.max(1, nValSel - math.max(1, BODY_H - 2)); ensureValVisible()
-    elseif sKey == "\27[6~" then
-      nValSel = math.min(#tCurrentValues, nValSel + math.max(1, BODY_H - 2)); ensureValVisible()
-    elseif sKey == "\27[D" then -- Left: back to tree
-      bTreeFocus = true
+    -- ---- VALUE NAVIGATION ----
+    if k == "\27[A" then
+      nVSel = math.max(1, nVSel - 1)
+    elseif k == "\27[B" then
+      nVSel = math.min(nVals, nVSel + 1)
+    elseif k == "\27[D" then                           -- Left → back to tree
+      bTFocus = true
+    elseif k == "\27[5~" then
+      nVSel = math.max(1, nVSel - math.max(1, BH - 2))
+    elseif k == "\27[6~" then
+      nVSel = math.min(nVals, nVSel + math.max(1, BH - 2))
     end
   end
 end
@@ -573,26 +378,22 @@ end
 -- =============================================
 
 local function main()
-  -- auto-expand top-level hives
-  tExpanded["@VT\\DEV"] = true
-  tExpanded["@VT\\DRV"] = true
-  tExpanded["@VT\\SYS"] = true
+  fs.deviceControl(hIn, "enter_alt_screen", {})
   buildTree()
-  loadValues()
+  loadVals()
 
-  while bRunning do
+  while bRun do
     render()
-    local sKey = readKey()
-    if sKey then
-      handleInput(sKey)
-    else
-      bRunning = false
-    end
+    local k = fs.read(hIn)
+    if not k then bRun = false
+    elseif bSearchMode then handleSearch(k)
+    else handleNormal(k) end
   end
 end
 
-local bOk, sErr = pcall(main)
-cleanup()
-if not bOk then
-  print("regedit crashed: " .. tostring(sErr))
-end
+local ok, err = pcall(main)
+fs.deviceControl(hIn, "leave_alt_screen", {})
+fs.deviceControl(hIn, "set_mode", {"cooked"})
+fs.close(hIn)
+fs.close(hOut)
+if not ok then print("regedit: " .. tostring(err)) end

@@ -48,7 +48,6 @@ fLoadPasswd()
 oFs.write(hStdout, "\f")
 
 
--- Replace the main loop in init.lua:
 while true do
   io.write("    _        _          ___   ____  ",
  "   / \\  __ _(_)_______/ _ \\/ ___| ",
@@ -56,10 +55,10 @@ while true do
  " / ___ \\ >  <| \\__ \\ |_| |___) |",
  "/_/   \\_/_/\\_\\_|___/\\___/|____/ ")
 
-  io.write("AxisOS v0.32-alpha1\n")
+  io.write("AxisOS v0.35\n")
   io.write("")
   io.write("\n________________________________________________\n\n")
-  io.write("XEN XKA v0.32A1 on " .. sHostname .. "\n\n")
+  io.write("XEN XKA v0.35 on " .. sHostname .. "\n\n")
   
   io.write(sHostname .. " login: ")   -- No buffering, appears immediately
   

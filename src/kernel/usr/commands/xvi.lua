@@ -122,7 +122,7 @@ local function recomputeState()
 end
 
 local function markDirty()
-  markDirty()
+  bModified = true
   bStateDirty = true
 end
 

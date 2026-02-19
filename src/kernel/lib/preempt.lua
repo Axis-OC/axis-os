@@ -154,6 +154,17 @@ function oPreempt.instrument(sCode, sLabel)
                     bInjected = true
                 end
 
+                if not bInjected
+                    and nPos + 5 <= nLen
+                    and sCode:sub(nPos, nPos + 5) == "return"
+                    and not isIdChar(sCode:sub(nPos + 6, nPos + 6) or "") then
+                        emit(sCheckName .. "();")
+                        nInjections = nInjections + 1
+                        emit("return")
+                        nPos = nPos + 6
+                        bInjected = true
+                end
+
                 -- === "function(" — inject at function entry ===
                 if not bInjected
                    and nPos + 7 <= nLen
