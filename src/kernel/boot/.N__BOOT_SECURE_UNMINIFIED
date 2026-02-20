@@ -1,0 +1,106 @@
+-- AxisOS SecureBoot EEPROM v1.0
+-- DEL=Setup | Backspace=Back (replaces ESC) | Enter=Boot
+-- Compact: function iterator discovery, metatable env, cached locals
+local c,p=component,computer
+-- Single-pass component discovery
+local g,sc,ep,dc,fs
+for a,t in c.list()do local x=c.proxy(a)
+  if t=="gpu"and not g then g=x
+  elseif t=="screen"and not sc then sc=a
+  elseif t=="eeprom"and not ep then ep=x
+  elseif t=="data"and not dc then dc=x
+  elseif t=="filesystem"and not fs then
+    if x.exists("/kernel.lua")then fs=x end
+  end
+end
+if not g or not sc then p.beep(1000,.2);error("NO GPU")end
+g.bind(sc);local W,H=g.maxResolution();g.setResolution(W,H)
+g.setBackground(0);g.setForeground(0xFFFFFF);g.fill(1,1,W,H," ")
+-- Cached helpers
+local y,F,S=1,math.floor,string.format
+local function pr(s,fg)if fg then g.setForeground(fg)end;g.set(2,y,tostring(s));y=y+1 end
+local function halt(r)
+  g.setForeground(0xFF0000);g.set(2,H-2,"SECURE BOOT FAILURE")
+  g.setForeground(0xFF5555);g.set(2,H-1,tostring(r):sub(1,W-4))
+  p.beep(200,1);while true do p.pullSignal(math.huge)end
+end
+local function hex(s)local t={};for i=1,#s do t[i]=S("%02x",s:byte(i))end;return table.concat(t)end
+local function rf(path)
+  local h=fs.open(path,"r");if not h then return end
+  local t={};while true do local s=fs.read(h,4096);if not s then break end;t[#t+1]=s end
+  fs.close(h);return table.concat(t)
+end
+if not fs then halt("No system disk")end
+-- SecureBoot verification
+pr("AxisOS Secure Boot v1.0",0x00BCD4)
+pr(string.rep("=",36),0x333333);pr("")
+local sb={v=false,b="",k=""}
+if dc then
+  pr("[1/3] Machine binding...",0xAAAAAA)
+  sb.b=hex(dc.sha256((dc.address or"")..(ep and ep.address or"")..(fs.address or"")))
+  pr("  "..sb.b:sub(1,20).."...",0x55FF55)
+  pr("[2/3] Kernel integrity...",0xAAAAAA)
+  local kc=rf("/kernel.lua")
+  if not kc or #kc<100 then halt("Kernel corrupt")end
+  sb.k=hex(dc.sha256(kc));sb.v=true
+  pr("  "..sb.k:sub(1,20).."...",0x55FF55)
+  pr("[3/3] Manifest...",0xAAAAAA)
+  local m=rf("/boot/manifest.sig")
+  pr("  "..(m and"PRESENT"or"(none)"),m and 0x55FF55 or 0xFFAA00)
+else
+  pr("No data card - verification skipped",0xFFAA00)
+  if not rf("/kernel.lua")then halt("No kernel")end
+end
+-- Splash
+pr("");g.setForeground(0xC0C0C0)
+for _,l in ipairs({"    _        _      ___  ____  ","   / \\  __ _(_)___ / _ \\/ ___| ","  / _ \\ \\ \\/ / / __| | | \\___ \\ "," / ___ \\ >  <| \\__ \\ |_| |___) |","/_/   \\_/_/\\_\\_|___/\\___/|____/ "})do
+  g.set(F((W-#l)/2),y,l);y=y+1 end
+pr("");pr("AxisOS v0.5",0xFFFFFF)
+g.setForeground(0xAAAAAA);g.set(F((W-24)/2),H-2,"Press DEL for BIOS Setup")
+g.setForeground(sb.v and 0x55FF55 or 0xFFAA00)
+g.set(2,H,"SB: "..(sb.v and"VERIFIED"or"UNVERIFIED"))
+-- Wait (DEL=setup, Enter=boot)
+local dl=p.uptime()+3
+while p.uptime()<dl do
+  local ev,_,_,cd=p.pullSignal(.1)
+  if ev=="key_down"then
+    if cd==211 then p.beep(1000,.1)
+      local s2=rf("/boot/setup.lua")
+      if s2 then
+        local fn=load(s2,"@setup","t",{component=c,computer=p,unicode=unicode,
+          string=string,math=math,table=table,pairs=pairs,ipairs=ipairs,type=type,
+          tostring=tostring,tonumber=tonumber,pcall=pcall,error=error,load=load,
+          setmetatable=setmetatable,select=select,next=next})
+        if fn then pcall(fn)end
+      end;break
+    elseif cd==28 then break end
+  end
+end
+-- Boot
+g.fill(1,1,W,H," ");g.set(1,1,"Booting...");p.beep(900,.2)
+local kc=rf("/kernel.lua")
+if not kc or #kc<100 then halt("Kernel missing")end
+if kc:sub(1,3)=="\239\187\191"then kc=kc:sub(4)end
+-- loader.cfg → boot args
+local ba={lvl="Info",safe="Disabled",wait="0",init="/bin/init.lua"}
+do local lc=rf("/boot/loader.cfg")
+  if lc then local fn=load(lc,"loader.cfg","t",{})
+    if fn then local ok,cfg=pcall(fn)
+      if ok and cfg and cfg.entries then
+        for _,en in ipairs(cfg.entries)do
+          if en.id==(cfg.default or"axis")then
+            if en.init then ba.init=en.init end
+            if en.params then
+              if en.params.loglevel then ba.lvl=en.params.loglevel end
+              if en.params.safemode then ba.safe="Enabled"end
+            end;break
+end end end end end end
+-- Kernel env via metatable
+local ke={raw_component=c,raw_computer=p,boot_fs_address=fs.address,boot_args=ba}
+if sb.v then ke.boot_security={machine_binding=sb.b,kernel_hash=sb.k,
+  data_card_addr=dc.address,verified=true}end
+setmetatable(ke,{__index=_G})
+local fn,err=load(kc,"=kernel","t",ke)
+if not fn then halt("PARSE: "..tostring(err))end
+local ok,e2=xpcall(fn,debug.traceback)
+if not ok then halt("PANIC: "..tostring(e2))end

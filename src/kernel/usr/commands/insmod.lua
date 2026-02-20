@@ -93,6 +93,9 @@ local function resolve_path(sInput)
   -- Try the standard driver directory
   local tCandidates = {
     sRelative,
+    "/sys/drivers/" .. sInput,
+    "/sys/drivers/" .. sInput .. ".sys.lua",
+    "/sys/drivers/" .. sInput .. ".lua",
     "/drivers/" .. sInput,
     "/drivers/" .. sInput .. ".sys.lua",
     "/drivers/" .. sInput .. ".lua",

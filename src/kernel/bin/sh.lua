@@ -469,6 +469,7 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
         PWD = ENV.PWD,
         PATH = ENV.PATH,
         USER = ENV.USER,
+        UID  = ENV.UID,
         HOME = ENV.HOME,
         HOSTNAME = ENV.HOSTNAME,
     }

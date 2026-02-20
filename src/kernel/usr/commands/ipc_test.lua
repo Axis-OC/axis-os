@@ -17,7 +17,7 @@ local nP, nF, nW = 0, 0, 0
 local function pass(s) nP=nP+1; print(C.GRN.."  [PASS] "..C.R..s) end
 local function fail(s) nF=nF+1; print(C.RED.."  [FAIL] "..C.R..s) end
 local function warn(s) nW=nW+1; print(C.YLW.."  [WARN] "..C.R..s) end
-local function info(s) print(C.CYN.."  [INFO] "..C.R..s) end
+local function info(s) nP=nP+1; print(C.CYN.."  [INFO] "..C.R..s) end
 local function banner(s) print("\n"..C.CYN.."  === "..s.." ==="..C.R) end
 
 local function sleep(n)

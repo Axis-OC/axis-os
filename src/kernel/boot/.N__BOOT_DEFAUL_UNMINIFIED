@@ -1,0 +1,212 @@
+--
+-- /boot/boot.lua
+-- AxisOS EEPROM Boot Code
+-- Reads /boot/loader.cfg, presents GRUB-like menu, boots selected entry.
+-- DEL enters full BIOS setup (/boot/setup.lua loaded from disk).
+-- Must be minified to fit in 4KB EEPROM.
+--
+local a, b, c = component, computer, unicode
+local d, e
+for f, g in a.list() do
+    if g == "gpu" then d = a.proxy(f) end
+    if g == "screen" then e = f end
+end
+if not d or not e then b.beep(1000, 0.2); error("NO GPU") end
+d.bind(e)
+local W, H = d.maxResolution()
+d.setResolution(W, H)
+
+local BLUE, RED, YELLOW, WHITE, GRAY, BLACK = 0x0000AA, 0xAA0000, 0xFFFF00, 0xFFFFFF, 0xC0C0C0, 0x000000
+local GREEN, CYAN = 0x00AA00, 0x00AAAA
+
+-- Find boot filesystem
+local fs
+for f in a.list("filesystem") do
+    local p = a.proxy(f)
+    if p.exists("/kernel.lua") then fs = p; break end
+end
+if not fs then
+    d.setBackground(BLACK); d.setForeground(RED)
+    d.fill(1, 1, W, H, " "); d.set(1, 1, "NO SYSTEM DISK")
+    while true do b.pullSignal() end
+end
+
+-- Read file helper
+local function readFile(path)
+    local h = fs.open(path, "r")
+    if not h then return nil end
+    local t = {}
+    while true do local s = fs.read(h, 4096); if not s then break end; t[#t+1] = s end
+    fs.close(h)
+    return table.concat(t)
+end
+
+-- Load loader.cfg
+local cfg
+local s = readFile("/boot/loader.cfg")
+if s then
+    local f = load(s, "loader.cfg", "t", {})
+    if f then local ok, r = pcall(f); if ok then cfg = r end end
+end
+if not cfg then
+    cfg = {timeout=3, default="axis", entries={{
+        id="axis", title="AxisOS", kernel="/kernel.lua",
+        init="/bin/init.lua", params={loglevel="Info"}}}}
+end
+
+-- Splash screen
+local logo = {
+    "    _        _      ___  ____  ",
+    "   / \\  __ _(_)___ / _ \\/ ___| ",
+    "  / _ \\ \\ \\/ / / __| | | \\___ \\ ",
+    " / ___ \\ >  <| \\__ \\ |_| |___) |",
+    "/_/   \\_/_/\\_\\_|___/\\___/|____/ ",
+}
+
+d.setBackground(BLACK); d.setForeground(WHITE)
+d.fill(1, 1, W, H, " ")
+d.set(1, 1, "AxisBIOS v0.5")
+d.set(1, 2, "(C) 2025 Axis Corp")
+b.beep(1100, 0.1)
+
+local ly = math.floor(H / 3)
+d.setForeground(GRAY)
+for i, l in ipairs(logo) do
+    local x = math.floor((W - c.len(l)) / 2)
+    d.set(x, ly + i, l)
+end
+
+d.setForeground(WHITE)
+d.set(math.floor((W - 24) / 2), H - 2, "Press DEL to enter SETUP")
+
+-- Wait for timeout or DEL
+local timeout = cfg.timeout or 3
+if timeout < 0 then timeout = 0 end
+local deadline = b.uptime() + timeout
+local enterSetup = false
+
+while b.uptime() < deadline do
+    local ev, _, _, code = b.pullSignal(0.1)
+    if ev == "key_down" then
+        if code == 211 then enterSetup = true; break end -- DEL
+        if code == 28 then break end -- Enter = boot immediately
+    end
+end
+
+-- DEL pressed -> load full BIOS setup from disk
+if enterSetup then
+    b.beep(1000, 0.1)
+    local setupCode = readFile("/boot/setup.lua")
+    if setupCode then
+        local env = {
+            component = a, computer = b, unicode = c,
+            string = string, math = math, table = table,
+            pairs = pairs, ipairs = ipairs, type = type,
+            tostring = tostring, tonumber = tonumber,
+            pcall = pcall, error = error, load = load,
+            setmetatable = setmetatable,
+        }
+        local f, err = load(setupCode, "@setup", "t", env)
+        if f then pcall(f)
+        else d.set(1, H, "Setup load error: " .. tostring(err)) end
+    else
+        d.set(1, H, "WARN: /boot/setup.lua not found")
+        b.pullSignal(2)
+    end
+    -- Reload config (setup may have changed it)
+    s = readFile("/boot/loader.cfg")
+    if s then
+        local f2 = load(s, "loader.cfg", "t", {})
+        if f2 then local ok, r = pcall(f2); if ok then cfg = r end end
+    end
+end
+
+-- Boot menu (if multiple entries and timeout > 0)
+local entries = cfg.entries or {}
+local sel = 1
+
+-- Find default
+for i, e in ipairs(entries) do
+    if e.id == cfg.default then sel = i; break end
+end
+
+if #entries > 1 and not enterSetup then
+    -- Show GRUB-like menu
+    d.setBackground(BLACK); d.setForeground(WHITE)
+    d.fill(1, 1, W, H, " ")
+
+    d.setForeground(CYAN)
+    d.set(2, 1, "AxisOS Boot Menu")
+    d.setForeground(GRAY)
+    d.set(2, 2, string.rep("=", W - 2))
+
+    local menuY = 4
+    local running = true
+    while running do
+        for i, e in ipairs(entries) do
+            local y = menuY + i - 1
+            if i == sel then
+                d.setBackground(WHITE); d.setForeground(BLACK)
+            else
+                d.setBackground(BLACK); d.setForeground(GRAY)
+            end
+            local line = "  " .. e.title .. string.rep(" ", math.max(1, W - 4 - #e.title))
+            d.set(2, y, line)
+        end
+        d.setBackground(BLACK); d.setForeground(GRAY)
+        d.set(2, H - 1, "Arrows:Select  Enter:Boot  e:Edit params")
+
+        local ev, _, ch, code = b.pullSignal(5)
+        if ev == "key_down" then
+            if code == 200 and sel > 1 then sel = sel - 1
+            elseif code == 208 and sel < #entries then sel = sel + 1
+            elseif code == 28 then running = false -- Enter
+            end
+        elseif not ev then
+            running = false -- timeout
+        end
+    end
+end
+
+-- Boot selected entry
+local entry = entries[sel] or entries[1]
+if not entry then
+    d.set(1, 1, "No boot entries!"); while true do b.pullSignal() end
+end
+
+d.setBackground(BLACK); d.setForeground(WHITE)
+d.fill(1, 1, W, H, " ")
+d.set(1, 1, "Booting: " .. (entry.title or "AxisOS"))
+
+-- Build boot args from entry params
+local bootArgs = {
+    lvl = "Info", safe = "Disabled", wait = "0",
+    quick = "Disabled", init = entry.init or "/bin/init.lua",
+}
+if entry.params then
+    if entry.params.loglevel then bootArgs.lvl = entry.params.loglevel end
+    if entry.params.safemode then bootArgs.safe = "Enabled"; bootArgs.safemode = "Enabled" end
+end
+
+-- Load and execute kernel
+local kernelPath = entry.kernel or "/kernel.lua"
+local kh = fs.open(kernelPath, "r")
+if not kh then
+    d.set(1, 2, "FATAL: " .. kernelPath .. " not found")
+    while true do b.pullSignal() end
+end
+b.beep(900, 0.2)
+local kc = {}
+while true do local s = fs.read(kh, math.huge); if not s then break end; kc[#kc+1] = s end
+fs.close(kh)
+local R = table.concat(kc)
+if R:sub(1, 3) == "\239\187\191" then R = R:sub(4) end
+
+local env = {
+    raw_component = a, raw_computer = b,
+    boot_fs_address = fs.address, boot_args = bootArgs,
+}
+setmetatable(env, {__index = _G})
+local fn, err = load(R, "=kernel", "t", env)
+if not fn then error(err) end
+fn()

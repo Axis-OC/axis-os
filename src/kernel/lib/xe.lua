@@ -1,92 +1,4 @@
---
--- /lib/xe.lua
--- XE Graphics v2 — High-Performance TUI Rendering Engine for AxisOS
---
--- Extension-based architecture. Each extension is nearly independent.
--- Enable only what your application needs.
---
--- EXTENSIONS:
---
---   XE_ui_shadow_buffering_render_batch
---       Maintains a per-cell shadow buffer (front + delta).
---       text() writes to a delta layer; endFrame() compiles delta into
---       one render_batch device control call. Enables per-cell diffing.
---
---   XE_ui_shadow_buffering_generic_render
---       Same shadow buffer, but flushes per-row instead of one big batch.
---       Lower peak memory, higher IPC overhead. Mutually exclusive with
---       render_batch variant; if both are set, render_batch wins.
---
---   XE_ui_diff_render_feature
---       Compares delta cells against the front buffer and emits only
---       cells that actually changed. Requires one of the shadow buffer
---       extensions (auto-enables render_batch if neither is set).
---
---   XE_ui_alt_screen_query
---       Enters the TTY alternate screen on context creation and leaves
---       it on destroy. Preserves the shell's screen underneath.
---
---   XE_ui_alt_screen_query_batch
---       Extends XE_ui_alt_screen_query: clears the alt screen via a
---       single gpu_fill on enter. Auto-enables alt_screen_query.
---
---   XE_ui_deferred_clear
---       ctx:clear(bg) stores the color; actual gpu_fill is deferred to
---       endFrame(), avoiding per-cell delta writes for full clears.
---
---   XE_ui_imgui_navigation
---       IMGUI keyboard-driven widget system: Tab/arrows cycle focus,
---       Enter activates. Provides button(), selectable(), label().
---
---   XE_ui_dirty_row_tracking
---       Only rows touched by text()/fill() are processed at flush time.
---       Combined with diff, untouched rows are skipped entirely.
---       Auto-enables a shadow buffer extension if neither is set.
---
---   XE_ui_run_length_grouping
---       When building batch entries, consecutive same-color delta cells
---       are merged into one entry. Reduces render_batch entry count and
---       GPU set() calls.
---
--- CELL STORAGE:
---   Front buffer stores characters as individual single-char strings in
---   tables:  _fCh[y][x] = "A",  _fFg[y][x] = 0xFFFFFF, etc.
---   Characters are compiled into strings via table.concat() only when
---   building render_batch output.
---
--- FAST PATH (no extensions):
---   ctx:text() adds directly to the batch table.
---   ctx:endFrame() flushes via one render_batch call.
---   Zero per-cell overhead, but redraws everything every frame.
---
--- OPTIMAL PATH (all render extensions):
---   ctx:text() writes to sparse per-cell delta tables.
---   ctx:endFrame() diffs dirty rows against front buffer,
---   groups same-color runs, emits minimal batch entries.
---   If nothing changed, endFrame() is a no-op.
---
--- Usage:
---   local xe = require("xe")
---   local ctx = xe.createContext({
---       extensions = {
---           "XE_ui_shadow_buffering_render_batch",
---           "XE_ui_diff_render_feature",
---           "XE_ui_alt_screen_query",
---           "XE_ui_deferred_clear",
---           "XE_ui_imgui_navigation",
---           "XE_ui_dirty_row_tracking",
---           "XE_ui_run_length_grouping",
---       }
---   })
---   while running do
---       ctx:beginFrame()
---       ctx:clear(0x0C0C1E)
---       ctx:text(2, 2, "Hello", 0x55FFFF)
---       if ctx:button("q", 2, 4, " Quit ") then break end
---       ctx:endFrame()
---   end
---   ctx:destroy()
---
+
 
 local fs = require("filesystem")
 
@@ -117,6 +29,85 @@ local _GAP_MAX = 3
 -- instead of per-cell delta writes
 local _FILL_GPU_THRESHOLD = 48
 local _NOCLEAR = false
+
+
+-- =============================================
+-- GRAPHICAL CHARACTER TABLE
+-- Byte values 128+ map to unicode block elements.
+-- The delta buffer stores these as single byte IDs;
+-- _BCHAR converts them to multi-byte UTF-8 strings
+-- only when building the final batch for gpu.set().
+-- The GPU is unicode-aware: "▀▀A" = 3 cells, not 7.
+-- =============================================
+
+local _uc = unicode and unicode.char or function(n)
+    -- Fallback UTF-8 encoder for BMP codepoints
+    if n < 0x80 then return string.char(n) end
+    if n < 0x800 then
+        return string.char(0xC0 + math.floor(n / 64), 0x80 + n % 64)
+    end
+    return string.char(
+        0xE0 + math.floor(n / 4096),
+        0x80 + math.floor(n / 64) % 64,
+        0x80 + n % 64)
+end
+
+-- Half-block canvas characters
+_BCHAR[128] = _uc(0x2580)  -- ▀ UPPER HALF BLOCK (fg=top, bg=bottom)
+_BCHAR[129] = _uc(0x2588)  -- █ FULL BLOCK (fg=color, bg=color)
+
+-- Sparkline bar characters (bottom-aligned, 1/8 to 8/8)
+_BCHAR[130] = _uc(0x2581)  -- ▁ 1/8
+_BCHAR[131] = _uc(0x2582)  -- ▂ 2/8
+_BCHAR[132] = _uc(0x2583)  -- ▃ 3/8
+_BCHAR[133] = _uc(0x2584)  -- ▄ 4/8
+_BCHAR[134] = _uc(0x2585)  -- ▅ 5/8
+_BCHAR[135] = _uc(0x2586)  -- ▆ 6/8
+_BCHAR[136] = _uc(0x2587)  -- ▇ 7/8
+_BCHAR[137] = _uc(0x2588)  -- █ 8/8
+
+-- Constants for canvas cell encoding
+local _HALF_BLOCK = 128   -- ▀: top≠bottom
+local _FULL_BLOCK = 129   -- █: top==bottom, both non-bg
+
+-- =============================================
+-- RING BUFFER TIME SERIES
+-- O(1) push, O(1) random access.
+-- Replaces table.remove(t, 1) pattern which is O(n).
+--
+-- Usage:
+--   local ts = XE.timeSeries(120)
+--   ts:push(42.5)
+--   print(ts:len())     -- 1
+--   print(ts:get(1))    -- 42.5
+-- =============================================
+
+function XE.timeSeries(nMax)
+    return {
+        _buf  = {},
+        _head = 0,
+        _len  = 0,
+        _max  = nMax,
+        push = function(self, v)
+            self._head = self._head % self._max + 1
+            self._buf[self._head] = v
+            if self._len < self._max then self._len = self._len + 1 end
+        end,
+        len = function(self) return self._len end,
+        get = function(self, i)
+            return self._buf[((self._head - self._len + i - 1) % self._max) + 1]
+        end,
+    }
+end
+
+-- Inline data accessors — used by all graph functions.
+-- Detect timeSeries by _buf field. Plain arrays use raw index.
+local function _dLen(d) return d._len or #d end
+local function _dGet(d, i)
+    local b = d._buf
+    if b then return b[((d._head - d._len + i - 1) % d._max) + 1] end
+    return d[i]
+end
 
 -- =============================================
 -- BUILT-IN THEMES
@@ -159,6 +150,7 @@ XE.THEMES = {
 -- 1. EXTENSION REGISTRY
 -- =============================================
 
+
 local ALL_EXT = {
     "XE_ui_shadow_buffering_render_batch",
     "XE_ui_shadow_buffering_generic_render",
@@ -173,6 +165,13 @@ local ALL_EXT = {
     "XE_ui_page_manager",
     "XE_ui_gpu_double_buffer",
     "XE_ui_gpu_page_snapshot",
+    "XE_ui_graph_canvas",
+    "XE_ui_graph_api",
+    "XE_ui_modal",
+    "XE_ui_modal_prebuilt",
+    "XE_ui_toast",
+    "XE_ui_dropdown",
+    "XE_ui_command_palette",
 }
 
 function XE.enumerateExtensions()
@@ -199,6 +198,7 @@ function XE.createContext(cfg)
     if cfg.extensions then
         for i = 1, #cfg.extensions do ext[cfg.extensions[i]] = true end
     end
+    
 
     -- ===== Existing dependency resolution =====
     if ext.XE_ui_diff_render_feature then
@@ -232,14 +232,38 @@ function XE.createContext(cfg)
             ext.XE_ui_diff_render_feature = true
         end
     end
+    -- Graph dependencies
+    if ext.XE_ui_graph_api then
+        ext.XE_ui_graph_canvas = true
+    end
+    if ext.XE_ui_graph_canvas then
+        -- Canvas needs shadow buffer for delta writes
+        if not ext.XE_ui_shadow_buffering_render_batch
+           and not ext.XE_ui_shadow_buffering_generic_render then
+            ext.XE_ui_shadow_buffering_render_batch = true
+        end
+        if not ext.XE_ui_dirty_row_tracking then
+            ext.XE_ui_dirty_row_tracking = true
+        end
+    end
 
-    -- ===== NEW dependency resolution =====
     if ext.XE_ui_page_manager then
         ext.XE_ui_suspend_resume = true
     end
     if ext.XE_ui_gpu_page_snapshot then
         ext.XE_ui_gpu_double_buffer = true
         ext.XE_ui_suspend_resume = true
+    end
+
+    -- Modal dependencies
+    if ext.XE_ui_modal_prebuilt then ext.XE_ui_modal = true end
+    if ext.XE_ui_dropdown then ext.XE_ui_modal = true end
+    if ext.XE_ui_command_palette then
+        ext.XE_ui_modal = true
+        ext.XE_ui_imgui_navigation = true
+    end
+    if ext.XE_ui_modal then
+        ext.XE_ui_imgui_navigation = true
     end
 
     local hIn  = fs.open("/dev/tty", "r")
@@ -307,19 +331,41 @@ function XE.createContext(cfg)
         _dtyR = {}, _nDty = 0,
         _prevDtyR = {},
 
-        -- ===== NEW: Suspend/Resume =====
+        -- ===== Suspend/Resume =====
         _suspended = false,
 
-        -- ===== NEW: Page Manager =====
+        -- ===== Page Manager =====
         _pages = {},
         _activePage = nil,
 
-        -- ===== NEW: GPU Double Buffer =====
+        -- ===== GPU Double Buffer =====
         _gpuBufId = nil,     -- off-screen buffer index (nil = not available)
         _bGpuBuf = false,    -- GPU buffers supported?
 
-        -- ===== NEW: GPU Page Snapshots =====
+        -- ===== GPU Page Snapshots =====
         _gpuPageBufs = {},   -- pageId → GPU buffer index
+        _canvases = {},
+
+        -- Modal system
+        _modalStack    = {},    -- ordered modal ids (bottom → top)
+        _modals        = {},    -- id → modal state
+        _topModal      = nil,   -- id of topmost modal (nil = no modal)
+        _insideModal   = false, -- true between beginModal/endModal
+        _modalSnapshots= {},    -- id → saved front buffer (dim mode only)
+
+        -- Toast system
+        _toasts     = {},       -- {msg, fg, bg, deadline, width}
+        _toastMax   = 5,
+        _toastPos   = "tr",     -- "tr" = top-right, "br" = bottom-right
+
+        -- Dropdown state
+        _dropdowns = {},
+
+        -- Command palette state
+        _palette = nil,
+        _mouseX = nil, _mouseY = nil, _mouseBtn = nil,
+        _mouseClicked = false,
+        _scrollDelta = nil, _scrollX = nil, _scrollY = nil,
     }
 
     -- Allocate front buffer if shadow enabled
@@ -336,7 +382,7 @@ function XE.createContext(cfg)
         end
     end
 
-    -- ===== NEW: Probe GPU buffer support =====
+    -- ===== Probe GPU buffer support =====
     if ext.XE_ui_gpu_double_buffer then
         local bProbe, vResult = fs.deviceControl(hIn, "gpu_has_buffers", {})
         ctx._bGpuBuf = (bProbe and vResult == true)
@@ -422,27 +468,99 @@ end
 function XE._M:beginFrame()
     if self._suspended then return false end
 
+    -- Reset per-frame mouse state
+    self._mouseX = nil; self._mouseY = nil
+    self._mouseBtn = nil; self._mouseClicked = false
+    self._scrollDelta = nil; self._scrollX = nil; self._scrollY = nil
+    self._pendingDropdown = nil
+
     if self._first then
         self._key = nil; self._first = false
     else
-        -- Non-blocking: returns nil instantly if no key buffered
         self._key = fs.read(self._hIn)
-        if not self._key then
-            _fSysYield()  -- ~50ms pause, prevents busy-loop
-        end
+        if not self._key then _fSysYield() end
     end
+
+    -- ---- Parse mouse/scroll events from encoded sequences ----
+    local k = self._key
+    if k and #k > 4 and k:sub(1, 3) == "\27[<" and k:sub(-1) == "M" then
+        local sData = k:sub(4, -2)  -- strip \27[< and M
+        local sBtn, sX, sY = sData:match("^(%d+);(%d+);(%d+)$")
+        if sBtn then
+            local nBtn = tonumber(sBtn)
+            local nX   = tonumber(sX)
+            local nY   = tonumber(sY)
+            if nBtn == 64 then
+                -- Scroll up
+                self._scrollDelta = -1
+                self._scrollX = nX; self._scrollY = nY
+            elseif nBtn == 65 then
+                -- Scroll down
+                self._scrollDelta = 1
+                self._scrollX = nX; self._scrollY = nY
+            elseif nBtn < 32 then
+                -- Click (0=left, 1=right, 2=middle)
+                self._mouseX = nX; self._mouseY = nY
+                self._mouseBtn = nBtn; self._mouseClicked = true
+            end
+            -- Drag (32+) — store position but don't activate
+            if nBtn >= 32 and nBtn < 64 then
+                self._mouseX = nX; self._mouseY = nY
+                self._mouseBtn = nBtn - 32
+            end
+        end
+        self._key = nil  -- consume mouse event (not a keyboard key)
+    end
+
     self._act = false
 
-    if self._bImgui and self._key then
-        local k = self._key
-        if k == "\t" then
-            if self._nW > 0 then
-                self._focIdx = (self._focIdx % self._nW) + 1
-                self._focId  = self._wIds[self._focIdx]
+    if self._bImgui then
+        local bDDOpen = false
+        if self._dropdowns then
+            for _, dd in pairs(self._dropdowns) do
+                if dd.open then bDDOpen = true; break end
             end
-            self._key = nil
-        elseif k == "\n" then
-            self._act = true
+        end
+
+        -- Close open dropdown on click outside (handled here before widgets)
+        if bDDOpen and self._mouseClicked then
+            local pd = self._pendingDropdown
+            -- If no pending dropdown was rendered last frame at click pos,
+            -- the dropdown will close itself in its own method below.
+        end
+
+        local kk = self._key
+        if kk and not bDDOpen then
+            if kk == "\t" then
+                if self._nW > 0 then
+                    self._focIdx = (self._focIdx % self._nW) + 1
+                    self._focId  = self._wIds[self._focIdx]
+                end
+                self._key = nil
+            elseif kk == "\27[Z" then
+                -- Shift+Tab: previous widget
+                if self._nW > 0 then
+                    self._focIdx = self._focIdx - 1
+                    if self._focIdx < 1 then self._focIdx = self._nW end
+                    self._focId = self._wIds[self._focIdx]
+                end
+                self._key = nil
+            elseif kk == "\n" then
+                self._act = true
+            elseif kk == "\27" and self._topModal then
+                local tM = self._modals[self._topModal]
+                if tM and not tM.closed and not tM.noEsc then
+                    tM.closed = true; tM.result = nil
+                end
+                self._key = nil
+            end
+        elseif kk and bDDOpen then
+            if kk == "\27" then
+                for _, dd in pairs(self._dropdowns) do
+                    if dd.open then dd.open = false; break end
+                end
+                self._key = nil
+            end
         end
         self._nW = 0
     end
@@ -467,13 +585,39 @@ function XE._M:beginFrame()
         fs.deviceControl(self._hIn, "gpu_set_active_buffer", {self._gpuBufId})
     end
 
-    return self._key ~= nil
+    return self._key ~= nil or self._mouseClicked or self._scrollDelta ~= nil
+end
+
+function XE._M:_hitTest(id, x, y, w, h)
+    if not self._mouseClicked then return false end
+    local mx, my = self._mouseX, self._mouseY
+    if not mx or not my then return false end
+    w = w or 1; h = h or 1
+    if mx >= x and mx < x + w and my >= y and my < y + h then
+        self._focId = id
+        -- Find widget index in registration list
+        for i = self._nW, 1, -1 do
+            if self._wIds[i] == id then self._focIdx = i; break end
+        end
+        self._mouseClicked = false  -- consume
+        return true
+    end
+    return false
+end
+
+-- Mouse position query (for custom widgets)
+function XE._M:mouse()
+    return self._mouseX, self._mouseY, self._mouseBtn, self._mouseClicked
+end
+
+function XE._M:scroll()
+    return self._scrollDelta, self._scrollX, self._scrollY
 end
 
 function XE._M:endFrame()
-    -- ===== SUSPEND GUARD =====
     if self._suspended then return end
 
+    -- ===== IMGUI focus resolution =====
     if self._bImgui and self._nW > 0 then
         local found = false
         local wIds, focId = self._wIds, self._focId
@@ -483,13 +627,35 @@ function XE._M:endFrame()
         if not found then self._focIdx = 1; self._focId = wIds[1] end
     end
 
+    -- ===== RENDER OVERLAYS INTO DELTA (before diff) =====
+
+    -- Toasts
+    if #self._toasts > 0 then
+        self:_renderToasts()
+    end
+
+    -- Pending dropdown popup
+    if self._pendingDropdown then
+        local pd = self._pendingDropdown
+        for i = 1, pd.nVis do
+            local idx = pd.off + i
+            if idx > #pd.options then break end
+            local bSel = (idx == pd.sel)
+            self:textPad(pd.x, pd.y + i - 1, pd.w,
+                " " .. pd.options[idx],
+                bSel and self:c("sel_fg") or self:c("fg"),
+                bSel and self:c("sel_bg") or self:c("input_bg"))
+        end
+        self._pendingDropdown = nil
+    end
+
+    -- ===== DIFF + FLUSH =====
     if self._bShadow then
         local hasClear = (self._clearBg ~= _NOCLEAR)
         if hasClear then
             self:_flushWithClear()
         else
             if self._nDty == 0 then
-                -- ===== GPU DOUBLE BUFFER: restore screen target even on no-op =====
                 if self._gpuBufId then
                     fs.deviceControl(self._hIn, "gpu_set_active_buffer", {0})
                 end
@@ -510,7 +676,7 @@ function XE._M:endFrame()
         end
     end
 
-    -- Emit the batch
+    -- ===== EMIT BATCH =====
     if self._nB > 0 then
         local bat = self._bat
         for i = self._nB + 1, #bat do bat[i] = nil end
@@ -532,7 +698,7 @@ function XE._M:endFrame()
         self._nB = 0
     end
 
-    -- ===== GPU DOUBLE BUFFER: bitblt off-screen → screen =====
+    -- ===== GPU DOUBLE BUFFER =====
     if self._gpuBufId then
         fs.deviceControl(self._hIn, "gpu_bitblt",
             {0, 1, 1, self.W, self.H, self._gpuBufId, 1, 1})
@@ -1053,29 +1219,53 @@ function XE._M:beginScroll(id, x, y, w, h, nTotalItems, nItemH)
     local nVisItems = math.floor(h / nItemH)
     local nMaxOff = math.max(0, nTotalItems - nVisItems)
 
-    -- Handle input when focused
+    -- Keyboard input when focused
     if hot and self._key then
         local k = self._key
-        if k == "\27[A" then  -- Up
-            st.sel = st.sel - 1
-            if st.sel < 1 then st.sel = 1 end
-            self._key = nil
-        elseif k == "\27[B" then  -- Down
-            st.sel = st.sel + 1
-            if st.sel > nTotalItems then st.sel = nTotalItems end
-            self._key = nil
-        elseif k == "\27[5~" then  -- PgUp
-            st.sel = math.max(1, st.sel - nVisItems)
-            self._key = nil
-        elseif k == "\27[6~" then  -- PgDn
-            st.sel = math.min(nTotalItems, st.sel + nVisItems)
-            self._key = nil
-        elseif k == "\27[H" then  -- Home
-            st.sel = 1
-            self._key = nil
-        elseif k == "\27[F" then  -- End
-            st.sel = nTotalItems
-            self._key = nil
+        if k == "\27[A" then
+            st.sel = math.max(1, st.sel - 1); self._key = nil
+        elseif k == "\27[B" then
+            st.sel = math.min(nTotalItems, st.sel + 1); self._key = nil
+        elseif k == "\27[5~" then
+            st.sel = math.max(1, st.sel - nVisItems); self._key = nil
+        elseif k == "\27[6~" then
+            st.sel = math.min(nTotalItems, st.sel + nVisItems); self._key = nil
+        elseif k == "\27[H" then
+            st.sel = 1; self._key = nil
+        elseif k == "\27[F" then
+            st.sel = nTotalItems; self._key = nil
+        end
+    end
+
+    -- Mouse click on list item
+    if self._mouseClicked then
+        local mx, my = self._mouseX, self._mouseY
+        if mx and mx >= x and mx < x + w and my >= y and my < y + h then
+            local nClickedRow = my - y
+            local nClickedItem = st.off + math.floor(nClickedRow / nItemH) + 1
+            if nClickedItem >= 1 and nClickedItem <= nTotalItems then
+                st.sel = nClickedItem
+                -- Set focus to this scroll widget
+                self._focId = id
+                for i = self._nW, 1, -1 do
+                    if self._wIds[i] == id then self._focIdx = i; break end
+                end
+                self._mouseClicked = false
+                hot = true
+            end
+        end
+    end
+
+    -- Scroll wheel within list bounds
+    if self._scrollDelta then
+        local sx, sy = self._scrollX, self._scrollY
+        if sx and sx >= x and sx < x + w and sy >= y and sy < y + h then
+            if self._scrollDelta < 0 then
+                st.sel = math.max(1, st.sel - 3)
+            else
+                st.sel = math.min(nTotalItems, st.sel + 3)
+            end
+            self._scrollDelta = nil  -- consume
         end
     end
 
@@ -1097,7 +1287,6 @@ function XE._M:beginScroll(id, x, y, w, h, nTotalItems, nItemH)
     local nLast  = math.min(nTotalItems, st.off + nVisItems)
     local bAct   = hot and self._act
 
-    -- Clip content area
     self:pushClip(x, y, nCW, h)
 
     return nFirst, nLast, st.sel, nCW, bAct
@@ -1134,6 +1323,7 @@ end
 -- Returns: currentValue, bChanged, bSubmitted
 function XE._M:textInput(id, x, y, w, sValue, fg, bg, afg, abg)
     local hot = self:_regW(id)
+    if self:_hitTest(id, x, y, w, 1) then hot = true end
 
     local st = self._inputState[id]
     if not st then
@@ -1662,6 +1852,11 @@ end
 
 function XE._M:_regW(id)
     if not self._bImgui then return false end
+    -- When a modal is open, only widgets INSIDE the modal register.
+    -- Widgets outside still render (for visual) but can't receive focus.
+    if self._topModal and not self._insideModal then
+        return false
+    end
     self._nW = self._nW + 1
     self._wIds[self._nW] = id
     if self._nW == 1 and not self._focId then
@@ -1673,6 +1868,10 @@ end
 
 function XE._M:button(id, x, y, label, fg, bg, hfg, hbg)
     local hot = self:_regW(id)
+    -- Mouse click activation
+    if self:_hitTest(id, x, y, #label, 1) then
+        hot = true; self._act = true
+    end
     fg  = fg  or XE.FG;     bg  = bg  or 0x333366
     hfg = hfg or 0x000000;  hbg = hbg or 0xFFFF00
     self:text(x, y, label, hot and hfg or fg, hot and hbg or bg)
@@ -1681,6 +1880,9 @@ end
 
 function XE._M:selectable(id, x, y, w, label, fg, bg, sfg, sbg)
     local hot = self:_regW(id)
+    if self:_hitTest(id, x, y, w, 1) then
+        hot = true; self._act = true
+    end
     fg  = fg  or XE.FG;     bg  = bg  or self._baseBg
     sfg = sfg or 0x000000;  sbg = sbg or 0xFFFF00
     local s = label or ""
@@ -1697,16 +1899,14 @@ end
 -- Returns: newCheckedState, bToggled
 function XE._M:checkbox(id, x, y, bChecked, sLabel, fg, bg, hfg, hbg)
     local hot = self:_regW(id)
+    local sText = (bChecked and "[X] " or "[ ] ") .. (sLabel or "")
+    if self:_hitTest(id, x, y, #sText, 1) then
+        hot = true; self._act = true
+    end
     fg  = fg  or self:c("fg");     bg  = bg  or self._baseBg
     hfg = hfg or self:c("sel_fg"); hbg = hbg or self:c("sel_bg")
-
-    local sBox = bChecked and "[X] " or "[ ] "
-    local sText = sBox .. (sLabel or "")
     self:text(x, y, sText, hot and hfg or fg, hot and hbg or bg)
-
-    if hot and self._act then
-        return not bChecked, true
-    end
+    if hot and self._act then return not bChecked, true end
     return bChecked, false
 end
 
@@ -1733,6 +1933,1278 @@ function XE._M:textPad(x, y, w, s, fg, bg)
         if pad then s = s .. pad else s = s .. string.rep(" ", w - #s) end
     end
     self:text(x, y, s, fg, bg)
+end
+
+-- =============================================
+-- HALF-BLOCK PIXEL CANVAS
+--
+-- Resolution: w × (h*2) pixels in a w × h cell region.
+-- Each screen cell encodes two vertical pixels via ▀:
+--   fg = top pixel color, bg = bottom pixel color.
+--
+-- Pixel buffer is SPARSE: pix[py] = nil or {[px]=color}.
+-- Only non-background pixels consume memory.
+--
+-- flush() writes directly to the context's delta buffer.
+-- The diff engine handles the rest — only changed cells
+-- reach the GPU.
+-- =============================================
+
+local _cv_mt = {}
+_cv_mt.__index = _cv_mt
+
+function XE._M:canvas(sId, x, y, w, h, bgColor)
+    if self._suspended then return nil end
+    local cv = self._canvases[sId]
+    if not cv then
+        cv = setmetatable({}, _cv_mt)
+        self._canvases[sId] = cv
+    end
+    cv._ctx  = self
+    cv._sx   = x
+    cv._sy   = y
+    cv._w    = w    -- screen columns
+    cv._h    = h    -- screen rows
+    cv._pixW = w            -- pixel width
+    cv._pixH = h * 2        -- pixel height (2x vertical)
+    cv._bg   = bgColor or self._baseBg
+    if not cv._pix then cv._pix = {} end
+    return cv
+end
+
+-- Clear all pixels to background
+function _cv_mt:clear(bgColor)
+    if bgColor then self._bg = bgColor end
+    -- Nil every row reference → GC collects pixel data.
+    -- Faster than iterating: O(nRows), not O(nPixels).
+    local pix = self._pix
+    for k in pairs(pix) do pix[k] = nil end
+end
+
+-- Set a single pixel (0-indexed coordinates)
+function _cv_mt:pixel(px, py, color)
+    if px < 0 or px >= self._pixW or py < 0 or py >= self._pixH then return end
+    local pix = self._pix
+    local row = pix[py]
+    if not row then row = {}; pix[py] = row end
+    row[px] = color
+end
+
+-- Fast horizontal line
+function _cv_mt:hline(py, px1, px2, color)
+    if py < 0 or py >= self._pixH then return end
+    if px1 > px2 then px1, px2 = px2, px1 end
+    if px1 < 0 then px1 = 0 end
+    if px2 >= self._pixW then px2 = self._pixW - 1 end
+    local pix = self._pix
+    local row = pix[py]
+    if not row then row = {}; pix[py] = row end
+    for x = px1, px2 do row[x] = color end
+end
+
+-- Fast vertical line
+function _cv_mt:vline(px, py1, py2, color)
+    if px < 0 or px >= self._pixW then return end
+    if py1 > py2 then py1, py2 = py2, py1 end
+    if py1 < 0 then py1 = 0 end
+    if py2 >= self._pixH then py2 = self._pixH - 1 end
+    local pix = self._pix
+    for y = py1, py2 do
+        local row = pix[y]
+        if not row then row = {}; pix[y] = row end
+        row[px] = color
+    end
+end
+
+-- Bresenham line (integer arithmetic, no floats)
+function _cv_mt:line(x1, y1, x2, y2, color)
+    local dx = x2 - x1; if dx < 0 then dx = -dx end
+    local dy = y2 - y1; if dy < 0 then dy = -dy end
+    local sx = x1 < x2 and 1 or -1
+    local sy = y1 < y2 and 1 or -1
+    local err = dx - dy
+    local pix = self._pix
+    local pw, ph = self._pixW, self._pixH
+    while true do
+        if x1 >= 0 and x1 < pw and y1 >= 0 and y1 < ph then
+            local row = pix[y1]
+            if not row then row = {}; pix[y1] = row end
+            row[x1] = color
+        end
+        if x1 == x2 and y1 == y2 then break end
+        local e2 = err + err
+        if e2 > -dy then err = err - dy; x1 = x1 + sx end
+        if e2 <  dx then err = err + dx; y1 = y1 + sy end
+    end
+end
+
+-- Filled rectangle
+function _cv_mt:fillRect(px, py, pw, ph, color)
+    local x2 = px + pw - 1
+    local y2 = py + ph - 1
+    if px < 0 then px = 0 end
+    if py < 0 then py = 0 end
+    if x2 >= self._pixW then x2 = self._pixW - 1 end
+    if y2 >= self._pixH then y2 = self._pixH - 1 end
+    local pix = self._pix
+    for y = py, y2 do
+        local row = pix[y]
+        if not row then row = {}; pix[y] = row end
+        for x = px, x2 do row[x] = color end
+    end
+end
+
+-- Outline rectangle
+function _cv_mt:rect(px, py, pw, ph, color)
+    self:hline(py, px, px + pw - 1, color)
+    self:hline(py + ph - 1, px, px + pw - 1, color)
+    self:vline(px, py, py + ph - 1, color)
+    self:vline(px + pw - 1, py, py + ph - 1, color)
+end
+
+-- =============================================
+-- CANVAS FLUSH — compile pixels to delta buffer
+--
+-- For each screen cell, packs two vertical pixels
+-- into one half-block character:
+--   top==bottom==bg  →  space (byte 32)
+--   top==bottom!=bg  →  █ (byte 129), fg=color
+--   top!=bottom      →  ▀ (byte 128), fg=top, bg=bottom
+--
+-- Cost: 6 ops per cell (2 lookups + 1 compare + 3 writes).
+-- 40×10 canvas = 400 cells = ~2400 ops = <1ms in OC Lua.
+-- =============================================
+
+function _cv_mt:flush()
+    local ctx = self._ctx
+    if ctx._suspended then return end
+
+    local pix  = self._pix
+    local bgC  = self._bg
+    local sx   = self._sx
+    local sy   = self._sy
+    local cw   = self._w
+    local ch   = self._h
+    local ctxW = ctx.W
+    local ctxH = ctx.H
+    local baseFg = ctx._baseFg
+
+    local dCh  = ctx._dCh
+    local dFg  = ctx._dFg
+    local dBg  = ctx._dBg
+    local dtyR = ctx._dtyR
+
+    for cy = 1, ch do
+        local dy = sy + cy - 1
+        if dy < 1 or dy > ctxH then goto nextRow end
+
+        local py_t = cy + cy - 1   -- cy*2-1
+        local py_b = py_t + 1      -- cy*2
+        local topR = pix[py_t]     -- nil = empty row
+        local botR = pix[py_b]
+
+        -- Get or create delta row
+        local rCh = dCh[dy]
+        local rFg, rBg
+        if rCh then
+            rFg = dFg[dy]; rBg = dBg[dy]
+        else
+            rCh = {}; rFg = {}; rBg = {}
+            dCh[dy] = rCh; dFg[dy] = rFg; dBg[dy] = rBg
+        end
+
+        for cx = 1, cw do
+            local dx = sx + cx - 1
+            if dx < 1 or dx > ctxW then goto nextCol end
+
+            local tc = topR and topR[cx - 1] or bgC
+            local bc = botR and botR[cx - 1] or bgC
+
+            if tc == bc then
+                if tc == bgC then
+                    rCh[dx] = _SPACE_BYTE
+                    rFg[dx] = baseFg
+                    rBg[dx] = bgC
+                else
+                    rCh[dx] = _FULL_BLOCK
+                    rFg[dx] = tc
+                    rBg[dx] = tc
+                end
+            else
+                rCh[dx] = _HALF_BLOCK
+                rFg[dx] = tc
+                rBg[dx] = bc
+            end
+
+            ::nextCol::
+        end
+
+        if not dtyR[dy] then
+            dtyR[dy] = true
+            ctx._nDty = ctx._nDty + 1
+        end
+
+        ::nextRow::
+    end
+end
+
+-- =============================================
+-- SPARKLINE — single-row bar chart
+-- Uses ▁▂▃▄▅▆▇█ characters (8 height levels).
+-- Writes directly to delta buffer: zero allocation,
+-- zero canvas overhead, just a tight loop.
+--
+-- tData = {3, 7, 2, 9, 1, ...}
+-- Shows the LAST w values, right-aligned.
+-- =============================================
+
+function XE._M:sparkline(x, y, w, tData, fg, bg)
+    if self._suspended then return end
+    fg = fg or self:c("accent")
+    bg = bg or self._baseBg
+
+    local nData = _dLen(tData)
+    if nData == 0 then
+        self:fill(x, y, w, 1, " ", fg, bg); return
+    end
+
+    local minV, maxV = _dGet(tData, 1), _dGet(tData, 1)
+    for i = 2, nData do
+        local v = _dGet(tData, i)
+        if v < minV then minV = v end
+        if v > maxV then maxV = v end
+    end
+    if minV == maxV then maxV = minV + 1 end
+    local inv8 = 8 / (maxV - minV)
+
+    local nStart = math.max(1, nData - w + 1)
+
+    local dCh = self._dCh
+    local dFg = self._dFg
+    local dBg = self._dBg
+    local rCh = dCh[y]
+    local rFg, rBg
+    if rCh then rFg = dFg[y]; rBg = dBg[y]
+    else
+        rCh = {}; rFg = {}; rBg = {}
+        dCh[y] = rCh; dFg[y] = rFg; dBg[y] = rBg
+    end
+
+    local nLeading = w - (nData - nStart + 1)
+    for col = x, x + nLeading - 1 do
+        if col >= 1 and col <= self.W then
+            rCh[col] = _SPACE_BYTE; rFg[col] = fg; rBg[col] = bg
+        end
+    end
+
+    local col = x + nLeading
+    for i = nStart, nData do
+        if col > x + w - 1 or col > self.W then break end
+        if col >= 1 then
+            local nLevel = math.floor((_dGet(tData, i) - minV) * inv8 + 0.5)
+            if nLevel < 0 then nLevel = 0 end
+            if nLevel > 8 then nLevel = 8 end
+            if nLevel == 0 then rCh[col] = _SPACE_BYTE
+            else rCh[col] = 129 + nLevel end
+            rFg[col] = fg; rBg[col] = bg
+        end
+        col = col + 1
+    end
+
+    if not self._dtyR[y] then
+        self._dtyR[y] = true; self._nDty = self._nDty + 1
+    end
+end
+
+-- =============================================
+-- LINE GRAPH
+-- Plots tData as a connected line on a pixel canvas.
+-- Auto-scales Y axis. Optional grid, fill, labels.
+-- =============================================
+
+function XE._M:lineGraph(sId, x, y, w, h, tData, tOpts)
+    if self._suspended then return end
+    tOpts = tOpts or {}
+
+    local cv = self:canvas(sId, x, y, w, h, tOpts.bgColor or self._baseBg)
+    cv:clear()
+
+    local nData = _dLen(tData)
+    if nData == 0 then cv:flush(); return end
+
+    local pw, ph = cv._pixW, cv._pixH
+    local color  = tOpts.color or 0x55FF55
+
+    local minY = tOpts.minY
+    local maxY = tOpts.maxY
+    if not minY or not maxY then
+        minY = _dGet(tData, 1); maxY = minY
+        for i = 2, nData do
+            local v = _dGet(tData, i)
+            if v < minY then minY = v end
+            if v > maxY then maxY = v end
+        end
+        local pad = (maxY - minY) * 0.05
+        if pad == 0 then pad = 1 end
+        minY = minY - pad; maxY = maxY + pad
+    end
+    local rangeY = maxY - minY
+    if rangeY == 0 then rangeY = 1 end
+
+    local function mapY(v)
+        local py = ph - 1 - math.floor((v - minY) / rangeY * (ph - 1))
+        if py < 0 then py = 0 end
+        if py >= ph then py = ph - 1 end
+        return py
+    end
+
+    if tOpts.showGrid ~= false then
+        local gridC = tOpts.gridColor or 0x222244
+        for i = 1, 3 do
+            cv:hline(math.floor(ph * i / 4), 0, pw - 1, gridC)
+        end
+    end
+
+    local nStart = math.max(1, nData - pw + 1)
+    local nVis = nData - nStart + 1
+
+    if tOpts.filled then
+        local fillC = tOpts.fillColor or color
+        for i = 0, nVis - 1 do
+            local v = _dGet(tData, nStart + i)
+            local py = mapY(v)
+            if py < ph - 1 then cv:vline(i, py + 1, ph - 1, fillC) end
+        end
+    end
+
+    if nVis >= 2 then
+        local px0, py0 = 0, mapY(_dGet(tData, nStart))
+        for i = 1, nVis - 1 do
+            local px1 = i
+            local py1 = mapY(_dGet(tData, nStart + i))
+            cv:line(px0, py0, px1, py1, color)
+            px0 = px1; py0 = py1
+        end
+    elseif nVis == 1 then
+        cv:pixel(0, mapY(_dGet(tData, nStart)), color)
+    end
+
+    cv:flush()
+end
+
+-- =============================================
+-- MULTI-LINE GRAPH
+-- Multiple data series on one canvas.
+-- tSeries = {{data={...}, color=0xFF5555, label="CPU"}, ...}
+-- =============================================
+
+function XE._M:multiLineGraph(sId, x, y, w, h, tSeries, tOpts)
+    if self._suspended then return end
+    tOpts = tOpts or {}
+
+    local cv = self:canvas(sId, x, y, w, h, tOpts.bgColor or self._baseBg)
+    cv:clear()
+
+    if #tSeries == 0 then cv:flush(); return end
+
+    local pw, ph = cv._pixW, cv._pixH
+
+    local minY = tOpts.minY
+    local maxY = tOpts.maxY
+    if not minY or not maxY then
+        minY = math.huge; maxY = -math.huge
+        for _, s in ipairs(tSeries) do
+            local nD = _dLen(s.data)
+            for i = 1, nD do
+                local v = _dGet(s.data, i)
+                if v < minY then minY = v end
+                if v > maxY then maxY = v end
+            end
+        end
+        local pad = (maxY - minY) * 0.05
+        if pad == 0 then pad = 1 end
+        minY = minY - pad; maxY = maxY + pad
+    end
+    local rangeY = maxY - minY
+    if rangeY == 0 then rangeY = 1 end
+
+    local function mapY(v)
+        local py = ph - 1 - math.floor((v - minY) / rangeY * (ph - 1))
+        if py < 0 then py = 0 end
+        if py >= ph then py = ph - 1 end
+        return py
+    end
+
+    if tOpts.showGrid ~= false then
+        local gridC = tOpts.gridColor or 0x222244
+        for i = 1, 3 do
+            cv:hline(math.floor(ph * i / 4), 0, pw - 1, gridC)
+        end
+    end
+
+    for _, s in ipairs(tSeries) do
+        local tD = s.data
+        local nD = _dLen(tD)
+        if nD == 0 then goto nextSeries end
+        local c = s.color or 0x55FF55
+        local nStart = math.max(1, nD - pw + 1)
+        local nVis = nD - nStart + 1
+
+        if nVis >= 2 then
+            local px0, py0 = 0, mapY(_dGet(tD, nStart))
+            for i = 1, nVis - 1 do
+                local px1, py1 = i, mapY(_dGet(tD, nStart + i))
+                cv:line(px0, py0, px1, py1, c)
+                px0 = px1; py0 = py1
+            end
+        elseif nVis == 1 then
+            cv:pixel(0, mapY(_dGet(tD, nStart)), c)
+        end
+        ::nextSeries::
+    end
+
+    cv:flush()
+end
+
+-- =============================================
+-- BAR CHART
+-- tData = {{value=72, color=0xFF5555, label="CPU"}, ...}
+-- or simply {72, 45, 90, ...} (auto-colored)
+-- =============================================
+
+function XE._M:barChart(sId, x, y, w, h, tData, tOpts)
+    if self._suspended then return end
+    tOpts = tOpts or {}
+
+    local cv = self:canvas(sId, x, y, w, h, tOpts.bgColor or self._baseBg)
+    cv:clear()
+
+    local nBars = #tData
+    if nBars == 0 then cv:flush(); return end
+
+    local pw, ph = cv._pixW, cv._pixH
+    local spacing = tOpts.spacing or 1
+    local barW = tOpts.barWidth
+        or math.max(1, math.floor((pw - spacing * (nBars + 1)) / nBars))
+
+    -- Default color cycle
+    local tColors = tOpts.colors or {
+        0x55FF55, 0xFF5555, 0x5555FF, 0xFFFF55,
+        0xFF55FF, 0x55FFFF, 0xFFAA55, 0xAA55FF,
+    }
+
+    -- Find max value
+    local maxV = 0
+    for i = 1, nBars do
+        local v = type(tData[i]) == "table" and tData[i].value or tData[i]
+        if v > maxV then maxV = v end
+    end
+    if maxV == 0 then maxV = 1 end
+
+    -- Draw bars
+    for i = 1, nBars do
+        local entry = tData[i]
+        local v = type(entry) == "table" and entry.value or entry
+        local c = (type(entry) == "table" and entry.color)
+                  or tColors[((i - 1) % #tColors) + 1]
+
+        local barH = math.max(1, math.floor(v / maxV * (ph - 1)))
+        local bx = spacing + (i - 1) * (barW + spacing)
+        local by = ph - barH
+
+        cv:fillRect(bx, by, barW, barH, c)
+    end
+
+    cv:flush()
+end
+
+-- =============================================
+-- HEAT ROW — single-row colored intensity map
+-- Great for timelines, load history, latency heatmaps.
+-- tData = {0.1, 0.5, 0.9, ...} (values 0.0 to 1.0)
+-- tColorMap = gradient stops or nil (default green→red)
+-- =============================================
+
+function XE._M:heatRow(x, y, w, tData, tColorMap)
+    if self._suspended then return end
+
+    tColorMap = tColorMap or {
+        {0.0, 0x00AA00}, {0.5, 0xAAAA00}, {1.0, 0xAA0000},
+    }
+
+    local function lerp(a, b, t) return math.floor(a + (b - a) * t) end
+
+    local function colorAt(v)
+        if v <= 0 then return tColorMap[1][2] end
+        if v >= 1 then return tColorMap[#tColorMap][2] end
+        for i = 2, #tColorMap do
+            if v <= tColorMap[i][1] then
+                local lo, hi = tColorMap[i-1], tColorMap[i]
+                local t = (v - lo[1]) / (hi[1] - lo[1])
+                local clo, chi = lo[2], hi[2]
+                local r = lerp(math.floor(clo/65536)%256, math.floor(chi/65536)%256, t)
+                local g = lerp(math.floor(clo/256)%256, math.floor(chi/256)%256, t)
+                local b = lerp(clo%256, chi%256, t)
+                return r*65536 + g*256 + b
+            end
+        end
+        return tColorMap[#tColorMap][2]
+    end
+
+    local nData = _dLen(tData)
+    local nStart = math.max(1, nData - w + 1)
+    local nLeading = w - (nData - nStart + 1)
+
+    local dCh, dFg, dBg = self._dCh, self._dFg, self._dBg
+    local rCh = dCh[y]
+    local rFg, rBg
+    if rCh then rFg = dFg[y]; rBg = dBg[y]
+    else
+        rCh = {}; rFg = {}; rBg = {}
+        dCh[y] = rCh; dFg[y] = rFg; dBg[y] = rBg
+    end
+
+    local col = x
+    for _ = 1, nLeading do
+        if col >= 1 and col <= self.W then
+            rCh[col] = _SPACE_BYTE
+            rFg[col] = self._baseFg; rBg[col] = self._baseBg
+        end
+        col = col + 1
+    end
+    for i = nStart, nData do
+        if col > x + w - 1 or col > self.W then break end
+        if col >= 1 then
+            local c = colorAt(_dGet(tData, i))
+            rCh[col] = _FULL_BLOCK; rFg[col] = c; rBg[col] = c
+        end
+        col = col + 1
+    end
+
+    if not self._dtyR[y] then
+        self._dtyR[y] = true; self._nDty = self._nDty + 1
+    end
+end
+
+-- =============================================
+-- MODAL SYSTEM
+--
+-- Modals are stacked. Only the topmost receives input.
+-- Backdrop covers the full screen (solid or dimmed).
+-- All rendering goes through the delta buffer — the
+-- diff engine handles GPU efficiency automatically.
+--
+-- Performance (80×25 screen):
+--   Frame 1 (open):  ~2000 backdrop cells + modal content
+--                     → diff emits all as changed → ~30 batch entries
+--   Frame 2+ (steady): backdrop unchanged (diff = 0 GPU calls),
+--                       only modal content changes emit
+--   Close:            app content overwrites backdrop naturally,
+--                     diff emits the differences
+--
+-- Backdrop modes:
+--   "solid"  — fill with dark color (O(W*H) writes, O(0) after frame 1)
+--   "dim"    — snapshot front buffer, darken each cell (O(W*H) + 48KB RAM)
+--   "none"   — no backdrop (transparent, app content visible)
+-- =============================================
+
+local function _dimColor(c, factor)
+    factor = factor or 3
+    local r = math.floor(math.floor(c / 65536) % 256 / factor)
+    local g = math.floor(math.floor(c / 256) % 256 / factor)
+    local b = math.floor(c % 256 / factor)
+    return r * 65536 + g * 256 + b
+end
+
+function XE._M:openModal(sId, tOpts)
+    tOpts = tOpts or {}
+    if self._modals[sId] then return false, "already open" end
+
+    local nW = tOpts.w or tOpts.width  or 40
+    local nH = tOpts.h or tOpts.height or 10
+    local nX = tOpts.x or math.floor((self.W - nW) / 2) + 1
+    local nY = tOpts.y or math.floor((self.H - nH) / 2) + 1
+
+    local sBackdrop = tOpts.backdrop or "solid"
+    local nBdColor  = tOpts.backdropColor or 0x080810
+    local nBdFg     = tOpts.backdropFg or 0x222233
+
+    -- Save snapshot for "dim" mode (before any modal content is drawn)
+    local tSnap = nil
+    if sBackdrop == "dim" and self._bShadow then
+        tSnap = {ch = {}, fg = {}, bg = {}}
+        for y = 1, self.H do
+            local sCh, sFg, sBg = {}, {}, {}
+            local fc, ff, fb = self._fCh[y], self._fFg[y], self._fBg[y]
+            for x = 1, self.W do
+                sCh[x] = fc[x]; sFg[x] = ff[x]; sBg[x] = fb[x]
+            end
+            tSnap.ch[y] = sCh; tSnap.fg[y] = sFg; tSnap.bg[y] = sBg
+        end
+    end
+
+    local tModal = {
+        id       = sId,
+        x        = nX,
+        y        = nY,
+        w        = nW,
+        h        = nH,
+        title    = tOpts.title,
+        backdrop = sBackdrop,
+        bdColor  = nBdColor,
+        bdFg     = nBdFg,
+        bdDimFactor = tOpts.dimFactor or 3,
+        noEsc    = tOpts.noEsc or false,
+        result   = nil,
+        closed   = false,
+        -- Per-modal widget focus (saved when not topmost)
+        savedFocIdx = nil,
+        savedFocId  = nil,
+        -- Border colors
+        borderFg = tOpts.borderFg or (self._theme and self._theme.border) or 0x5555AA,
+        titleFg  = tOpts.titleFg  or (self._theme and self._theme.title)  or 0x55FFFF,
+        bodyFg   = tOpts.bodyFg   or (self._theme and self._theme.fg)     or 0xFFFFFF,
+        bodyBg   = tOpts.bodyBg   or (self._theme and self._theme.bg)     or 0x111122,
+    }
+
+    self._modals[sId] = tModal
+    self._modalSnapshots[sId] = tSnap
+
+    -- Push onto stack
+    self._modalStack[#self._modalStack + 1] = sId
+    self._topModal = sId
+
+    return true
+end
+
+function XE._M:beginModal(sId)
+    local tM = self._modals[sId]
+    if not tM then return false end
+    if tM.closed then
+        -- Modal was closed last frame — clean up this frame
+        self:_removeModal(sId)
+        return false
+    end
+
+    local mx, my, mw, mh = tM.x, tM.y, tM.w, tM.h
+
+    -- ---- Draw backdrop (only for topmost modal in stack) ----
+    if sId == self._modalStack[1] then
+        -- First modal in stack → draw backdrop over entire screen
+        local sBd = tM.backdrop
+        if sBd == "solid" then
+            self:fill(1, 1, self.W, self.H, " ", tM.bdFg, tM.bdColor)
+        elseif sBd == "dim" then
+            local tSnap = self._modalSnapshots[sId]
+            if tSnap and self._bShadow then
+                local dCh = self._dCh
+                local dFg = self._dFg
+                local dBg = self._dBg
+                local dtyR = self._dtyR
+                local nFac = tM.bdDimFactor
+                for y = 1, self.H do
+                    local rCh = dCh[y]
+                    local rFg, rBg
+                    if rCh then rFg = dFg[y]; rBg = dBg[y]
+                    else
+                        rCh = {}; rFg = {}; rBg = {}
+                        dCh[y] = rCh; dFg[y] = rFg; dBg[y] = rBg
+                    end
+                    local sCh = tSnap.ch[y]
+                    local sFg = tSnap.fg[y]
+                    local sBg = tSnap.bg[y]
+                    for x = 1, self.W do
+                        rCh[x] = sCh[x]
+                        rFg[x] = _dimColor(sFg[x], nFac)
+                        rBg[x] = _dimColor(sBg[x], nFac)
+                    end
+                    if not dtyR[y] then
+                        dtyR[y] = true
+                        self._nDty = self._nDty + 1
+                    end
+                end
+            else
+                -- Fallback to solid if no snapshot
+                self:fill(1, 1, self.W, self.H, " ", tM.bdFg, tM.bdColor)
+            end
+        end
+        -- "none" = skip backdrop
+    end
+
+    -- ---- Draw modal box ----
+    self:fill(mx, my, mw, mh, " ", tM.bodyFg, tM.bodyBg)
+
+    -- Border
+    local bfg = tM.borderFg
+    local bbg = tM.bodyBg
+    local hor = "+" .. string.rep("-", mw - 2) .. "+"
+    self:text(mx, my,          hor, bfg, bbg)
+    self:text(mx, my + mh - 1, hor, bfg, bbg)
+    for ry = my + 1, my + mh - 2 do
+        self:text(mx,          ry, "|", bfg, bbg)
+        self:text(mx + mw - 1, ry, "|", bfg, bbg)
+    end
+
+    -- Title
+    if tM.title and #tM.title > 0 then
+        local sT = " " .. tM.title .. " "
+        local tx = mx + math.max(1, math.floor((mw - #sT) / 2))
+        self:text(tx, my, sT, tM.titleFg, bbg)
+    end
+
+    -- ---- Enable modal widget registration ----
+    self._insideModal = true
+
+    -- Push clip to modal content area
+    self:pushClip(mx + 1, my + 1, mw - 2, mh - 2)
+
+    -- Return content area coordinates for caller convenience
+    return true, mx + 2, my + 1, mw - 4, mh - 2
+end
+
+function XE._M:endModal()
+    self:popClip()
+    self._insideModal = false
+end
+
+function XE._M:closeModal(vResult)
+    local sId = self._topModal
+    if not sId then return false end
+    local tM = self._modals[sId]
+    if not tM then return false end
+    tM.closed = true
+    tM.result = vResult
+    return true
+end
+
+function XE._M:closeModalById(sId, vResult)
+    local tM = self._modals[sId]
+    if not tM then return false end
+    tM.closed = true
+    tM.result = vResult
+    return true
+end
+
+function XE._M:modalResult(sId)
+    local tM = self._modals[sId]
+    if not tM then return nil end
+    if not tM.closed then return nil end
+    local r = tM.result
+    -- Auto-cleanup on result retrieval
+    self:_removeModal(sId)
+    return r
+end
+
+function XE._M:hasModal()
+    return self._topModal ~= nil
+end
+
+function XE._M:topModalId()
+    return self._topModal
+end
+
+function XE._M:_removeModal(sId)
+    self._modals[sId] = nil
+    self._modalSnapshots[sId] = nil
+    -- Remove from stack
+    local tNew = {}
+    for _, id in ipairs(self._modalStack) do
+        if id ~= sId then tNew[#tNew + 1] = id end
+    end
+    self._modalStack = tNew
+    self._topModal = tNew[#tNew]  -- nil if empty
+    -- Reset focus to let app widgets take over
+    if not self._topModal then
+        self._focIdx = 0
+        self._focId = nil
+    end
+end
+
+-- Shorthand: get topmost modal's content coords
+function XE._M:modalArea()
+    local sId = self._topModal
+    if not sId then return 1, 1, self.W, self.H end
+    local tM = self._modals[sId]
+    return tM.x + 2, tM.y + 1, tM.w - 4, tM.h - 2
+end
+
+-- =============================================
+-- PRE-BUILT MODALS
+-- IMGUI-style: call each frame, they manage their
+-- own state and return results when done.
+-- =============================================
+
+-- Alert: single message + OK button.
+-- Returns true when dismissed.
+function XE._M:alert(sId, sTitle, sMessage, sButton)
+    sButton = sButton or "OK"
+    local nMW = math.max(#sTitle + 6, #sMessage + 6, #sButton + 10, 24)
+    local nMH = 7
+
+    if not self._modals[sId] then
+        self:openModal(sId, {title = sTitle, w = nMW, h = nMH, backdrop = "solid"})
+    end
+
+    local bVis, cx, cy, cw, ch = self:beginModal(sId)
+    if not bVis then
+        return self:modalResult(sId) ~= nil
+    end
+
+    local tM = self._modals[sId]
+    local mx = tM.x
+
+    -- Message (centered)
+    local msgX = mx + math.max(2, math.floor((nMW - #sMessage) / 2))
+    self:text(msgX, cy + 1, sMessage, tM.bodyFg, tM.bodyBg)
+
+    -- OK button (centered)
+    local sBtn = " " .. sButton .. " "
+    local btnX = mx + math.floor((nMW - #sBtn) / 2)
+    if self:button(sId .. "_ok", btnX, cy + ch - 1, sBtn,
+        self:c("btn_fg"), self:c("btn_bg"),
+        self:c("btn_hfg"), self:c("btn_hbg")) then
+        self:closeModal(true)
+    end
+
+    self:endModal()
+
+    local r = self:modalResult(sId)
+    return r ~= nil
+end
+
+-- Confirm: message + Yes/No buttons.
+-- Returns true/false/nil (nil = still open).
+function XE._M:confirm(sId, sTitle, sMessage, sYes, sNo)
+    sYes = sYes or "Yes"
+    sNo  = sNo  or "No"
+    local nMW = math.max(#sTitle + 6, #sMessage + 6, #sYes + #sNo + 14, 28)
+    local nMH = 7
+
+    if not self._modals[sId] then
+        self:openModal(sId, {title = sTitle, w = nMW, h = nMH, backdrop = "solid"})
+    end
+
+    local bVis, cx, cy, cw, ch = self:beginModal(sId)
+    if not bVis then return self:modalResult(sId) end
+
+    local tM = self._modals[sId]
+    local mx = tM.x
+
+    local msgX = mx + math.max(2, math.floor((nMW - #sMessage) / 2))
+    self:text(msgX, cy + 1, sMessage, tM.bodyFg, tM.bodyBg)
+
+    local sB1 = " " .. sYes .. " "
+    local sB2 = " " .. sNo  .. " "
+    local nBtnW = #sB1 + #sB2 + 2
+    local btnX = mx + math.floor((nMW - nBtnW) / 2)
+
+    if self:button(sId .. "_yes", btnX, cy + ch - 1, sB1,
+        self:c("btn_fg"), self:c("btn_bg"),
+        self:c("btn_hfg"), self:c("btn_hbg")) then
+        self:closeModal(true)
+    end
+    if self:button(sId .. "_no", btnX + #sB1 + 2, cy + ch - 1, sB2,
+        self:c("btn_fg"), self:c("btn_bg"),
+        self:c("btn_hfg"), self:c("btn_hbg")) then
+        self:closeModal(false)
+    end
+
+    self:endModal()
+    return self:modalResult(sId)
+end
+
+-- Prompt: text input + OK/Cancel.
+-- Returns string (confirmed), false (cancelled), or nil (still open).
+function XE._M:prompt(sId, sTitle, sLabel, sDefault)
+    local nMW = math.max(#sTitle + 6, #(sLabel or "Input:") + 10, 36)
+    local nMH = 8
+
+    if not self._modals[sId] then
+        self:openModal(sId, {title = sTitle, w = nMW, h = nMH, backdrop = "solid"})
+        -- Seed tracked value — textInput will use this, NOT sDefault
+        self._modals[sId]._promptVal = sDefault or ""
+    end
+
+    local bVis, cx, cy, cw, ch = self:beginModal(sId)
+    if not bVis then return self:modalResult(sId) end
+
+    local tM = self._modals[sId]
+    local mx = tM.x
+
+    self:text(mx + 2, cy + 1, sLabel or "Input:", tM.bodyFg, tM.bodyBg)
+
+    local nIW = nMW - 4
+    -- Pass tracked value (updated each frame), NOT the original default
+    local sVal, bChanged, bSubmit = self:textInput(
+        sId .. "_input", mx + 2, cy + 2, nIW, tM._promptVal)
+
+    -- Track changes so next frame passes the CURRENT value
+    if bChanged then tM._promptVal = sVal end
+    if bSubmit then self:closeModal(sVal) end
+
+    local sB1 = " OK "
+    local sB2 = " Cancel "
+    local nBtnW = #sB1 + #sB2 + 2
+    local btnX = mx + math.floor((nMW - nBtnW) / 2)
+
+    if self:button(sId .. "_ok", btnX, cy + ch - 1, sB1,
+        self:c("btn_fg"), self:c("btn_bg"),
+        self:c("btn_hfg"), self:c("btn_hbg")) then
+        self:closeModal(sVal)
+    end
+    if self:button(sId .. "_cancel", btnX + #sB1 + 2, cy + ch - 1, sB2,
+        self:c("btn_fg"), self:c("btn_bg"),
+        self:c("btn_hfg"), self:c("btn_hbg")) then
+        self:closeModal(false)
+    end
+
+    self:endModal()
+    return self:modalResult(sId)
+end
+
+-- Select: list of options + OK/Cancel.
+-- Returns selected index (1-based), false (cancelled), or nil (still open).
+function XE._M:selectModal(sId, sTitle, tOptions, nDefaultIdx)
+    local nMaxLabel = 0
+    for _, s in ipairs(tOptions) do
+        if #s > nMaxLabel then nMaxLabel = #s end
+    end
+    local nMW = math.max(#sTitle + 6, nMaxLabel + 8, 24)
+    local nVisItems = math.min(#tOptions, 8)
+    local nMH = nVisItems + 5
+
+    if not self._modals[sId] then
+        self:openModal(sId, {title = sTitle, w = nMW, h = nMH, backdrop = "solid"})
+        self._scrollState[sId .. "_list"] = {off = 0, sel = nDefaultIdx or 1}
+    end
+
+    local bVis, cx, cy, cw, ch = self:beginModal(sId)
+    if not bVis then return self:modalResult(sId) end
+
+    local tM = self._modals[sId]
+    local mx = tM.x
+
+    -- Scrollable option list
+    local nListH = ch - 2
+    local first, last, sel, scW, bAct = self:beginScroll(
+        sId .. "_list", mx + 2, cy + 1, nMW - 4, nListH, #tOptions)
+
+    for i = first, last do
+        local ry = cy + 1 + (i - first)
+        local bSel = (i == sel)
+        self:textPad(mx + 2, ry, scW,
+            " " .. tOptions[i],
+            bSel and self:c("sel_fg") or tM.bodyFg,
+            bSel and self:c("sel_bg") or tM.bodyBg)
+    end
+    self:endScroll()
+
+    -- Enter on selection
+    if bAct then self:closeModal(sel) end
+
+    -- OK button
+    local sBtn = " OK "
+    local btnX = mx + math.floor((nMW - #sBtn) / 2)
+    if self:button(sId .. "_ok", btnX, cy + ch - 1, sBtn,
+        self:c("btn_fg"), self:c("btn_bg"),
+        self:c("btn_hfg"), self:c("btn_hbg")) then
+        self:closeModal(sel)
+    end
+
+    self:endModal()
+    return self:modalResult(sId)
+end
+
+-- =============================================
+-- TOAST NOTIFICATIONS
+-- Auto-dismissing messages at screen edge.
+-- Zero ongoing cost: expired toasts are removed,
+-- their cells revert to app content via diff.
+-- =============================================
+
+function XE._M:toast(sMessage, nDurationSec, nFg, nBg)
+    nDurationSec = nDurationSec or 3.0
+    nFg = nFg or 0xFFFFFF
+    nBg = nBg or 0x333355
+
+    -- Get current time (safe access through sandbox chain)
+    local nNow = 0
+    pcall(function() nNow = computer.uptime() end)
+
+    local nW = #sMessage + 4
+    if nW > self.W - 2 then nW = self.W - 2 end
+
+    local tNew = {
+        msg      = sMessage,
+        fg       = nFg,
+        bg       = nBg,
+        w        = nW,
+        deadline = nNow + nDurationSec,
+    }
+
+    -- Push to stack (newest last)
+    local t = self._toasts
+    t[#t + 1] = tNew
+
+    -- Trim to max
+    while #t > self._toastMax do table.remove(t, 1) end
+end
+
+function XE._M:_renderToasts()
+    local t = self._toasts
+    if #t == 0 then return end
+
+    local nNow = 0
+    pcall(function() nNow = computer.uptime() end)
+
+    -- Remove expired (iterate backwards for safe removal)
+    for i = #t, 1, -1 do
+        if t[i].deadline <= nNow then table.remove(t, i) end
+    end
+    if #t == 0 then return end
+
+    local W = self.W
+    for i, toast in ipairs(t) do
+        local nTY
+        if self._toastPos == "br" then
+            nTY = self.H - 1 - (#t - i)
+        else
+            nTY = 2 + (i - 1)
+        end
+        if nTY < 1 or nTY > self.H then goto nextToast end
+
+        local nTX = W - toast.w + 1
+        if nTX < 1 then nTX = 1 end
+
+        self:fill(nTX, nTY, toast.w, 1, " ", toast.fg, toast.bg)
+
+        local sDisp = toast.msg
+        if #sDisp > toast.w - 4 then sDisp = sDisp:sub(1, toast.w - 7) .. "..." end
+        self:text(nTX + 2, nTY, sDisp, toast.fg, toast.bg)
+
+        local nRem = toast.deadline - nNow
+        if nRem < 1.0 then
+            self:text(nTX, nTY, "*", 0xFF5555, toast.bg)
+        end
+
+        ::nextToast::
+    end
+end
+
+-- Convenience wrappers
+function XE._M:toastSuccess(s, n) self:toast(s, n or 2.5, 0xFFFFFF, 0x005500) end
+function XE._M:toastError(s, n)   self:toast(s, n or 4.0, 0xFFFFFF, 0x880000) end
+function XE._M:toastWarn(s, n)    self:toast(s, n or 3.0, 0x000000, 0xAAAA00) end
+function XE._M:toastInfo(s, n)    self:toast(s, n or 2.0, 0xFFFFFF, 0x003366) end
+
+-- =============================================
+-- DROPDOWN POPUP
+-- Opens below trigger position, list of options.
+-- Arrow keys navigate, Enter selects, Esc cancels.
+-- Returns: selectedIndex, or false, or nil (still open).
+-- =============================================
+
+function XE._M:dropdown(sId, x, y, w, tOptions, nCurrentIdx)
+    nCurrentIdx = nCurrentIdx or 1
+
+    local dd = self._dropdowns[sId]
+    if not dd then
+        dd = {open = false, sel = nCurrentIdx, off = 0}
+        self._dropdowns[sId] = dd
+    end
+
+    -- ---- Trigger ----
+    local sCur = tOptions[nCurrentIdx] or ""
+    if #sCur > w - 5 then sCur = sCur:sub(1, w - 8) .. "..." end
+    local nPad = math.max(0, w - #sCur - 5)
+    local sDisp = " " .. sCur .. string.rep(" ", nPad) .. " v "
+
+    if dd.open then
+        self:text(x, y, sDisp, self:c("input_afg"), self:c("input_abg"))
+    else
+        if self:button(sId .. "_t", x, y, sDisp,
+            self:c("input_fg"), self:c("input_bg"),
+            self:c("input_afg"), self:c("input_abg")) then
+            dd.open = true; dd.sel = nCurrentIdx; dd.off = 0
+        end
+    end
+
+    if not dd.open then return nil end
+
+    -- ---- Popup geometry ----
+    local nVis = math.min(#tOptions, 6)
+    local popY = y + 1
+    if popY + nVis > self.H then popY = y - nVis end
+    if popY < 1 then popY = 1 end
+
+    -- ---- Mouse click on popup item or outside ----
+    if self._mouseClicked then
+        local mx, my = self._mouseX, self._mouseY
+        if mx and mx >= x and mx < x + w and my >= popY and my < popY + nVis then
+            -- Click inside popup → select item
+            local nItem = dd.off + (my - popY) + 1
+            if nItem >= 1 and nItem <= #tOptions then
+                dd.open = false; self._mouseClicked = false
+                return nItem
+            end
+        elseif mx and mx >= x and mx < x + w and my == y then
+            -- Click on trigger → toggle close
+            dd.open = false; self._mouseClicked = false
+            return nil
+        else
+            -- Click outside → close
+            dd.open = false; self._mouseClicked = false
+            return nil
+        end
+    end
+
+    -- ---- Scroll wheel inside popup ----
+    if self._scrollDelta then
+        local sx, sy = self._scrollX, self._scrollY
+        if sx and sx >= x and sx < x + w and sy >= popY and sy < popY + nVis then
+            if self._scrollDelta < 0 then
+                dd.sel = math.max(1, dd.sel - 1)
+            else
+                dd.sel = math.min(#tOptions, dd.sel + 1)
+            end
+            self._scrollDelta = nil
+        end
+    end
+
+    -- ---- Keyboard navigation ----
+    local k = self._key
+    if k then
+        if k == "\27[A" then
+            dd.sel = math.max(1, dd.sel - 1); self._key = nil
+        elseif k == "\27[B" then
+            dd.sel = math.min(#tOptions, dd.sel + 1); self._key = nil
+        elseif k == "\n" then
+            dd.open = false; self._key = nil; self._act = false
+            return dd.sel
+        elseif k == "\t" or k == "\27[Z" then
+            dd.open = false; self._key = nil
+            return nil
+        end
+    end
+
+    -- ---- Scroll offset ----
+    if dd.sel < dd.off + 1 then dd.off = dd.sel - 1 end
+    if dd.sel > dd.off + nVis then dd.off = dd.sel - nVis end
+    if dd.off < 0 then dd.off = 0 end
+
+    -- ---- Defer popup rendering to endFrame (always on top) ----
+    self._pendingDropdown = {
+        x = x, y = popY, w = w,
+        options = tOptions,
+        sel = dd.sel, off = dd.off,
+        nVis = nVis,
+    }
+
+    return nil
+end
+
+-- =============================================
+-- COMMAND PALETTE
+-- Centered fuzzy-search popup with text input + filtered list.
+-- tCommands = {{id="quit", label="Quit App", shortcut="Q"}, ...}
+-- Returns: command id string, false (cancelled), or nil (still open).
+-- =============================================
+
+function XE._M:commandPalette(sId, tCommands)
+    local nMW = math.min(50, self.W - 4)
+    local nMH = math.min(14, self.H - 4)
+    local nMX = math.floor((self.W - nMW) / 2) + 1
+    local nMY = 3  -- near top, like VS Code
+
+    if not self._modals[sId] then
+        self:openModal(sId, {
+            x = nMX, y = nMY, w = nMW, h = nMH,
+            title = "Commands", backdrop = "solid",
+        })
+        self._palette = {filter = "", commands = tCommands, filtered = tCommands}
+    end
+
+    local bVis, cx, cy, cw, ch = self:beginModal(sId)
+    if not bVis then
+        local r = self:modalResult(sId)
+        self._palette = nil
+        return r
+    end
+
+    local tM = self._modals[sId]
+    local mx, my = tM.x, tM.y
+    local pal = self._palette
+
+    -- Search input
+    local sFilter, bChanged, bSubmit = self:textInput(
+        sId .. "_search", mx + 2, cy, nMW - 4, pal.filter)
+
+    if bChanged then
+        pal.filter = sFilter
+        -- Fuzzy filter: case-insensitive substring match
+        local sLow = sFilter:lower()
+        pal.filtered = {}
+        if #sLow == 0 then
+            pal.filtered = pal.commands
+        else
+            for _, cmd in ipairs(pal.commands) do
+                if cmd.label:lower():find(sLow, 1, true)
+                   or cmd.id:lower():find(sLow, 1, true) then
+                    pal.filtered[#pal.filtered + 1] = cmd
+                end
+            end
+        end
+        -- Reset scroll position
+        self._scrollState[sId .. "_list"] = {off = 0, sel = 1}
+    end
+
+    -- Separator
+    self:text(mx + 1, cy + 1,
+        string.rep("-", nMW - 2), self:c("border"), tM.bodyBg)
+
+    -- Filtered command list
+    local tF = pal.filtered
+    local nListH = ch - 3
+    if nListH < 1 then nListH = 1 end
+
+    local first, last, sel, scW, bAct = self:beginScroll(
+        sId .. "_list", mx + 2, cy + 2, nMW - 4, nListH, #tF)
+
+    for i = first, last do
+        local ry = cy + 2 + (i - first)
+        local bSel = (i == sel)
+        local cmd = tF[i]
+        if cmd then
+            local sLabel = cmd.label or cmd.id
+            local sShort = cmd.shortcut or ""
+            local nLabelW = scW - #sShort - 1
+            if #sLabel > nLabelW then sLabel = sLabel:sub(1, nLabelW - 2) .. ".." end
+
+            local sFg = bSel and self:c("sel_fg") or self:c("fg")
+            local sBg = bSel and self:c("sel_bg") or tM.bodyBg
+            self:textPad(mx + 2, ry, nLabelW, sLabel, sFg, sBg)
+            if #sShort > 0 then
+                self:text(mx + 2 + nLabelW, ry, sShort, self:c("dim"), sBg)
+            end
+        end
+    end
+    self:endScroll()
+
+    -- Submit on Enter (from input or list)
+    if (bSubmit or bAct) and #tF > 0 then
+        local cmd = tF[sel]
+        if cmd then self:closeModal(cmd.id) end
+    end
+
+    -- Item count
+    self:textf(mx + 2, cy + ch - 1, self:c("dim"), tM.bodyBg,
+        "%d/%d", #tF, #pal.commands)
+
+    self:endModal()
+
+    local r = self:modalResult(sId)
+    if r ~= nil then self._palette = nil end
+    return r
 end
 
 return XE

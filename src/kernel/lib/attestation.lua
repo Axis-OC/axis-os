@@ -1,223 +1,273 @@
 -- /lib/attestation.lua
--- Machine Remote Attestation for AxisOS
--- Proves to the cloud that THIS specific machine is running
--- unmodified software on genuine hardware.
+-- Machine Remote Attestation Client
+-- Talks to pki.axis-os.ru/api/attest.php
 
-local crypto = require("crypto")
-local http = require("http")
+local component = require("component")
+local computer   = require("computer")
+local serial     = require("serialization")
+local fs         = require("filesystem")
+
+local oCrypto = require("crypto")
 
 local oAttest = {}
 
-local ATTEST_URL = "https://pki.axis-os.ru/api/attest.php"
+-- ══════════════════════════════════════════
+--  MACHINE BINDING (hardware fingerprint)
+-- ══════════════════════════════════════════
+function oAttest.computeBinding()
+    -- Deterministic fingerprint from hardware components
+    local parts = {}
+    parts[#parts+1] = computer.address()
 
---[[
-  ATTESTATION FLOW:
-  
-  1. Machine → Cloud:  "I am machine X, give me a challenge"
-  2. Cloud → Machine:  nonce (random 32 bytes, valid for 30 seconds)
-  3. Machine:
-     a) Collects: machine_binding, kernel_hash, component_list
-     b) Signs: SHA256(nonce .. binding .. kernel_hash .. components)
-     c) Signs with data card's ECDSA private key
-  4. Machine → Cloud:  {signed_attestation, public_key, component_data}
-  5. Cloud:
-     a) Verify nonce is fresh
-     b) Verify ECDSA signature with registered public key
-     c) Compare kernel_hash with expected (from PKI database)
-     d) Compare binding with registered machine
-  6. Cloud → Machine:  {status: "attested", token: "session_token"}
-  
-  The session_token can then be used for:
-  - Driver downloads
-  - CRL updates
-  - Telemetry submission
-  - Certificate renewal
-]]
+    -- Add all component addresses for stronger binding
+    for addr, ctype in component.list() do
+        parts[#parts+1] = addr .. ":" .. ctype
+    end
+    table.sort(parts) -- deterministic order
 
-function oAttest.CollectEvidence()
-    -- Gather all measurable system state
-    local bOk, nTier = crypto.Init()
-    if not bOk then return nil, "No data card" end
-    
-    local evidence = {
-        timestamp = os.clock(),
+    local raw = table.concat(parts, "|")
+    local dataCard = component.data
+    if dataCard and dataCard.sha256 then
+        return oCrypto.Hash(raw) -- SHA-256 of all hardware
+    end
+    -- Fallback: just use computer address
+    return computer.address()
+end
+
+-- ══════════════════════════════════════════
+--  KERNEL HASH
+-- ══════════════════════════════════════════
+function oAttest.hashKernel(sKernelPath)
+    sKernelPath = sKernelPath or "/init.lua"
+    local f = io.open(sKernelPath, "r")
+    if not f then return nil, "Cannot read kernel: " .. sKernelPath end
+    local data = f:read("*a")
+    f:close()
+    return oCrypto.Hash(data)
+end
+
+-- ══════════════════════════════════════════
+--  MANIFEST (hash all critical files)
+-- ══════════════════════════════════════════
+function oAttest.generateManifest(tPaths)
+    -- Default critical paths if none specified
+    tPaths = tPaths or {
+        "/init.lua",
+        "/lib/crypto.lua",
+        "/lib/attestation.lua",
+        "/lib/dkms_sec.lua",
+        "/usr/commands/sign.lua",
+        "/usr/commands/secureboot.lua",
+        "/etc/pki.cfg",
     }
-    
-    -- Machine binding (from boot_security if available)
-    if _G.boot_security then
-        evidence.machine_binding = _G.boot_security.machine_binding
-        evidence.kernel_hash = _G.boot_security.kernel_hash
-        evidence.data_card_addr = _G.boot_security.data_card_addr
-        evidence.sealed = _G.boot_security.sealed
-        evidence.verified = _G.boot_security.verified
-    end
-    
-    -- Component inventory
-    local tComponents = {}
-    local bListOk, tList = pcall(function()
-        local t = {}
-        for addr, ctype in component.list() do
-            t[addr] = ctype
-        end
-        return t
-    end)
-    if bListOk and tList then
-        for addr, ctype in pairs(tList) do
-            tComponents[#tComponents+1] = ctype .. ":" .. addr:sub(1,8)
-        end
-        table.sort(tComponents)
-    end
-    evidence.components = table.concat(tComponents, ",")
-    
-    -- Compute evidence hash
-    local sEvidenceString = (evidence.machine_binding or "UNKNOWN") ..
-                            (evidence.kernel_hash or "UNKNOWN") ..
-                            evidence.components
-    evidence.evidence_hash = crypto.Encode64(crypto.SHA256(sEvidenceString))
-    
-    return evidence
-end
 
-function oAttest.RequestChallenge(sMachineId)
-    local resp = http.post(ATTEST_URL,
-        '{"action":"challenge","machine_id":"' .. (sMachineId or "unknown") .. '"}',
-        {["Content-Type"] = "application/json"})
-    
-    if resp.code == 200 and resp.body then
-        local nonce = resp.body:match('"nonce"%s*:%s*"([^"]+)"')
-        local challenge_id = resp.body:match('"challenge_id"%s*:%s*"([^"]+)"')
-        return nonce, challenge_id
-    end
-    return nil, "Challenge request failed"
-end
+    local manifest = {
+        version = 1,
+        timestamp = os.time(),
+        machine = computer.address(),
+        files = {}
+    }
 
-function oAttest.Attest(sApiToken)
-    if not sApiToken then
-        -- Try loading from config
-        local pki = require("pki_client")
-        pki.LoadConfig()
-    end
-    
-    -- Step 1: Collect evidence
-    local evidence, sErr = oAttest.CollectEvidence()
-    if not evidence then return nil, sErr end
-    
-    -- Step 2: Get challenge from cloud
-    local sNonce, sChallengeId = oAttest.RequestChallenge(
-        evidence.machine_binding or "new")
-    if not sNonce then return nil, "No challenge: " .. tostring(sChallengeId) end
-    
-    -- Step 3: Sign the evidence + nonce
-    local sPayload = sNonce ..
-                     (evidence.machine_binding or "") ..
-                     (evidence.kernel_hash or "") ..
-                     evidence.components
-    
-    local nTier = crypto.GetTier()
-    local sSigB64 = "UNSIGNED"
-    local sPubKeyB64 = ""
-    
-    if nTier >= 3 then
-        -- Load machine signing key
-        local fs = require("filesystem")
-        local hPriv = fs.open("/etc/signing/private.key", "r")
-        local hPub = fs.open("/etc/signing/public.key", "r")
-        
-        if hPriv and hPub then
-            local sPriv = fs.read(hPriv, math.huge)
-            sPubKeyB64 = fs.read(hPub, math.huge)
-            fs.close(hPriv)
-            fs.close(hPub)
-            
-            local oPrivKey = crypto.DeserializeKey(sPriv, "ec-private")
-            if oPrivKey then
-                local sSig = crypto.Sign(sPayload, oPrivKey)
-                sSigB64 = crypto.Encode64(sSig)
+    for _, path in ipairs(tPaths) do
+        if fs.exists(path) then
+            local f = io.open(path, "r")
+            if f then
+                local data = f:read("*a")
+                f:close()
+                manifest.files[path] = {
+                    hash = oCrypto.Hash(data),
+                    size = #data
+                }
             end
         end
     end
-    
-    -- Step 4: Submit attestation
-    local sBody = string.format(
-        '{"action":"attest","challenge_id":"%s","nonce":"%s",' ..
-        '"signature":"%s","public_key":"%s",' ..
-        '"machine_binding":"%s","kernel_hash":"%s",' ..
-        '"components":"%s","sealed":%s,"verified":%s}',
-        sChallengeId, sNonce, sSigB64, sPubKeyB64,
-        evidence.machine_binding or "UNKNOWN",
-        evidence.kernel_hash or "UNKNOWN",
-        evidence.components,
-        evidence.sealed and "true" or "false",
-        evidence.verified and "true" or "false"
-    )
-    
-    local resp = http.post(ATTEST_URL, sBody,
-        {["Content-Type"] = "application/json",
-         ["X-API-Token"] = sApiToken or ""})
-    
-    if resp.code == 200 and resp.body then
-        local status = resp.body:match('"status"%s*:%s*"([^"]+)"')
-        local token = resp.body:match('"session_token"%s*:%s*"([^"]+)"')
-        
-        if status == "attested" then
-            return {
-                status = "attested",
-                session_token = token,
-                evidence = evidence
-            }
-        end
-        return nil, "Attestation rejected: " .. (status or "unknown")
-    end
-    
-    return nil, "Attestation HTTP failed: " .. resp.code
+
+    return manifest
 end
 
--- Runtime integrity check — can be called periodically
-function oAttest.VerifyRuntime()
-    local fs = require("filesystem")
-    local bOk = crypto.Init()
-    if not bOk then return false, "No crypto" end
-    
-    local tResults = {}
-    
-    -- Re-hash kernel
-    local sKernHash = crypto.HashFile("/kernel.lua", nil)
-    if _G.boot_security and _G.boot_security.kernel_hash then
-        if crypto.Encode64(sKernHash) ~= _G.boot_security.kernel_hash then
-            tResults.kernel_modified = true
-        end
-    end
-    
-    -- Check manifest
-    local hMan = fs.open("/boot/manifest.sig", "r")
-    if hMan then
-        local sManifest = fs.read(hMan, math.huge)
-        fs.close(hMan)
-        local sData = sManifest:match("^(.-)%-%-@MANIFEST_SIG") or sManifest
-        local fParse = load(sData:gsub("%s+$", ""), "manifest", "t", {})
-        if fParse then
-            local tManifest = fParse()
-            local nModified = 0
-            for _, entry in ipairs(tManifest) do
-                local h = fs.open(entry.path, "r")
-                if h then
-                    local d = fs.read(h, math.huge)
-                    fs.close(h)
-                    local sHash = crypto.Encode64(crypto.SHA256(d))
-                    if sHash ~= entry.hash then
-                        nModified = nModified + 1
-                        tResults[entry.path] = "modified"
-                    end
+function oAttest.saveManifest(manifest, sPath)
+    sPath = sPath or "/etc/manifest.dat"
+    local f = io.open(sPath, "w")
+    if not f then return false, "Cannot write " .. sPath end
+    f:write(serial.serialize(manifest))
+    f:close()
+    return true
+end
+
+function oAttest.loadManifest(sPath)
+    sPath = sPath or "/etc/manifest.dat"
+    local f = io.open(sPath, "r")
+    if not f then return nil end
+    local data = f:read("*a")
+    f:close()
+    return serial.unserialize(data)
+end
+
+function oAttest.verifyManifest(manifest)
+    if not manifest or not manifest.files then return false, "No manifest" end
+    local failures = {}
+
+    for path, info in pairs(manifest.files) do
+        if not fs.exists(path) then
+            failures[#failures+1] = {path = path, reason = "MISSING"}
+        else
+            local f = io.open(path, "r")
+            if f then
+                local data = f:read("*a")
+                f:close()
+                local currentHash = oCrypto.Hash(data)
+                if currentHash ~= info.hash then
+                    failures[#failures+1] = {
+                        path = path,
+                        reason = "MODIFIED",
+                        expected = info.hash:sub(1,16),
+                        actual = currentHash:sub(1,16)
+                    }
                 end
             end
-            tResults.files_modified = nModified
         end
     end
-    
-    local bClean = not tResults.kernel_modified and
-                   (tResults.files_modified or 0) == 0
-    
-    return bClean, tResults
+
+    if #failures > 0 then
+        return false, failures
+    end
+    return true
+end
+
+-- ══════════════════════════════════════════
+--  REMOTE ATTESTATION (talk to server)
+-- ══════════════════════════════════════════
+function oAttest.attest(oPkiCfg)
+    local inet = component.internet
+    if not inet then return nil, "No internet card" end
+
+    local baseUrl = oPkiCfg.pki_url or "https://pki.axis-os.ru/api"
+    local attestUrl = baseUrl .. "/attest.php"
+
+    -- Step 1: Get challenge
+    local challengeBody = '{"action":"challenge","machine_id":"' .. computer.address() .. '"}'
+
+    local handle = inet.request(attestUrl, challengeBody, {
+        ["Content-Type"] = "application/json"
+    })
+    if not handle then return nil, "Connection failed" end
+
+    -- Read response (with timeout)
+    local resp = ""
+    local deadline = computer.uptime() + 10
+    while true do
+        local chunk = handle.read()
+        if chunk then
+            resp = resp .. chunk
+        elseif chunk == nil then
+            break -- EOF
+        end
+        if computer.uptime() > deadline then
+            handle.close()
+            return nil, "Timeout on challenge"
+        end
+        os.sleep(0.05)
+    end
+    handle.close()
+
+    local challenge = serial.unserialize(resp)
+        or require("json") and require("json").decode(resp)
+    if not challenge or not challenge.nonce then
+        return nil, "Invalid challenge response: " .. resp:sub(1, 100)
+    end
+
+    -- Step 2: Compute attestation data
+    local binding = oAttest.computeBinding()
+    local kernelHash = oAttest.hashKernel(oPkiCfg.kernel_path or "/init.lua")
+
+    -- Load our keys
+    local privKeyB64 = oCrypto.LoadKey("/etc/signing/private.key")
+    local pubKeyB64  = oCrypto.LoadKey("/etc/signing/public.key")
+    if not privKeyB64 then return nil, "No signing keys — run: sign -g" end
+
+    local privKey = oCrypto.DeserializeKey(privKeyB64, "ec-private")
+    if not privKey then return nil, "Failed to deserialize private key" end
+
+    -- Sign the nonce
+    local sig = oCrypto.Sign(privKey, challenge.nonce)
+    if not sig then return nil, "Signing failed" end
+
+    -- Check manifest integrity
+    local manifest = oAttest.loadManifest()
+    local sealed = (manifest ~= nil)
+    local verified = false
+    if sealed then
+        verified = oAttest.verifyManifest(manifest)
+    end
+
+    -- Step 3: Send attestation
+    -- Need to build JSON manually (no json.encode available everywhere)
+    local attestBody = string.format(
+        '{"action":"attest","challenge_id":"%s","nonce":"%s",' ..
+        '"machine_binding":"%s","kernel_hash":"%s",' ..
+        '"public_key":"%s","signature":"%s",' ..
+        '"sealed":%s,"verified":%s}',
+        challenge.challenge_id,
+        challenge.nonce,
+        binding,
+        kernelHash or "unknown",
+        pubKeyB64 or "",
+        sig or "",
+        tostring(sealed),
+        tostring(verified)
+    )
+
+    local handle2 = inet.request(attestUrl, attestBody, {
+        ["Content-Type"] = "application/json"
+    })
+    if not handle2 then return nil, "Attestation request failed" end
+
+    local resp2 = ""
+    deadline = computer.uptime() + 10
+    while true do
+        local chunk = handle2.read()
+        if chunk then resp2 = resp2 .. chunk
+        elseif chunk == nil then break end
+        if computer.uptime() > deadline then handle2.close(); return nil, "Timeout" end
+        os.sleep(0.05)
+    end
+    handle2.close()
+
+    -- Parse result
+    -- Try json decode or serialization.unserialize
+    local result
+    local jOk, json = pcall(require, "json")
+    if jOk and json.decode then
+        result = json.decode(resp2)
+    else
+        -- Ghetto JSON parse for simple response
+        result = {}
+        result.status = resp2:match('"status"%s*:%s*"([^"]+)"')
+        result.session_token = resp2:match('"session_token"%s*:%s*"([^"]+)"')
+        result.trust_level = resp2:match('"trust_level"%s*:%s*"([^"]+)"')
+        result.reason = resp2:match('"reason"%s*:%s*"([^"]+)"')
+    end
+
+    return result
+end
+
+-- ══════════════════════════════════════════
+--  SAVE/LOAD ATTESTATION STATE
+-- ══════════════════════════════════════════
+function oAttest.saveState(tState)
+    local f = io.open("/etc/attestation.state", "w")
+    if not f then return false end
+    f:write(serial.serialize(tState))
+    f:close()
+    return true
+end
+
+function oAttest.loadState()
+    local f = io.open("/etc/attestation.state", "r")
+    if not f then return nil end
+    local data = f:read("*a")
+    f:close()
+    return serial.unserialize(data)
 end
 
 return oAttest

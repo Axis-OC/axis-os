@@ -33,34 +33,45 @@ end
 -- === GENERATE KEY PAIR ===
 if tArgs[1] == "-g" or tArgs[1] == "--generate" then
     print(C.CYN .. "Generating ECDSA-384 key pair..." .. C.R)
-    
+
     local oPub, oPriv = crypto.GenerateKeyPair(384)
     if not oPub or not oPriv then
         print(C.RED .. "Key generation failed!" .. C.R)
         return
     end
-    
+
+    -- Serialize keys (may fail if data card lacks serialize support)
+    local sPrivB64, sPrivErr = crypto.SerializeKey(oPriv)
+    local sPubB64, sPubErr   = crypto.SerializeKey(oPub)
+
+    if not sPrivB64 or not sPubB64 then
+        print(C.RED .. "Key serialization failed!" .. C.R)
+        print(C.RED .. "  " .. tostring(sPrivErr or sPubErr) .. C.R)
+        print(C.YLW .. "  Your data card does not support key persistence." .. C.R)
+        print(C.YLW .. "  ECDSA signing requires a data card with serialize/deserializeKey." .. C.R)
+        return
+    end
+
     -- Create directory
     fs.mkdir(KEY_DIR)
-    
+
     -- Save private key
     local hPriv = fs.open(PRIV_KEY_FILE, "w")
     if hPriv then
-        fs.write(hPriv, crypto.SerializeKey(oPriv))
+        fs.write(hPriv, sPrivB64)
         fs.close(hPriv)
         fs.chmod(PRIV_KEY_FILE, 600)  -- owner-only
         print(C.GRN .. "[OK]" .. C.R .. " Private key: " .. PRIV_KEY_FILE)
     end
-    
+
     -- Save public key
-    local sPubB64 = crypto.SerializeKey(oPub)
     local hPub = fs.open(PUB_KEY_FILE, "w")
     if hPub then
         fs.write(hPub, sPubB64)
         fs.close(hPub)
         print(C.GRN .. "[OK]" .. C.R .. " Public key:  " .. PUB_KEY_FILE)
     end
-    
+
     -- Show fingerprint
     local sFp = crypto.Encode64(crypto.SHA256(sPubB64))
     print("")
@@ -143,6 +154,10 @@ end
 local sPrivB64 = fs.read(hPriv, math.huge)
 fs.close(hPriv)
 local oPrivKey = crypto.DeserializeKey(sPrivB64, "ec-private")
+if not oPrivKey then
+    print(C.RED .. "Cannot load private key (format incompatible or data card lacks deserializeKey)." .. C.R)
+    return
+end
 
 -- Load public key for fingerprint
 local hPub = fs.open(PUB_KEY_FILE, "r")
@@ -170,3 +185,4 @@ print(C.GRN .. "[SIGNED]" .. C.R .. " " .. sDriverPath)
 print("  Hash:    " .. sHash:sub(1, 16) .. "...")
 print("  Signer:  " .. sFingerprint:sub(1, 16) .. "...")
 print("  Sig:     " .. sSigB64:sub(1, 16) .. "...")
+

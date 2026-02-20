@@ -48,7 +48,7 @@ local g_tSchedStats = {
     nMaxSliceMs = 0
 }
 
-local WATCHDOG_WARN_THRESHOLD = 2.0 -- seconds — warn if a single resume exceeds this
+local WATCHDOG_WARN_THRESHOLD = 2.0 -- seconds warn if a single resume exceeds this
 local WATCHDOG_KILL_STRIKES = 3 -- kill after this many warnings
 
 -- Object Manager (loaded at boot from /lib/ob_manager.lua)
@@ -537,7 +537,7 @@ kprint("none", "")
 local g_oPrimitiveFs
 
 if _G.boot_fs_type == "axfs" then
-    -- Booted from AXFS — create minimal volume reader
+    -- Booted from AXFS create minimal volume reader
     -- Load bpack inline (can't require yet)
     local function r16(s, o)
         return s:byte(o) * 256 + s:byte(o + 1)
@@ -1005,22 +1005,22 @@ function kernel.create_sandbox(nPid, nRing)
     --
     -- Three layers (checked in order by __index):
     --
-    --   1. tProtected   — kernel-owned, IMMUTABLE from user code
+    --   1. tProtected   kernel-owned, IMMUTABLE from user code
     --                     (__pc, syscall, load, require, print, io,
     --                      standard library names, etc.)
     --
-    --   2. tUserGlobals — user-writable globals
+    --   2. tUserGlobals user-writable globals
     --                     (anything user code assigns goes here;
     --                      writes to protected names are silently
     --                      dropped)
     --
-    --   3. tSafeGlobals — read-only platform APIs
+    --   3. tSafeGlobals read-only platform APIs
     --                     (computer, unicode, bit32; ring-gated)
     -- =========================================================
 
     local tProtected = {} -- immutable kernel symbols
     local tUserGlobals = {} -- user-writable globals
-    local tSandbox = {} -- EMPTY proxy — MUST never gain direct keys
+    local tSandbox = {} -- EMPTY proxy MUST never gain direct keys
 
     local tSafeComputer = {
         uptime = computer.uptime,
@@ -1043,7 +1043,7 @@ function kernel.create_sandbox(nPid, nRing)
     -- LAYER 1: Protected kernel symbols
     -- =============================================
 
-    -- Standard Lua (safe subset — NO rawset, rawget, debug)
+    -- Standard Lua (safe subset NO rawset, rawget, debug)
     tProtected.assert = assert
     tProtected.error = error
     tProtected.next = next
@@ -1150,7 +1150,7 @@ function kernel.create_sandbox(nPid, nRing)
         -- [FIX] Sub-coroutine depth tracking.
         -- When user code creates coroutines via coroutine.create/wrap and
         -- resumes them, __pc() inside that sub-coroutine can only yield
-        -- the sub-coroutine — not the process.  Without depth tracking,
+        -- the sub-coroutine not the process.  Without depth tracking,
         -- an attacker can nest coroutine.resume inside a loop and
         -- amplify the checkpoint interval (inner runs N iters, outer
         -- runs N iters → N² iterations before the process yields).
@@ -1339,7 +1339,7 @@ function kernel.create_sandbox(nPid, nRing)
     -- Ring 2.5, 3: NO rawset, rawget, debug, raw_component, raw_computer
 
     -- =============================================
-    -- METATABLE — the core of the protection
+    -- METATABLE the core of the protection
     -- =============================================
 
     -- Fast-lookup set of all protected key names
@@ -1424,7 +1424,7 @@ function kernel.create_process(sPath, nRing, nParentPid, tPassEnv)
             kprint("dev", string.format("Preempt: %s → %d yield checkpoints injected", sPath, nInjections))
             sCode = sInstrumented
         else
-            kprint("dev", "Preempt: " .. sPath .. " — no loops/branches to instrument")
+            kprint("dev", "Preempt: " .. sPath .. " no loops/branches to instrument")
         end
     end
 
@@ -2019,7 +2019,7 @@ kernel.tSyscallTable["process_get_uid"] = {
 }
 
 -- ==========================================
--- OBJECT HANDLE SYSCALLS (Ring 1 — used by PM)
+-- OBJECT HANDLE SYSCALLS (Ring 1 used by PM)
 -- ==========================================
 
 kernel.tSyscallTable["ob_create_object"] = {
@@ -3137,7 +3137,7 @@ if g_oPreempt then
     kprint("ok", string.format("Preemptive scheduler active  (quantum=%dms, interval=%d, no debug hooks)",
         g_oPreempt.DEFAULT_QUANTUM * 1000, g_oPreempt.CHECK_INTERVAL))
 else
-    kprint("warn", "Preemptive scheduling unavailable — cooperative only.")
+    kprint("warn", "Preemptive scheduling unavailable cooperative only.")
 end
 
 -- Load Kernel IPC subsystem
@@ -3247,7 +3247,7 @@ kprint("none", "")
 table.insert(kernel.tProcessTable[nPipelinePid].run_queue, "start")
 
 -- =================================================================
--- MAIN KERNEL EVENT LOOP  —  Preemptive Round-Robin Scheduler
+-- MAIN KERNEL EVENT LOOP   Preemptive Round-Robin Scheduler
 --
 -- Key changes from cooperative-only:
 --
@@ -3340,7 +3340,7 @@ while true do
                         tProcess.nWatchdogStrikes, WATCHDOG_KILL_STRIKES))
                 if tProcess.nWatchdogStrikes >= WATCHDOG_KILL_STRIKES then
                     kprint("fail",
-                        "WATCHDOG: Killing PID " .. nPid .. " — exceeded " .. WATCHDOG_KILL_STRIKES .. " strikes")
+                        "WATCHDOG: Killing PID " .. nPid .. " exceeded " .. WATCHDOG_KILL_STRIKES .. " strikes")
                     tProcess.status = "dead"
                     g_tSchedStats.nWatchdogKills = g_tSchedStats.nWatchdogKills + 1
                 end

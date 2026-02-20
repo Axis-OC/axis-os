@@ -911,6 +911,12 @@ local function processKeyCooked(ext, ch, code)
         -- TAB
         -- =============================================
     elseif code == 15 then
+        if fIsShiftHeld(ext) then
+            sResult = "\27[Z" -- Shift+Tab (standard CSI encoding)
+        else
+            sResult = "\t" -- Tab
+        end
+
         fSelClear(ext)
         local nToEnd = #sBuf - nCur
         if nToEnd > 0 then
@@ -1071,7 +1077,14 @@ local function fRead(d, i)
         return
     end
 
-    -- NON-BLOCKING: return nil immediately if no buffered keys
+    -- Event buffer first (mouse, touch events encoded as strings)
+    if p.tEventBuffer and #p.tEventBuffer > 0 then
+        local sEvt = table.remove(p.tEventBuffer, 1)
+        oKMD.DkCompleteRequest(i, 0, sEvt)
+        return
+    end
+
+    -- Non-blocking: return nil if nothing buffered
     if p.bNonBlock then
         if not p.tKeyBuffer or #p.tKeyBuffer == 0 then
             oKMD.DkCompleteRequest(i, 0, nil)
@@ -1358,6 +1371,8 @@ function DriverEntry(pObj)
     dev.pDeviceExtension.tKeyBuffer = {}
     dev.pDeviceExtension.sLineBuffer = ""
     dev.pDeviceExtension.sMode = "cooked"
+    dev.pDeviceExtension.bNonBlock = false
+    dev.pDeviceExtension.tEventBuffer = {}
 
     if gpu then
         local _, p = oKMD.DkGetHardwareProxy(gpu)
@@ -1403,6 +1418,8 @@ function DriverEntry(pObj)
     oKMD.DkRegisterInterrupt("key_down")
     oKMD.DkRegisterInterrupt("scroll")
     oKMD.DkRegisterInterrupt("clipboard")
+    oKMD.DkRegisterInterrupt("touch") -- ADD
+    oKMD.DkRegisterInterrupt("drag") -- ADD
     return 0
 end
 
@@ -1492,11 +1509,69 @@ while true do
             end
         elseif sig == "hardware_interrupt" and p1 == "scroll" then
             local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
-            if ext and type(p2) == "number" then
-                if p2 > 0 then
-                    fScrollUp(ext, SCROLL_WHEEL_STEP)
+            if ext then
+                -- p2=direction, p3=x, p4=y
+                local nDir = type(p2) == "number" and p2 or 0
+                if ext.sMode == "raw" then
+                    -- Encode as SGR mouse: button 64=up, 65=down
+                    local nBtn = nDir > 0 and 64 or 65
+                    local nX = math.floor(tonumber(p3) or 1)
+                    local nY = math.floor(tonumber(p4) or 1)
+                    local sEvt = "\27[<" .. nBtn .. ";" .. nX .. ";" .. nY .. "M"
+                    if not ext.tEventBuffer then
+                        ext.tEventBuffer = {}
+                    end
+                    if ext.pPendingReadIrp then
+                        local pIrp = ext.pPendingReadIrp
+                        ext.pPendingReadIrp = nil
+                        oKMD.DkCompleteRequest(pIrp, 0, sEvt)
+                    else
+                        table.insert(ext.tEventBuffer, sEvt)
+                    end
                 else
-                    fScrollDown(ext, SCROLL_WHEEL_STEP)
+                    if nDir > 0 then
+                        fScrollUp(ext, SCROLL_WHEEL_STEP)
+                    else
+                        fScrollDown(ext, SCROLL_WHEEL_STEP)
+                    end
+                end
+            end
+        elseif sig == "hardware_interrupt" and p1 == "touch" then
+            local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
+            if ext and ext.sMode == "raw" then
+                -- p2=x, p3=y, p4=button (0=left, 1=right)
+                local nX = math.floor(tonumber(p2) or 1)
+                local nY = math.floor(tonumber(p3) or 1)
+                local nBtn = tonumber(p4) or 0
+                local sEvt = "\27[<" .. nBtn .. ";" .. nX .. ";" .. nY .. "M"
+                if not ext.tEventBuffer then
+                    ext.tEventBuffer = {}
+                end
+                if ext.pPendingReadIrp then
+                    local pIrp = ext.pPendingReadIrp
+                    ext.pPendingReadIrp = nil
+                    oKMD.DkCompleteRequest(pIrp, 0, sEvt)
+                else
+                    table.insert(ext.tEventBuffer, sEvt)
+                end
+            end
+
+        elseif sig == "hardware_interrupt" and p1 == "drag" then
+            local ext = g_pDeviceObject and g_pDeviceObject.pDeviceExtension
+            if ext and ext.sMode == "raw" then
+                local nX = math.floor(tonumber(p2) or 1)
+                local nY = math.floor(tonumber(p3) or 1)
+                local nBtn = 32 + (tonumber(p4) or 0) -- SGR: 32+ = motion
+                local sEvt = "\27[<" .. nBtn .. ";" .. nX .. ";" .. nY .. "M"
+                if not ext.tEventBuffer then
+                    ext.tEventBuffer = {}
+                end
+                if ext.pPendingReadIrp then
+                    local pIrp = ext.pPendingReadIrp
+                    ext.pPendingReadIrp = nil
+                    oKMD.DkCompleteRequest(pIrp, 0, sEvt)
+                else
+                    table.insert(ext.tEventBuffer, sEvt)
                 end
             end
 

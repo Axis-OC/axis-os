@@ -102,15 +102,40 @@ function oCrypto.Verify(sData, sSignature, oPublicKey)
     return g_oDataCard.ecdsa(sData, oPublicKey, sSignature)
 end
 
--- Key serialization (data card encode/decode)
+-- Key serialization
 function oCrypto.SerializeKey(oKey)
-    if not g_oDataCard then return nil end
-    return g_oDataCard.encode64(g_oDataCard.serialize(oKey))
+    if not g_oDataCard then return nil, "No data card" end
+    if not oKey then return nil, "No key" end
+
+    -- OC key userdata has a .serialize() method that returns binary key data.
+    -- This is NOT data.serialize() — it lives on the key object itself.
+    local bOk, sRaw = pcall(function()
+        if oKey.serialize then return oKey.serialize() end
+        return nil
+    end)
+
+    if bOk and type(sRaw) == "string" and #sRaw > 0 then
+        return g_oDataCard.encode64(sRaw)
+    end
+
+    return nil, "key.serialize() failed — your data card keys may not support persistence"
 end
 
 function oCrypto.DeserializeKey(sB64, sType)
     if not g_oDataCard then return nil end
-    return g_oDataCard.deserialize(g_oDataCard.decode64(sB64), sType)
+    if not sB64 or #sB64 == 0 then return nil end
+
+    local bDecOk, sRaw = pcall(g_oDataCard.decode64, sB64)
+    if not bDecOk or not sRaw then return nil, "Base64 decode failed" end
+
+    -- data.deserializeKey() lives on the DATA CARD, not the key object
+    if type(g_oDataCard.deserializeKey) == "function" then
+        local bOk, oKey = pcall(g_oDataCard.deserializeKey, sRaw, sType or "ec-public")
+        if bOk and oKey then return oKey end
+        return nil, "deserializeKey failed: " .. tostring(oKey)
+    end
+
+    return nil, "Data card lacks deserializeKey()"
 end
 
 return oCrypto   -- ← THIS WAS MISSING
