@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.35
+-- AxisOS Xen XKA v0.4-beta
 --
 local kernel = {
     tProcessTable = {},
@@ -3104,6 +3104,84 @@ kernel.tSyscallTable["computer_reboot"] = {
         raw_computer.shutdown(true)
     end,
     allowed_rings = {0, 1, 2, 2.5}
+}
+
+-- ==========================================
+-- EEPROM DATA ACCESS (for secureboot attestation)
+-- ==========================================
+
+kernel.tSyscallTable["eeprom_get_data"] = {
+    func = function(nPid)
+        local ep
+        for addr in raw_component.list("eeprom") do
+            ep = raw_component.proxy(addr); break
+        end
+        if not ep then return nil, "No EEPROM" end
+        return ep.getData()
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["eeprom_set_data"] = {
+    func = function(nPid, sData)
+        local tProc = kernel.tProcessTable[nPid]
+        if not tProc or (tProc.uid or 1000) ~= 0 then
+            return nil, "Permission denied: root required"
+        end
+        local ep
+        for addr in raw_component.list("eeprom") do
+            ep = raw_component.proxy(addr); break
+        end
+        if not ep then return nil, "No EEPROM" end
+        ep.setData(sData)
+        return true
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Compute machine binding using SAME formula as BIOS (dc+ep+fs addresses)
+kernel.tSyscallTable["secureboot_compute_binding"] = {
+    func = function(nPid)
+        local tProc = kernel.tProcessTable[nPid]
+        if not tProc or (tProc.uid or 1000) ~= 0 then
+            return nil, "Root required"
+        end
+        local dcAddr, epAddr, fsAddr = "", "", ""
+        for addr in raw_component.list("data") do dcAddr = addr; break end
+        for addr in raw_component.list("eeprom") do epAddr = addr; break end
+        for addr in raw_component.list("filesystem") do
+            local p = raw_component.proxy(addr)
+            if p and p.exists and p.exists("/kernel.lua") then fsAddr = addr; break end
+        end
+        if dcAddr == "" then return nil, "No data card" end
+        local dc = raw_component.proxy(dcAddr)
+        local sRaw = dc.sha256(dcAddr .. epAddr .. fsAddr)
+        local t = {}
+        for i = 1, #sRaw do t[i] = string.format("%02x", sRaw:byte(i)) end
+        return table.concat(t)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- Compute kernel hash using SAME formula as BIOS
+kernel.tSyscallTable["secureboot_compute_kernel_hash"] = {
+    func = function(nPid)
+        local tProc = kernel.tProcessTable[nPid]
+        if not tProc or (tProc.uid or 1000) ~= 0 then
+            return nil, "Root required"
+        end
+        local dcAddr = ""
+        for addr in raw_component.list("data") do dcAddr = addr; break end
+        if dcAddr == "" then return nil, "No data card" end
+        local dc = raw_component.proxy(dcAddr)
+        local kc = primitive_load("/kernel.lua")
+        if not kc then return nil, "Cannot read kernel" end
+        local sRaw = dc.sha256(kc)
+        local t = {}
+        for i = 1, #sRaw do t[i] = string.format("%02x", sRaw:byte(i)) end
+        return table.concat(t)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
 -------------------------------------------------

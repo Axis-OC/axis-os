@@ -55,10 +55,10 @@ while true do
  " / ___ \\ >  <| \\__ \\ |_| |___) |",
  "/_/   \\_/_/\\_\\_|___/\\___/|____/ ")
 
-  io.write("AxisOS v0.35\n")
+  io.write("AxisOS v0.4-beta\n")
   io.write("")
   io.write("\n________________________________________________\n\n")
-  io.write("XEN XKA v0.35 on " .. sHostname .. "\n\n")
+  io.write("XEN XKA v0.4-beta on " .. sHostname .. "\n\n")
   
   io.write(sHostname .. " login: ")   -- No buffering, appears immediately
   

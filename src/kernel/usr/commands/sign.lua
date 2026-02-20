@@ -158,7 +158,6 @@ if not oPrivKey then
     print(C.RED .. "Cannot load private key (format incompatible or data card lacks deserializeKey)." .. C.R)
     return
 end
-
 -- Load public key for fingerprint
 local hPub = fs.open(PUB_KEY_FILE, "r")
 local sPubB64 = hPub and fs.read(hPub, math.huge) or ""
@@ -169,6 +168,31 @@ local sFingerprint = crypto.Encode64(crypto.SHA256(sPubB64))
 local sHash = crypto.Encode64(crypto.SHA256(sCleanCode))
 local sSig = crypto.Sign(sCleanCode, oPrivKey)
 local sSigB64 = crypto.Encode64(sSig)
+
+
+-- Check approval status (non-blocking warning)
+local bApprovalChecked = false
+pcall(function()
+    local pki = require("pki_client")
+    if pki.LoadConfig() then
+        local hPubCheck = fs.open(PUB_KEY_FILE, "r")
+        if hPubCheck then
+            local sPubCheck = fs.read(hPubCheck, math.huge)
+            fs.close(hPubCheck)
+            if sPubCheck then
+                local sStatus = pki.CheckKeyStatus(sPubCheck)
+                bApprovalChecked = true
+                if sStatus ~= "approved" then
+                    print(C.YLW .. "WARNING: Key status is '" .. tostring(sStatus) .. "' (not approved)" .. C.R)
+                    print(C.YLW .. "  Signed files will be REJECTED by enforcement policy (level 2)." .. C.R)
+                    print(C.YLW .. "  Register with: sign -r    Then wait for admin approval." .. C.R)
+                    print("")
+                end
+            end
+        end
+    end
+end)
+
 
 -- Write signed file
 local hOut = fs.open(sDriverPath, "w")

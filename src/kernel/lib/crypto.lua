@@ -8,6 +8,14 @@ local g_oDataCard = nil
 local g_nTier = 0
 
 function oCrypto.Init()
+    -- If already initialized (e.g. by a Ring 1 process that loaded this
+    -- module first), return success immediately.  This prevents Ring 3
+    -- callers from clobbering g_oDataCard when component/raw_component
+    -- are unavailable in their sandbox.
+    if g_oDataCard and g_nTier > 0 then
+        return true, g_nTier
+    end
+
     local bOk, tList = pcall(function()
         local t = {}
         for addr, ctype in component.list("data") do t[addr] = ctype end
@@ -107,8 +115,6 @@ function oCrypto.SerializeKey(oKey)
     if not g_oDataCard then return nil, "No data card" end
     if not oKey then return nil, "No key" end
 
-    -- OC key userdata has a .serialize() method that returns binary key data.
-    -- This is NOT data.serialize() — it lives on the key object itself.
     local bOk, sRaw = pcall(function()
         if oKey.serialize then return oKey.serialize() end
         return nil
@@ -128,7 +134,6 @@ function oCrypto.DeserializeKey(sB64, sType)
     local bDecOk, sRaw = pcall(g_oDataCard.decode64, sB64)
     if not bDecOk or not sRaw then return nil, "Base64 decode failed" end
 
-    -- data.deserializeKey() lives on the DATA CARD, not the key object
     if type(g_oDataCard.deserializeKey) == "function" then
         local bOk, oKey = pcall(g_oDataCard.deserializeKey, sRaw, sType or "ec-public")
         if bOk and oKey then return oKey end
@@ -138,4 +143,4 @@ function oCrypto.DeserializeKey(sB64, sType)
     return nil, "Data card lacks deserializeKey()"
 end
 
-return oCrypto   -- ← THIS WAS MISSING
+return oCrypto

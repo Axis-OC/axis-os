@@ -416,8 +416,12 @@ end
 
 local function check_access(nPid, sPath, sMode)
     local nUid = 1000
-    if nPid < 20 then
-        nUid = 0
+    -- FIX: Get actual UID from kernel process table instead of guessing from PID
+    local nRealUid = syscall("process_get_uid", nPid)
+    if nRealUid ~= nil then
+        nUid = tonumber(nRealUid) or 1000
+    elseif nPid < 20 then
+        nUid = 0  -- fallback for system processes before process table is populated
     end
     if nUid == 0 then
         return true
@@ -455,7 +459,7 @@ local function check_access(nPid, sPath, sMode)
         end
     end
     if not bAllowed then
-        syscall("kernel_log", "[PM] ACCESS DENIED: PID " .. nPid .. " tried to " .. sMode .. " " .. sPath)
+        syscall("kernel_log", "[PM] ACCESS DENIED: PID " .. nPid .. " (UID " .. nUid .. ") tried to " .. sMode .. " " .. sPath)
     end
     return bAllowed
 end
