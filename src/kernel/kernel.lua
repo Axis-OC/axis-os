@@ -40,6 +40,9 @@ local g_oAxfsVol = nil
 local g_oPreempt = nil -- loaded from /lib/preempt.lua at boot
 local g_oIpc = nil -- Kernel IPC subsystem
 
+local g_oPatchGuard = nil   -- Kernel integrity monitor
+local g_oHypervisor = nil   -- Metatable protection primitives
+
 local g_tSchedStats = {
     nTotalResumes = 0,
     nPreemptions = 0,
