@@ -128,4 +128,28 @@ function oHvci.GenerateWhitelist(tDriverPaths)
     return tNew
 end
 
+-- Called by PatchGuard Tier 3 to re-verify loaded drivers
+-- against the on-disk whitelist. Returns violations.
+function oHvci.RuntimeRecheck(fReadFile)
+    if g_nMode == 0 then return {} end
+    local tViolations = {}
+
+    for sHash, tEntry in pairs(g_tWhitelist) do
+        if tEntry.path then
+            local sCode = fReadFile(tEntry.path)
+            if sCode then
+                local sCurHash = computeHash(sCode)
+                if sCurHash ~= sHash then
+                    tViolations[#tViolations+1] = {
+                        path = tEntry.path,
+                        expected = sHash:sub(1, 16),
+                        actual = sCurHash:sub(1, 16),
+                    }
+                end
+            end
+        end
+    end
+    return tViolations
+end
+
 return oHvci

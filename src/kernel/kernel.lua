@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.4-beta
+-- AxisOS Xen XKA v0.6-HV-beta
 --
 local kernel = {
     tProcessTable = {},
@@ -21,7 +21,7 @@ local kernel = {
 
     tDriverRegistry = {},
     tComponentDriverMap = {},
-    nPipelinePid = nil,
+    nPipelinePid= nil,
     tBootLog = {},
     tLoadedModules = {}
 }
@@ -57,6 +57,8 @@ local WATCHDOG_KILL_STRIKES = 3 -- kill after this many warnings
 -- Object Manager (loaded at boot from /lib/ob_manager.lua)
 local g_oObManager = nil
 local g_oRegistry = nil
+local g_nBootTickCounter = 0
+local g_bPgAutoArmed = false
 
 -- Color constants
 local C_WHITE = 0xFFFFFF
@@ -364,119 +366,526 @@ local function rawtostring(v)
     return t .. ": " .. sAddr
 end
 
+-- =============================================
+-- CRASH DUMP WRITER
+-- Writes structured crash report to raw filesystem
+-- BEFORE showing BSOD. Survives reboot.
+-- Also sets crash flag in EEPROM data area.
+-- =============================================
+
+local CRASH_FLAG_NONE     = 0
+local CRASH_FLAG_PANIC    = 1
+local CRASH_FLAG_PGVIOLATION = 2
+local CRASH_FLAG_OOM      = 3
+local CRASH_FLAG_WATCHDOG = 4
+
+local function fWriteCrashDump(sReason, nCrashType, tPgViolations, coFaulting)
+    -- Get raw filesystem handle (PM is dead, use raw_component)
+    local oRawFs
+    pcall(function()
+        if g_bAxfsRoot then
+            oRawFs = g_oPrimitiveFs
+        else
+            oRawFs = raw_component.proxy(kernel.tVfs.sRootUuid or boot_fs_address)
+        end
+    end)
+    if not oRawFs then return false end
+
+    -- Ensure /log exists
+    pcall(function() oRawFs.makeDirectory("/log") end)
+
+    -- Read boot counter for crash file naming
+    local nBootNum = 0
+    pcall(function()
+        local ep
+        for addr in raw_component.list("eeprom") do
+            ep = raw_component.proxy(addr); break
+        end
+        if ep then
+            local sData = ep.getData()
+            if sData and #sData >= 244 then
+                nBootNum = (sData:byte(241) or 0) * 16777216
+                         + (sData:byte(242) or 0) * 65536
+                         + (sData:byte(243) or 0) * 256
+                         + (sData:byte(244) or 0)
+            end
+        end
+    end)
+
+    local sCrashPath = string.format("/log/crash_%03d.dump", nBootNum % 1000)
+
+    -- Build crash dump content
+    local tDump = {}
+    local function wr(s) tDump[#tDump+1] = s end
+
+    wr("========================================")
+    wr("  AXISO CRASH DUMP")
+    wr("========================================")
+    wr("")
+    wr(string.format("Timestamp:    %.4f seconds uptime", raw_computer.uptime()))
+    wr(string.format("Boot #:       %d", nBootNum))
+    wr(string.format("Crash Type:   %d (%s)", nCrashType or 0,
+        ({[0]="UNKNOWN",[1]="KERNEL_PANIC",[2]="PATCHGUARD",
+          [3]="OOM_KILL",[4]="WATCHDOG"})[nCrashType or 0] or "?"))
+    wr("")
+    wr("--- REASON ---")
+    wr(tostring(sReason or "No reason"))
+    wr("")
+
+    -- PatchGuard violations
+    if tPgViolations and #tPgViolations > 0 then
+        wr("--- PATCHGUARD VIOLATIONS ---")
+        for i, v in ipairs(tPgViolations) do
+            wr(string.format("  [%d] %s: %s (expected=%s actual=%s)",
+                i, v.t or "?", v.d or "?",
+                v.e or "N/A", v.a or "N/A"))
+        end
+        wr("")
+    end
+
+    -- Faulting process
+    local nFaultPid = coFaulting and kernel.tPidMap[coFaulting]
+    if nFaultPid then
+        local p = kernel.tProcessTable[nFaultPid]
+        wr("--- FAULTING PROCESS ---")
+        wr(string.format("  PID:     %d", nFaultPid))
+        wr(string.format("  Ring:    %s", tostring(p.ring)))
+        wr(string.format("  Status:  %s", tostring(p.status)))
+        wr(string.format("  UID:     %s", tostring(p.uid)))
+        wr(string.format("  Synapse: %s", tostring(p.synapseToken)))
+        wr(string.format("  CPU:     %.4fs", p.nCpuTime or 0))
+        wr(string.format("  WD Strikes: %d", p.nWatchdogStrikes or 0))
+        local sImage = "?"
+        if p.env and p.env.env and p.env.env.arg then
+            sImage = p.env.env.arg[0] or "?"
+        end
+        wr(string.format("  Image:   %s", sImage))
+        wr("")
+
+        -- Stack trace
+        local bTraceOk, sTrace = pcall(debug.traceback, coFaulting)
+        if bTraceOk and sTrace then
+            wr("--- STACK TRACE ---")
+            for line in sTrace:gmatch("[^\n]+") do
+                wr("  " .. line)
+            end
+            wr("")
+        end
+    end
+
+    -- Full process table
+    wr("--- PROCESS TABLE ---")
+    wr(string.format("%-5s %-5s %-6s %-10s %-6s %-8s %s",
+        "PID", "PPID", "RING", "STATUS", "UID", "CPU(s)", "IMAGE"))
+    local nProcCount = 0
+    for pid, p in pairs(kernel.tProcessTable) do
+        nProcCount = nProcCount + 1
+        if nProcCount > 50 then wr("  ... truncated"); break end
+        local sImg = "?"
+        if p.env and p.env.env and p.env.env.arg then
+            sImg = p.env.env.arg[0] or "?"
+        end
+        wr(string.format("%-5d %-5d %-6s %-10s %-6s %-8.3f %s",
+            pid, p.parent or 0, tostring(p.ring),
+            p.status or "?", tostring(p.uid),
+            p.nCpuTime or 0, sImg))
+    end
+    wr("")
+
+    -- Scheduler stats
+    wr("--- SCHEDULER ---")
+    wr(string.format("  Total resumes:    %d", g_tSchedStats.nTotalResumes))
+    wr(string.format("  Preemptions:      %d", g_tSchedStats.nPreemptions))
+    wr(string.format("  Watchdog warns:   %d", g_tSchedStats.nWatchdogWarnings))
+    wr(string.format("  Watchdog kills:   %d", g_tSchedStats.nWatchdogKills))
+    wr(string.format("  Max slice:        %.2f ms", g_tSchedStats.nMaxSliceMs))
+    wr("")
+
+    -- PatchGuard stats
+    if g_oPatchGuard then
+        local tPgS = g_oPatchGuard.GetStats()
+        wr("--- PATCHGUARD ---")
+        wr(string.format("  Armed:            %s", tostring(tPgS.bArmed)))
+        wr(string.format("  Checks:           %d", tPgS.nChecksPerformed or 0))
+        wr(string.format("  Violations:       %d", tPgS.nViolations or 0))
+        wr(string.format("  SecureBoot:       %s", tostring(tPgS.bSecureBootActive)))
+        wr(string.format("  EEPROM monitored: %s", tostring(tPgS.bEepromMonitored)))
+        wr(string.format("  Syscalls watched: %d", tPgS.nSyscallsMonitored or 0))
+        wr(string.format("  Frozen libs:      %d", tPgS.nFrozenLibs or 0))
+        wr(string.format("  OB paths:         %d", tPgS.nObPaths or 0))
+        wr("")
+    end
+
+    -- Memory
+    wr("--- MEMORY ---")
+    local nT = raw_computer.totalMemory and raw_computer.totalMemory() or 0
+    local nF = raw_computer.freeMemory and raw_computer.freeMemory() or 0
+    wr(string.format("  Total:  %d bytes (%.1f KB)", nT, nT/1024))
+    wr(string.format("  Free:   %d bytes (%.1f KB)", nF, nF/1024))
+    wr(string.format("  Used:   %d bytes (%.1f KB)", nT-nF, (nT-nF)/1024))
+    wr("")
+
+    -- IPC stats
+    if g_oIpc then
+        local tIS = g_oIpc.GetStats()
+        wr("--- IPC ---")
+        wr(string.format("  Signals sent:     %d", tIS.nSignalsSent or 0))
+        wr(string.format("  Pipes created:    %d", tIS.nPipeCreated or 0))
+        wr(string.format("  Waits issued:     %d", tIS.nWaitsIssued or 0))
+        wr(string.format("  Waits timed out:  %d", tIS.nWaitsTimedOut or 0))
+        wr("")
+    end
+
+    -- Last 30 dmesg entries
+    wr("--- LAST 30 DMESG ENTRIES ---")
+    local nStart = math.max(1, #g_tDmesg - 29)
+    for i = nStart, #g_tDmesg do
+        local e = g_tDmesg[i]
+        wr(string.format("  [%9.4f] [%-6s] P%-3d %s",
+            e.time, e.level, e.pid or 0, e.msg))
+    end
+    wr("")
+
+    -- Components
+    wr("--- COMPONENTS ---")
+    pcall(function()
+        for addr, ctype in raw_component.list() do
+            wr(string.format("  [%s] %s", addr:sub(1,13), ctype))
+        end
+    end)
+    wr("")
+    wr("========================================")
+    wr("  END CRASH DUMP")
+    wr("========================================")
+
+    -- Write to file
+    local sDumpStr = table.concat(tDump, "\n")
+    local bWriteOk = false
+    pcall(function()
+        local h = oRawFs.open(sCrashPath, "w")
+        if h then
+            oRawFs.write(h, sDumpStr)
+            oRawFs.close(h)
+            bWriteOk = true
+        end
+    end)
+
+    -- Also append to current VBL if exists
+    pcall(function()
+        local tVblList = oRawFs.list("/vbl")
+        if tVblList then
+            local sLatest = nil
+            for _, sName in ipairs(tVblList) do
+                local sClean = type(sName) == "string" and sName:gsub("/$","") or ""
+                if sClean:match("%.vbl$") then sLatest = sClean end
+            end
+            if sLatest then
+                local h = oRawFs.open("/vbl/" .. sLatest, "a")
+                if h then
+                    oRawFs.write(h, "\n\n" .. sDumpStr)
+                    oRawFs.close(h)
+                end
+            end
+        end
+    end)
+
+    -- Set EEPROM crash flag (byte 245 = crash type, byte 246 = PG violation count)
+    pcall(function()
+        local ep
+        for addr in raw_component.list("eeprom") do
+            ep = raw_component.proxy(addr); break
+        end
+        if ep then
+            local sData = ep.getData() or string.rep("\0", 256)
+            if #sData < 256 then
+                sData = sData .. string.rep("\0", 256 - #sData)
+            end
+            local nPgCount = tPgViolations and #tPgViolations or 0
+            sData = sData:sub(1, 244)
+                 .. string.char(nCrashType or 1)
+                 .. string.char(math.min(255, nPgCount))
+                 .. sData:sub(247)
+            ep.setData(sData)
+        end
+    end)
+
+    return bWriteOk, sCrashPath
+end
+
 -------------------------------------------------
 -- KERNEL PANIC
 -------------------------------------------------
 
-function kernel.panic(sReason, coFaulting)
-    raw_computer.beep(1100, 1.3);
-    raw_computer.pullSignal(0.1)
+function kernel.panic(sReason, coFaulting, tPgViolations)
+    -- Write crash dump BEFORE anything visual
+    local nCrashType = CRASH_FLAG_PANIC
+    if tPgViolations and #tPgViolations > 0 then
+        nCrashType = CRASH_FLAG_PGVIOLATION
+    end
+
+    local bDumpOk, sDumpPath = pcall(fWriteCrashDump,
+        sReason, nCrashType, tPgViolations, coFaulting)
+
+    -- Descending tritone into flatline
+    raw_computer.beep(1200, 0.1)
+    raw_computer.pullSignal(0.15)
+    raw_computer.beep(100, 2.0)
+
+    -- Find GPU
     local sGpuAddress, sScreenAddress
     for sAddr in raw_component.list("gpu") do
-        sGpuAddress = sAddr;
-        break
+        sGpuAddress = sAddr; break
     end
     for sAddr in raw_component.list("screen") do
-        sScreenAddress = sAddr;
-        break
+        sScreenAddress = sAddr; break
     end
     if not sGpuAddress or not sScreenAddress then
-        while true do
-            raw_computer.pullSignal(1)
-        end
+        while true do raw_computer.pullSignal(1) end
     end
+
     local oGpu = raw_component.proxy(sGpuAddress)
     pcall(oGpu.bind, sScreenAddress)
     local nW, nH = oGpu.getResolution()
     pcall(oGpu.setBackground, 0x0000AA)
     pcall(oGpu.setForeground, 0xFFFFFF)
     pcall(oGpu.fill, 1, 1, nW, nH, " ")
+
     local y = 1
     local function print_line(sText, sColor)
-        if y > nH then
-            return
+        if y > nH then return end
+        local sClean = tostring(sText or ""):gsub("[%c]", " ")
+        if #sClean > nW - 3 then
+            sClean = sClean:sub(1, nW - 6) .. "..."
         end
         pcall(oGpu.setForeground, sColor or 0xFFFFFF)
-        pcall(oGpu.set, 2, y, tostring(sText or ""))
+        pcall(oGpu.set, 2, y, sClean)
         y = y + 1
     end
-    print_line(" ")
-    print_line(":( A fatal error has occurred and AxisOS has been shut down.", 0xFFFFFF)
-    print_line("   to prevent damage to your system.", 0xFFFFFF)
+
+    -- Generate stop code
+    local nStopCode = 0
+    local sReasonFlat = tostring(sReason or "")
+    for i = 1, math.min(#sReasonFlat, 64) do
+        nStopCode = (nStopCode * 31 + sReasonFlat:byte(i)) % 0xFFFFFFFF
+    end
+
+    local tStopCodes = {
+        CRITICAL_STRUCTURE_CORRUPTION = 0x00000109,
+        KERNEL_SECURITY_CHECK_FAILURE = 0x00000139,
+        PATCHGUARD_VIOLATION          = 0x00000109,
+        OOM_KILL                      = 0x0000009F,
+        WATCHDOG_TIMEOUT              = 0x00000101,
+        IRQL_NOT_LESS_OR_EQUAL        = 0x0000000A,
+        SYSTEM_SERVICE_EXCEPTION      = 0x0000003B,
+    }
+    for sName, nCode in pairs(tStopCodes) do
+        if sReasonFlat:find(sName, 1, true) then
+            nStopCode = nCode
+            break
+        end
+    end
+
+    -- Header
+    print_line("")
+    print_line(":( Your system ran into a problem and needs to restart.", 0xFFFFFF)
+    print_line("")
+    print_line(string.format(
+        "*** STOP: 0x%08X", nStopCode), 0xFF5555)
+    print_line("")
+
+    -- Reason (multi-line safe)
+    for sLine in (sReasonFlat .. "\n"):gmatch("([^\n]*)\n") do
+        if #sLine > 0 then
+            print_line("  " .. sLine, 0xFFFF55)
+        end
+    end
     y = y + 1
-    print_line("[ KERNEL PANIC ]", 0xFF5555)
+
+    -- System state
+    local nUptime = raw_computer.uptime()
+    local nTotalMem = raw_computer.totalMemory and raw_computer.totalMemory() or 0
+    local nFreeMem = raw_computer.freeMemory and raw_computer.freeMemory() or 0
+    local nUsedPct = nTotalMem > 0
+        and math.floor((nTotalMem - nFreeMem) / nTotalMem * 100) or 0
+
+    print_line("---[ System State ]---", 0x55FFFF)
+    print_line(string.format(
+        "Uptime: %d:%02d:%02d    Memory: %dKB / %dKB (%d%% used)",
+        math.floor(nUptime / 3600),
+        math.floor((nUptime % 3600) / 60),
+        math.floor(nUptime % 60),
+        math.floor((nTotalMem - nFreeMem) / 1024),
+        math.floor(nTotalMem / 1024),
+        nUsedPct), 0xAAAAAA)
+    print_line(string.format(
+        "Processes: %d    Scheduler: %d resumes, %d preemptions, %d WD kills",
+        kernel.nNextPid - 1,
+        g_tSchedStats.nTotalResumes,
+        g_tSchedStats.nPreemptions,
+        g_tSchedStats.nWatchdogKills), 0xAAAAAA)
+
+    if g_oPatchGuard then
+        local tPgS = g_oPatchGuard.GetStats()
+        print_line(string.format(
+            "PatchGuard: %s, %d checks, %d violations, %d files monitored",
+            tPgS.bArmed and "ARMED" or "DISARMED",
+            tPgS.nChecksPerformed or 0,
+            tPgS.nViolations or 0,
+            tPgS.nCriticalFilesHashed or 0), 0xAAAAAA)
+    end
     y = y + 1
-    print_line("Reason: " .. tostring(sReason or "No reason specified."), 0xFFFF55)
-    y = y + 1
-    print_line("---[ Faulting Context ]---", 0x55FFFF)
+
+    -- PatchGuard violations (if any)
+    if tPgViolations and #tPgViolations > 0 then
+        print_line("---[ Integrity Violations ]---", 0xFF55FF)
+        for i, v in ipairs(tPgViolations) do
+            if i > 6 then
+                print_line(string.format(
+                    "  ... and %d more", #tPgViolations - 6), 0xAAAAAA)
+                break
+            end
+            print_line(string.format(
+                "  [%d] %s: %s", i, v.t or "?", v.d or "?"), 0xFF5555)
+            if v.e then
+                print_line(string.format(
+                    "      expected: %s", v.e), 0xAAAAAA)
+            end
+            if v.a then
+                print_line(string.format(
+                    "      actual:   %s", v.a), 0xAAAAAA)
+            end
+        end
+        y = y + 1
+    end
+
+    -- Faulting process
     local nFaultingPid = coFaulting and kernel.tPidMap[coFaulting]
     if nFaultingPid then
         local p = kernel.tProcessTable[nFaultingPid]
-        print_line(string.format("PID: %d   Parent: %d   Ring: %d   Status: %s", nFaultingPid, p.parent or -1,
-            p.ring or -1, p.status or "UNKNOWN"), 0xFFFFFF)
         local sPath = "N/A"
         if p.env and p.env.arg and type(p.env.arg) == "table" then
             sPath = p.env.arg[0] or "N/A"
         end
-        print_line("Image Path: " .. sPath, 0xAAAAAA)
-        -- sMLTR: show synapse token in panic
-        print_line("Synapse Token: " .. tostring(p.synapseToken or "N/A"), 0xAAAAAA)
+
+        print_line("---[ Faulting Process ]---", 0x55FFFF)
+        print_line(string.format(
+            "PID: %d   Ring: %s   UID: %s   Status: %s",
+            nFaultingPid,
+            tostring(p.ring or "?"),
+            tostring(p.uid or "?"),
+            tostring(p.status or "?")), 0xFFFFFF)
+        print_line("Image: " .. sPath, 0xAAAAAA)
+        print_line(string.format(
+            "CPU: %.3fs   Preemptions: %d   WD Strikes: %d",
+            p.nCpuTime or 0,
+            p.nPreemptCount or 0,
+            p.nWatchdogStrikes or 0), 0xAAAAAA)
+        print_line("Synapse: " ..
+            tostring(p.synapseToken or "N/A"):sub(1, 24) .. "...", 0x888888)
         y = y + 1
-        print_line("Stack Trace:", 0x55FFFF)
-        local sTraceback = debug.traceback(coFaulting)
-        for line in sTraceback:gmatch("[^\r\n]+") do
-            line = line:gsub("kernel.lua", "kernel"):gsub("pipeline_manager.lua", "pm"):gsub("dkms.lua", "dkms")
-            print_line("  " .. line, 0xAAAAAA)
-            if y > 22 then
-                print_line("  ... (trace truncated)", 0xAAAAAA);
-                break
+
+        -- Stack trace
+        local bTraceOk, sTraceback = pcall(debug.traceback, coFaulting)
+        if bTraceOk and sTraceback then
+            print_line("---[ Stack Trace ]---", 0x55FFFF)
+            for line in sTraceback:gmatch("[^\r\n]+") do
+                line = line:gsub("kernel.lua", "kernel")
+                line = line:gsub("pipeline_manager.lua", "pm")
+                line = line:gsub("dkms.lua", "dkms")
+                print_line("  " .. line, 0xAAAAAA)
+                if y > nH - 12 then
+                    print_line("  ... (trace truncated)", 0x888888)
+                    break
+                end
             end
+            y = y + 1
         end
     else
-        print_line("Panic occurred outside of a managed process (e.g., during boot).", 0xFFFF55)
-    end
-    y = y + 1
-    print_line("---[ System State ]---", 0x55FFFF)
-    print_line(string.format("Uptime: %.4f seconds", raw_computer.uptime()), 0xFFFFFF)
-    print_line(string.format("Total Processes: %d", kernel.nNextPid - 1), 0xFFFFFF)
-    y = y + 1
-    print_line("Process Table (Top 10):", 0x55FFFF)
-    print_line(string.format("%-5s %-7s %-12s %-6s %-s", "PID", "PARENT", "STATUS", "RING", "IMAGE"), 0xAAAAAA)
-    local nCount = 0
-    for pid, p in pairs(kernel.tProcessTable) do
-        if nCount >= 10 then
-            break
-        end
-        local sPath = "N/A"
-        if p.env and p.env.arg and type(p.env.arg) == "table" then
-            sPath = p.env.arg[0] or "N/A"
-        end
+        print_line("---[ Faulting Context ]---", 0x55FFFF)
         print_line(
-            string.format("%-5d %-7d %-12s %-6d %-s", pid, p.parent or -1, p.status or "??", p.ring or "?", sPath),
-            0xFFFFFF)
-        nCount = nCount + 1
+            "Panic occurred outside a managed process (boot / scheduler).",
+            0xFFFF55)
+        y = y + 1
     end
-    y = y + 1
-    print_line("---[ Component Dump ]---", 0x55FFFF)
-    local tComponents = {}
-    for addr, ctype in raw_component.list() do
-        table.insert(tComponents, {
-            addr = addr,
-            ctype = ctype
-        })
-    end
-    for i, comp in ipairs(tComponents) do
-        if y > nH - 2 then
-            print_line("... (list truncated)", 0xAAAAAA);
-            break
+
+    -- Process table (compact)
+    local nRemaining = nH - y - 8
+    if nRemaining > 3 then
+        print_line("---[ Process Table ]---", 0x55FFFF)
+        print_line(string.format(
+            "%-5s %-5s %-6s %-10s %-8s %s",
+            "PID", "PPID", "RING", "STATUS", "CPU(s)", "IMAGE"), 0xAAAAAA)
+
+        local tSorted = {}
+        for pid, p in pairs(kernel.tProcessTable) do
+            tSorted[#tSorted + 1] = {pid = pid, proc = p}
         end
-        print_line(string.format("[%s...] %s", comp.addr:sub(1, 13), comp.ctype), 0xFFFFFF)
+        table.sort(tSorted, function(a, b) return a.pid < b.pid end)
+
+        local nShown = 0
+        for _, entry in ipairs(tSorted) do
+            if nShown >= nRemaining - 2 then
+                print_line(string.format(
+                    "  ... %d more process(es)",
+                    #tSorted - nShown), 0x888888)
+                break
+            end
+            local pid = entry.pid
+            local p = entry.proc
+            local sImg = "?"
+            if p.env and p.env.arg and type(p.env.arg) == "table" then
+                sImg = p.env.arg[0] or "?"
+            end
+            if #sImg > 30 then
+                sImg = ".." .. sImg:sub(-28)
+            end
+
+            local sStatusColor = 0xFFFFFF
+            if p.status == "dead" then sStatusColor = 0xFF5555
+            elseif p.status == "sleeping" then sStatusColor = 0x888888
+            elseif p.status == "running" then sStatusColor = 0x55FF55 end
+
+            pcall(oGpu.setForeground, 0xFFFFFF)
+            pcall(oGpu.set, 2, y, string.format("%-5d %-5d %-6s ",
+                pid, p.parent or 0, tostring(p.ring or "?")))
+            pcall(oGpu.setForeground, sStatusColor)
+            pcall(oGpu.set, 20, y, string.format("%-10s", p.status or "?"))
+            pcall(oGpu.setForeground, 0xAAAAAA)
+            pcall(oGpu.set, 31, y, string.format("%-8.3f %s",
+                p.nCpuTime or 0, sImg))
+            y = y + 1
+            nShown = nShown + 1
+        end
+        y = y + 1
     end
+
+    -- Footer separator
+    y = nH - 4
+    pcall(oGpu.setForeground, 0x555555)
+    pcall(oGpu.set, 2, y, string.rep("=", nW - 2))
+    y = y + 1
+
+    -- Crash dump status
+    if bDumpOk and sDumpPath then
+        print_line(
+            "Crash dump saved: " .. tostring(sDumpPath),
+            0x55FF55)
+        print_line(
+            "Review after reboot: cat " .. tostring(sDumpPath),
+            0x55FF55)
+    else
+        print_line(
+            "Crash dump FAILED to write. Diagnostics may be lost.",
+            0xFF5555)
+    end
+
+    -- Final line
     pcall(oGpu.setForeground, 0xFFFF55)
-    pcall(oGpu.set, 2, nH, "System halted. Please power cycle the machine.")
-    while true do
-        raw_computer.pullSignal(1)
-    end
+    pcall(oGpu.set, 2, nH, string.format(
+        " System halted. Power cycle to restart.          STOP 0x%08X ",
+        nStopCode))
+
+    while true do raw_computer.pullSignal(1) end
 end
 
 ------------------------------------------------
@@ -524,7 +933,7 @@ do
     end
 end
 
-kprint("info", "AxisOS Xen XKA v0.51-HV starting...")
+kprint("info", "AxisOS Xen XKA v0.6-HV starting...")
 kprint("info", "Copyright (C) 2026 AxisOS")
 kprint("none", "")
 
@@ -1678,6 +2087,25 @@ local function deepSanitize(vValue, nDepth, tCounter)
 end
 
 function kernel.syscall_dispatch(sName, ...)
+    local tProc = kernel.tProcessTable[nPid]
+    if tProc then
+        tProc._nSyscallCount = (tProc._nSyscallCount or 0) + 1
+        local nNow = raw_computer.uptime()
+        if not tProc._nSyscallWindowStart then
+            tProc._nSyscallWindowStart = nNow
+        end
+        if nNow - tProc._nSyscallWindowStart > 1.0 then
+            if tProc._nSyscallCount > 10000 and tProc.ring >= 3 then
+                kprint("sec", "SYSCALL FLOOD: PID " .. nPid ..
+                    " (" .. tProc._nSyscallCount .. "/sec) — killed")
+                tProc.status = "dead"
+                return nil, "Killed: syscall rate limit"
+            end
+            tProc._nSyscallCount = 0
+            tProc._nSyscallWindowStart = nNow
+        end
+    end
+    
     if type(sName) ~= "string" then
         kprint("sec", "Non-string syscall name rejected", {
             pid = g_nCurrentPid,
@@ -1918,6 +2346,33 @@ kernel.tSyscallTable["patchguard_check"] = {
     func = function(nPid)
         if not g_oPatchGuard then return true end
         return g_oPatchGuard.Check()
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["critical_file_modified"] = {
+    func = function(nPid, sPath, nWriterPid)
+        kprint("sec", string.format(
+            "CRITICAL FILE MODIFIED: %s by PID %d (Ring %s)",
+            sPath, nWriterPid,
+            tostring(kernel.tRings[nWriterPid] or "?")))
+
+        -- Re-hash just THIS file and compare
+        if g_oPatchGuard and g_fPgSha256 then
+            local sContent = primitive_load(sPath)
+            if sContent then
+                local sHash = hex(g_fPgSha256(sContent))
+                local sExpected = g_tFileHashSnap[sPath]
+                if sExpected and sHash ~= sExpected then
+                    kprint("sec", string.format(
+                        "HASH MISMATCH: %s (boot=%s now=%s)",
+                        sPath, sExpected:sub(1,16), sHash:sub(1,16)))
+                    -- React: this is a real-time detection
+                    -- You could panic, kill the writer, or log for audit
+                end
+            end
+        end
+        return true
     end,
     allowed_rings = {0, 1}
 }
@@ -3507,6 +3962,53 @@ kernel.tVfs.tMounts["/"] = {
 }
 kprint("ok", "Mounted root filesystem on", kernel.tVfs.sRootUuid:sub(1, 13) .. "...")
 
+-- =============================================
+-- CHECK FOR PREVIOUS CRASH
+-- =============================================
+do
+    local bCrashDetected = false
+    pcall(function()
+        local ep
+        for addr in raw_component.list("eeprom") do
+            ep = raw_component.proxy(addr); break
+        end
+        if ep then
+            local sData = ep.getData()
+            if sData and #sData >= 246 then
+                local nCrashType = sData:byte(245) or 0
+                local nPgCount   = sData:byte(246) or 0
+                if nCrashType > 0 then
+                    bCrashDetected = true
+                    local tTypeNames = {
+                        [1] = "KERNEL_PANIC",
+                        [2] = "PATCHGUARD_VIOLATION",
+                        [3] = "OOM_KILL",
+                        [4] = "WATCHDOG",
+                    }
+                    kprint("sec", "╔══════════════════════════════════════════╗")
+                    kprint("sec", "║  PREVIOUS CRASH DETECTED                 ║")
+                    kprint("sec", "╚══════════════════════════════════════════╝")
+                    kprint("sec", string.format(
+                        "  Type: %d (%s)", nCrashType,
+                        tTypeNames[nCrashType] or "UNKNOWN"))
+                    if nCrashType == 2 then
+                        kprint("sec", string.format(
+                            "  PatchGuard violations: %d", nPgCount))
+                    end
+                    kprint("sec", "  Check /log/crash_*.dump for details")
+                    kprint("sec", "")
+
+                    -- Clear crash flag
+                    sData = sData:sub(1, 244)
+                         .. "\0\0"
+                         .. sData:sub(247)
+                    ep.setData(sData)
+                end
+            end
+        end
+    end)
+end
+
 -- 2. Create PID 0 (Kernel Process)
 local nKernelPid = kernel.nNextPid
 kernel.nNextPid = kernel.nNextPid + 1
@@ -3535,6 +4037,19 @@ kprint("ok", "Kernel process registered as PID", nKernelPid)
 
 -- 3. Load Ring 1 Pipeline Manager
 kprint("info", "Starting Ring 1 services...")
+local g_tCriticalPaths = {}
+for _, s in ipairs({
+    "/kernel.lua", "/lib/pipeline_manager.lua",
+    "/bin/init.lua", "/etc/passwd.lua",
+    "/system/dkms.lua", "/lib/ob_manager.lua",
+    "/lib/ke_ipc.lua", "/lib/preempt.lua",
+    "/drivers/tty.sys.lua", "/etc/perms.lua",
+    "/sys/security/patchguard.lua",
+    "/boot/loader.cfg", "/boot/boot.lua",
+}) do
+    g_tCriticalPaths[s] = true
+end
+
 local tPmEnv = {
     SAFE_MODE = (tBootArgs.safemode == "Enabled"),
     INIT_PATH = tBootArgs.init or "/bin/init.lua"
@@ -3550,16 +4065,193 @@ kernel.nPipelinePid = nPipelinePid
 kprint("ok", "Ring 1 Pipeline Manager started as PID", nPipelinePid)
 
 -- Initialize PatchGuard with kernel references
+-- Initialize PatchGuard with FULL monitoring data
 if g_oPatchGuard then
+    -- Build hardware verification functions
+    -- These are closures that PatchGuard stores as upvalues
+    local fPgSha256 = nil
+    local fPgReadEepromCode = nil
+    local fPgReadEepromData = nil
+    local fPgComputeBinding = nil
+    local fPgHashKernel = nil
+
+    -- Find data card and eeprom for PatchGuard
+    local sPgDataAddr, sPgEepAddr
+    for addr in raw_component.list("data") do sPgDataAddr = addr; break end
+    for addr in raw_component.list("eeprom") do sPgEepAddr = addr; break end
+
+    if sPgDataAddr then
+        local oPgData = raw_component.proxy(sPgDataAddr)
+        if oPgData and oPgData.sha256 then
+            fPgSha256 = function(s) return oPgData.sha256(s) end
+        end
+    end
+
+    if sPgEepAddr then
+        local oPgEep = raw_component.proxy(sPgEepAddr)
+        if oPgEep then
+            fPgReadEepromCode = function() return oPgEep.get() end
+            fPgReadEepromData = function() return oPgEep.getData() end
+        end
+    end
+
+    if fPgSha256 then
+        fPgComputeBinding = function()
+            local t = {}
+            for addr in raw_component.list("data") do t[#t+1] = addr; break end
+            for addr in raw_component.list("eeprom") do t[#t+1] = addr; break end
+            for addr in raw_component.list("filesystem") do
+                local p = raw_component.proxy(addr)
+                if p and p.exists and p.exists("/kernel.lua") then
+                    t[#t+1] = addr; break
+                end
+            end
+            local sRaw = fPgSha256(table.concat(t))
+            local tHex = {}
+            for i = 1, #sRaw do tHex[i] = string.format("%02x", sRaw:byte(i)) end
+            return table.concat(tHex)
+        end
+
+        fPgHashKernel = function()
+            local sCode = primitive_load("/kernel.lua")
+            if not sCode then return nil end
+            local sRaw = fPgSha256(sCode)
+            local tHex = {}
+            for i = 1, #sRaw do tHex[i] = string.format("%02x", sRaw:byte(i)) end
+            return table.concat(tHex)
+        end
+    end
+
     g_oPatchGuard.Initialize({
+        -- Tier 1: core structures
         tSyscallTable     = kernel.tSyscallTable,
         tSyscallOverrides = kernel.tSyscallOverrides,
         nPipelinePid      = kernel.nPipelinePid,
-        fPanic            = function(s) kernel.panic(s) end,
+        fPanic            = function(s, co, tViol) kernel.panic(s, co, tViol) end,
         fLog              = function(s) kprint("sec", s) end,
         fUptime           = raw_computer.uptime,
+
+        -- Tier 1: process integrity
+        tProcessTable     = kernel.tProcessTable,
+        tRings            = kernel.tRings,
+
+        -- Tier 2: frozen libraries
+        tFrozenLibs       = {
+            string = g_tFrozenString,
+            table  = g_tFrozenTable,
+            math   = g_tFrozenMath,
+        },
+
+        -- Tier 2: object manager
+        oObManager        = g_oObManager,
+
+        -- Tier 3: SecureBoot attestation
+        tBootSecurity     = boot_security or nil,
+
+        -- Tier 3: hardware verification
+        fSha256           = fPgSha256,
+        fComputeBinding   = fPgComputeBinding,
+        fHashKernel       = fPgHashKernel,
+        fReadEepromCode   = fPgReadEepromCode,
+        fReadEepromData   = fPgReadEepromData,
+        fReadFile         = function(sPath) return primitive_load(sPath) end,
+        fFlush            = function() raw_computer.pullSignal(0) end,
+        fLastModified     = function(sPath)
+            local bOk, nMtime = pcall(g_oPrimitiveFs.lastModified, sPath)
+            return bOk and nMtime or nil
+        end,
     })
-    kprint("ok", "PatchGuard snapshot taken — waiting for boot to complete before arming")
+    kprint("ok", "PatchGuard v2 snapshot taken — arming deferred to post-boot")
+end
+
+
+-- =============================================
+-- COMPREHENSIVE SECURITY AUDIT AT BOOT
+-- =============================================
+do
+    kprint("sec", "╔══════════════════════════════════════════╗")
+    kprint("sec", "║  SECURITY SUBSYSTEM STATUS               ║")
+    kprint("sec", "╚══════════════════════════════════════════╝")
+
+    -- Object Manager
+    kprint("sec", string.format("  ObManager:     %s",
+        g_oObManager and "ACTIVE" or "UNAVAILABLE"))
+
+    -- Hypervisor
+    kprint("sec", string.format("  Hypervisor:    %s",
+        g_oHypervisor and "ACTIVE" or "UNAVAILABLE"))
+
+    -- Preemptive Scheduler
+    kprint("sec", string.format("  Preemption:    %s",
+        g_oPreempt and string.format("ACTIVE (Q=%dms, I=%d)",
+            g_oPreempt.DEFAULT_QUANTUM * 1000,
+            g_oPreempt.CHECK_INTERVAL)
+        or "COOPERATIVE ONLY"))
+
+    -- IPC
+    kprint("sec", string.format("  IPC:           %s",
+        g_oIpc and "ACTIVE" or "UNAVAILABLE"))
+
+    -- PatchGuard
+    if g_oPatchGuard then
+        local tPgS = g_oPatchGuard.GetStats()
+        kprint("sec", string.format(
+            "  PatchGuard:    LOADED (%d syscalls, %d libs, SB=%s)",
+            tPgS.nSyscallsMonitored or 0,
+            tPgS.nFrozenLibs or 0,
+            tPgS.bSecureBootActive and "YES" or "NO"))
+    else
+        kprint("sec", "  PatchGuard:    UNAVAILABLE")
+    end
+
+    -- Data card
+    local sDataTier = "NONE"
+    pcall(function()
+        for addr in raw_component.list("data") do
+            local p = raw_component.proxy(addr)
+            if p.ecdsa then sDataTier = "TIER 3 (ECDSA)"
+            elseif p.encrypt then sDataTier = "TIER 2 (AES)"
+            else sDataTier = "TIER 1 (SHA)" end
+            break
+        end
+    end)
+    kprint("sec", "  Data Card:     " .. sDataTier)
+
+    -- EEPROM
+    local sEepState = "NONE"
+    pcall(function()
+        for addr in raw_component.list("eeprom") do
+            local ep = raw_component.proxy(addr)
+            local sData = ep.getData()
+            if sData and #sData >= 4 and sData:sub(1,4) == "AXCF" then
+                local nSbMode = sData:byte(5) or 0
+                sEepState = string.format("AXCF (SB=%d, label=%s)",
+                    nSbMode, ep.getLabel() or "?")
+            else
+                sEepState = "PRESENT (no AXCF data)"
+            end
+            break
+        end
+    end)
+    kprint("sec", "  EEPROM:        " .. sEepState)
+
+    -- SecureBoot
+    if boot_security and boot_security.verified then
+        kprint("sec", "  SecureBoot:    VERIFIED")
+        kprint("sec", string.format("    Binding:   %s...",
+            tostring(boot_security.machine_binding):sub(1,24)))
+        kprint("sec", string.format("    KernHash:  %s...",
+            tostring(boot_security.kernel_hash):sub(1,24)))
+    else
+        kprint("sec", "  SecureBoot:    " ..
+            (boot_security and "PRESENT (unverified)" or "DISABLED"))
+    end
+
+    -- sMLTR
+    kprint("sec", "  sMLTR:         ACTIVE")
+    kprint("sec", "  Sandbox:       3-layer proxy (protected metatable)")
+
+    kprint("sec", "")
 end
 
 -------------------------------------------------
@@ -3597,6 +4289,17 @@ table.insert(kernel.tProcessTable[nPipelinePid].run_queue, "start")
 -- =================================================================
 
 while true do
+    if g_oPatchGuard and not g_bPgAutoArmed then
+        g_nBootTickCounter = g_nBootTickCounter + 1
+        if g_nBootTickCounter >= 300 then
+            g_bPgAutoArmed = true
+            kprint("sec", "PatchGuard auto-arming (post-boot, tick " .. g_nBootTickCounter .. ")...")
+            g_oPatchGuard.TakeSnapshot(false)  -- re-snapshot with PM overrides now registered
+            g_oPatchGuard.Arm()
+            kprint("sec", "PatchGuard ARMED — all integrity monitoring active")
+        end
+    end
+
     local nWorkDone = 0
 
     for nPid, tProcess in pairs(kernel.tProcessTable) do
@@ -3723,8 +4426,9 @@ while true do
     end
 
     if g_oPatchGuard then
-        g_oPatchGuard.Tick()
+        g_oPatchGuard.Tick(nWorkDone > 0)
     end
+
 
     -- ====== OOM KILLER ======
     local FREE_MEMORY_FLOOR = 32768

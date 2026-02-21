@@ -692,14 +692,25 @@ end
 
 function vfs_state.handle_write(nSenderPid, sSynapseToken, vHandle, sData)
     local pObj, sErr = fResolveObject(nSenderPid, sSynapseToken, vHandle, OB_ACCESS_WRITE)
-    if not pObj then
-        return nil, sErr
-    end
+    if not pObj then return nil, sErr end
     local b = pObj.pBody
+
     if b.sCategory == "device" then
         return _sendDeviceWrite(b.sDeviceName, b.nDriverPid, sData)
     else
-        return syscall("raw_component_invoke", vfs_state.oRootFs.address, "write", b.hRawHandle, sData)
+        local bOk, bResult = syscall("raw_component_invoke",
+            vfs_state.oRootFs.address, "write", b.hRawHandle, sData)
+
+        -- INTEGRITY: notify kernel if a critical file was written
+        if b.sPath and g_tCriticalPaths[b.sPath] then
+            syscall("kernel_log",
+                "[PM] CRITICAL FILE WRITTEN: " .. b.sPath ..
+                " by PID " .. nSenderPid)
+            syscall("signal_send", 0, "critical_file_modified",
+                b.sPath, nSenderPid)
+        end
+
+        return bOk, bResult
     end
 end
 
