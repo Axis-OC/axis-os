@@ -72,7 +72,7 @@ end
 -- =============================================
 
 g.setBackground(0); g.setForeground(0xFFFFFF); g.fill(1, 1, W, H, " ")
-g.set(1, 1, "AxisBIOS v0.5"); g.set(1, 2, "(C) 2025 Axis Corp")
+g.set(1, 1, "AxisBIOS v0.51-HV"); g.set(1, 2, "(C) 2025 Axis Corp")
 b.beep(1100, 0.1)
 
 local lo = {

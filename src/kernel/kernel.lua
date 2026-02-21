@@ -524,7 +524,7 @@ do
     end
 end
 
-kprint("info", "AxisOS Xen XKA v0.5 starting...")
+kprint("info", "AxisOS Xen XKA v0.51-HV starting...")
 kprint("info", "Copyright (C) 2026 AxisOS")
 kprint("none", "")
 
@@ -913,6 +913,54 @@ local function __load_ke_ipc()
         kprint("fail", "Failed to init ke_ipc: " .. tostring(oResult));
         return nil
     end
+end
+
+local function __load_hypervisor()
+    local sCode, sErr = primitive_load("/lib/hypervisor.lua")
+    if not sCode then
+        kprint("warn", "Hypervisor not found: " .. tostring(sErr))
+        return nil
+    end
+    local tEnv = {
+        string = string, math = math, table = table,
+        pairs = pairs, ipairs = ipairs, type = type,
+        tostring = tostring, tonumber = tonumber,
+        next = next, error = error, setmetatable = setmetatable,
+        rawget = rawget, rawset = rawset,
+        pcall = pcall, raw_computer = raw_computer,
+    }
+    local fChunk, sLoadErr = load(sCode, "@hypervisor", "t", tEnv)
+    if not fChunk then
+        kprint("fail", "Failed to parse hypervisor: " .. tostring(sLoadErr))
+        return nil
+    end
+    local bOk, oResult = pcall(fChunk)
+    if bOk and type(oResult) == "table" then return oResult end
+    kprint("fail", "Failed to init hypervisor: " .. tostring(oResult))
+    return nil
+end
+
+local function __load_patchguard()
+    local sCode, sErr = primitive_load("/sys/security/patchguard.lua")
+    if not sCode then
+        kprint("warn", "PatchGuard not found: " .. tostring(sErr))
+        return nil
+    end
+    local tEnv = {
+        string = string, math = math, table = table,
+        pairs = pairs, ipairs = ipairs, type = type,
+        tostring = tostring, tonumber = tonumber,
+        next = next, pcall = pcall,
+    }
+    local fChunk, sLoadErr = load(sCode, "@patchguard", "t", tEnv)
+    if not fChunk then
+        kprint("fail", "Failed to parse PatchGuard: " .. tostring(sLoadErr))
+        return nil
+    end
+    local bOk, oResult = pcall(fChunk)
+    if bOk and type(oResult) == "table" then return oResult end
+    kprint("fail", "Failed to init PatchGuard: " .. tostring(oResult))
+    return nil
 end
 
 -------------------------------------------------
@@ -1842,6 +1890,36 @@ kernel.tSyscallTable["syscall_override"] = {
         return true
     end,
     allowed_rings = {1}
+}
+
+kernel.tSyscallTable["patchguard_arm"] = {
+    func = function(nPid)
+        if not g_oPatchGuard then return false, "PatchGuard not loaded" end
+        -- Re-snapshot to capture current state (overrides registered by now)
+        g_oPatchGuard.TakeSnapshot()
+        return g_oPatchGuard.Arm()
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["patchguard_status"] = {
+    func = function(nPid)
+        if not g_oPatchGuard then
+            return { bArmed = false, bAvailable = false }
+        end
+        local tStats = g_oPatchGuard.GetStats()
+        tStats.bAvailable = true
+        return tStats
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["patchguard_check"] = {
+    func = function(nPid)
+        if not g_oPatchGuard then return true end
+        return g_oPatchGuard.Check()
+    end,
+    allowed_rings = {0, 1}
 }
 
 -- Process Management
