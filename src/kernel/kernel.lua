@@ -3323,6 +3323,22 @@ else
     kprint("warn", "Kernel IPC subsystem not available.")
 end
 
+-- Load Metatable Hypervisor
+g_oHypervisor = __load_hypervisor()
+if g_oHypervisor then
+    kprint("ok", "Metatable Hypervisor loaded (freeze, snapshot, verify)")
+else
+    kprint("warn", "Hypervisor not available — no metatable-based protection")
+end
+
+-- Load PatchGuard (Kernel Integrity Monitor)
+g_oPatchGuard = __load_patchguard()
+if g_oPatchGuard then
+    kprint("ok", "PatchGuard loaded — will arm after boot completes")
+else
+    kprint("warn", "PatchGuard not available — no runtime integrity monitoring")
+end
+
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")
 local tFstab = primitive_load_lua("/etc/fstab.lua")
@@ -3395,6 +3411,20 @@ if not nPipelinePid then
 end
 kernel.nPipelinePid = nPipelinePid
 kprint("ok", "Ring 1 Pipeline Manager started as PID", nPipelinePid)
+
+-- Initialize PatchGuard with kernel references
+if g_oPatchGuard then
+    g_oPatchGuard.Initialize({
+        tSyscallTable     = kernel.tSyscallTable,
+        tSyscallOverrides = kernel.tSyscallOverrides,
+        nPipelinePid      = kernel.nPipelinePid,
+        fPanic            = function(s) kernel.panic(s) end,
+        fLog              = function(s) kprint("sec", s) end,
+        fUptime           = raw_computer.uptime,
+    })
+    kprint("ok", "PatchGuard snapshot taken — waiting for boot to complete before arming")
+end
+
 
 -------------------------------------------------
 -- MAIN KERNEL EVENT LOOP
