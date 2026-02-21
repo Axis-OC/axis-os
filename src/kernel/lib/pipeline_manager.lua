@@ -1439,7 +1439,7 @@ while true do
             local sName = tData.name
             local tArgs = tData.args
             local nCaller = tData.sender_pid
-            local sSynapseToken = tData.synapse_token -- sMLTR: token from kernel
+            local sSynapseToken = tData.synapse_token
             local result1, result2
 
             if sName == "vfs_open" then
@@ -1452,6 +1452,10 @@ while true do
                 result1, result2 = vfs_state.handle_close(nCaller, sSynapseToken, tArgs[1])
             elseif sName == "vfs_list" then
                 result1, result2 = vfs_state.handle_list(nCaller, tArgs[1])
+            elseif sName == "vfs_delete" then
+                result1, result2 = vfs_state.handle_delete(nCaller, tArgs[1])
+            elseif sName == "vfs_mkdir" then
+                result1, result2 = vfs_state.handle_mkdir(nCaller, tArgs[1])
             elseif sName == "vfs_chmod" then
                 result1, result2 = vfs_state.handle_chmod(nCaller, tArgs[1], tArgs[2])
             elseif sName == "vfs_device_control" then

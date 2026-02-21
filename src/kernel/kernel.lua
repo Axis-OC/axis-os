@@ -1980,11 +1980,58 @@ kernel.tSyscallTable["process_kill"] = {
         if not tTarget then
             return nil, "No such process"
         end
-        local nCallerRing = kernel.tRings[nPid]
-        if nCallerRing > 1 and tTarget.parent ~= nPid then
-            return nil, "Permission denied"
+
+        local nCallerRing = kernel.tRings[nPid] or 3
+        local nTargetRing = kernel.tRings[nTargetPid] or 3
+
+        -- RULE 1: KERNEL PROTECTION — PID 0-1 only from Ring 0
+        if nTargetPid <= 1 and nCallerRing > 0 then
+            kprint("sec", "BLOCKED: PID " .. nPid .. " (Ring " .. nCallerRing ..
+                   ") tried to kill kernel PID " .. nTargetPid)
+            return nil, "Permission denied: cannot kill kernel process"
         end
-        -- Use signal system if available, otherwise direct kill
+
+        -- RULE 2: RING HIERARCHY — cannot kill more-privileged process
+        if nCallerRing > nTargetRing then
+            kprint("sec", "BLOCKED: PID " .. nPid .. " (Ring " .. nCallerRing ..
+                   ") tried to kill PID " .. nTargetPid .. " (Ring " .. nTargetRing .. ")")
+            return nil, "Permission denied: cannot kill higher-privilege process"
+        end
+
+        -- RULE 3: ANCESTOR PROTECTION
+        -- A process cannot kill any of its own ancestors (parent,
+        -- grandparent, etc).  Killing an ancestor destroys your own
+        -- session, which is never a legitimate operation.
+        -- This also protects init from being killed by its children.
+        local nWalk = nPid
+        local nMaxDepth = 32  -- prevent infinite loops
+        local nDepth = 0
+        while nWalk and nDepth < nMaxDepth do
+            local tWalk = kernel.tProcessTable[nWalk]
+            if not tWalk then break end
+            local nParent = tWalk.parent
+            if nParent == nTargetPid then
+                kprint("sec", "BLOCKED: PID " .. nPid ..
+                       " tried to kill ancestor PID " .. nTargetPid ..
+                       " (depth=" .. (nDepth + 1) .. ")")
+                return nil, "Permission denied: cannot kill ancestor process"
+            end
+            if nParent == nWalk then break end  -- root of tree
+            nWalk = nParent
+            nDepth = nDepth + 1
+        end
+
+        -- RULE 4: OWNERSHIP — Ring 3 non-root must own the target
+        if nCallerRing >= 3 then
+            local nCallerUid = kernel.tProcessTable[nPid]
+                and kernel.tProcessTable[nPid].uid or 1000
+            if nCallerUid ~= 0 then
+                if tTarget.parent ~= nPid and nTargetPid ~= nPid then
+                    return nil, "Permission denied: not owner"
+                end
+            end
+        end
+
         if g_oIpc then
             nSignal = nSignal or g_oIpc.SIGTERM
             return g_oIpc.SignalSend(nTargetPid, nSignal)
@@ -2758,13 +2805,77 @@ kernel.tSyscallTable["ke_mq_receive"] = {
 -- Signals
 kernel.tSyscallTable["ke_signal_send"] = {
     func = function(nPid, nTarget, nSig)
-        if not g_oIpc then
-            return nil
+        if not g_oIpc then return nil end
+
+        local nCallerRing = kernel.tRings[nPid] or 3
+        local tTarget = kernel.tProcessTable[nTarget]
+        if not tTarget then return nil, "No such process" end
+
+        local nTargetRing = kernel.tRings[nTarget] or 3
+
+        -- RULE 1: KERNEL PROTECTION
+        -- PID 0-1 cannot be signalled from anyone except Ring 0.
+        if nTarget <= 1 and nCallerRing > 0 then
+            kprint("sec", "BLOCKED: PID " .. nPid .. " (Ring " .. nCallerRing ..
+                   ") tried to signal kernel PID " .. nTarget ..
+                   " (sig=" .. tostring(nSig) .. ")")
+            return nil, "Permission denied: cannot signal kernel process"
         end
+
+        -- RULE 2: RING HIERARCHY
+        -- A process cannot send signals to a process running at a
+        -- MORE privileged ring.  Ring 3 cannot signal Ring 2, Ring 1, etc.
+        -- This prevents root-at-Ring-3 from killing system services.
+        if nCallerRing > nTargetRing then
+            kprint("sec", "BLOCKED: PID " .. nPid .. " (Ring " .. nCallerRing ..
+                   ") tried to signal PID " .. nTarget .. " (Ring " .. nTargetRing ..
+                   ") — ring hierarchy violation (sig=" .. tostring(nSig) .. ")")
+            return nil, "Permission denied: cannot signal higher-privilege process"
+        end
+
+        -- RULE 3: ANCESTOR PROTECTION
+        -- Cannot signal any ancestor in the process tree.
+
+        local nWalk = nPid
+        local nMaxDepth = 32
+        local nDepth = 0
+        while nWalk and nDepth < nMaxDepth do
+            local tWalk = kernel.tProcessTable[nWalk]
+            if not tWalk then break end
+            local nParent = tWalk.parent
+            if nParent == nTarget then
+                kprint("sec", "BLOCKED: PID " .. nPid ..
+                       " tried to signal ancestor PID " .. nTarget ..
+                       " (depth=" .. (nDepth + 1) .. ", sig=" .. tostring(nSig) .. ")")
+                return nil, "Permission denied: cannot signal ancestor process"
+            end
+            if nParent == nWalk then break end
+            nWalk = nParent
+            nDepth = nDepth + 1
+        end
+
+        -- RULE 4: OWNERSHIP (Ring 3 non-root)
+        -- Non-root Ring 3 can only signal own children or self.
+        if nCallerRing >= 3 then
+            local nCallerUid = kernel.tProcessTable[nPid]
+                and kernel.tProcessTable[nPid].uid or 1000
+
+            if nCallerUid ~= 0 then
+                if tTarget.parent ~= nPid and nTarget ~= nPid then
+                    kprint("sec", "BLOCKED: PID " .. nPid .. " (UID " .. nCallerUid ..
+                           ") tried to signal PID " .. nTarget .. " (not owned)")
+                    return nil, "Permission denied: not owner"
+                end
+            end
+        end
+
+        -- RULE 4: Root at Ring 3 can signal same-ring or less-privileged.
+        -- (Already passed rules 1-3 if we get here.)
         return g_oIpc.SignalSend(nTarget, nSig)
     end,
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
+
 kernel.tSyscallTable["ke_signal_handler"] = {
     func = function(nPid, nSig, fHandler)
         if not g_oIpc then
@@ -2783,15 +2894,41 @@ kernel.tSyscallTable["ke_signal_mask"] = {
     end,
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
+
 kernel.tSyscallTable["ke_signal_group"] = {
     func = function(nPid, nPgid, nSig)
-        if not g_oIpc then
-            return nil
+        if not g_oIpc then return nil end
+
+        local nCallerRing = kernel.tRings[nPid] or 3
+
+        -- Filter: iterate the group and skip any process more privileged
+        -- than the caller.  This prevents a Ring 3 group-kill from
+        -- hitting Ring 1-2 services that share a PGID.
+        local nSent, nBlocked = 0, 0
+        for nTargetPid, tProc in pairs(kernel.tProcessTable) do
+            if tProc.pgid == nPgid or (nPgid == 0 and tProc.parent == nPid) then
+                local nTargetRing = kernel.tRings[nTargetPid] or 3
+
+                if nTargetPid <= 1 and nCallerRing > 0 then
+                    nBlocked = nBlocked + 1
+                elseif nCallerRing > nTargetRing then
+                    nBlocked = nBlocked + 1
+                else
+                    g_oIpc.SignalSend(nTargetPid, nSig)
+                    nSent = nSent + 1
+                end
+            end
         end
-        return g_oIpc.SignalSendGroup(nPgid, nSig)
+
+        if nBlocked > 0 then
+            kprint("sec", "PID " .. nPid .. " group signal: " .. nSent ..
+                   " delivered, " .. nBlocked .. " blocked (ring hierarchy)")
+        end
+        return nSent > 0
     end,
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
+
 kernel.tSyscallTable["ke_setpgid"] = {
     func = function(nPid, nTarget, nPgid)
         if not g_oIpc then
@@ -3425,7 +3562,6 @@ if g_oPatchGuard then
     kprint("ok", "PatchGuard snapshot taken — waiting for boot to complete before arming")
 end
 
-
 -------------------------------------------------
 -- MAIN KERNEL EVENT LOOP
 -------------------------------------------------
@@ -3584,6 +3720,10 @@ while true do
     -- and timers are checked exactly once per scheduler pass.
     if g_oIpc then
         g_oIpc.Tick()
+    end
+
+    if g_oPatchGuard then
+        g_oPatchGuard.Tick()
     end
 
     -- ====== OOM KILLER ======

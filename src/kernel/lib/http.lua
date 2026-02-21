@@ -51,14 +51,22 @@ function oHttp.open(sUrl, sMethod, sBody, tHeaders, nTimeout)
   }
 
   function tStream:read(nCount)
-    if self._bClosed then return nil end
-    local bReadOk, sData = fs.deviceControl(self._hNet, "http_read", {
-      self._nSession, nCount or math.huge
-    })
-    if bReadOk and sData and type(sData) == "string" and #sData > 0 then
-      return sData
-    end
-    return nil
+      if self._bClosed then return nil end
+      -- Retry nil reads: chunked responses via reverse proxies
+      -- (Cloudflare, nginx) have gaps between TCP segments.
+      -- Each yield ≈ 50ms (one OC tick), 8 retries ≈ 400ms max wait.
+      local nRetries = 0
+      while nRetries < 8 do
+          local bReadOk, sData = fs.deviceControl(self._hNet, "http_read", {
+              self._nSession, nCount or math.huge
+          })
+          if bReadOk and sData and type(sData) == "string" and #sData > 0 then
+              return sData
+          end
+          nRetries = nRetries + 1
+          pcall(function() syscall("process_yield") end)
+      end
+      return nil  -- true EOF after retries exhausted
   end
 
   function tStream:close()
@@ -82,10 +90,15 @@ local function fFullRequest(sUrl, sMethod, sBody, tHeaders, nTimeout)
   end
 
   local tChunks = {}
-  while true do
+  local nNilReads = 0
+  while nNilReads < 4 do
     local sChunk = stream:read(4096)
-    if not sChunk then break end
-    table.insert(tChunks, sChunk)
+    if sChunk then
+      table.insert(tChunks, sChunk)
+      nNilReads = 0
+    else
+      nNilReads = nNilReads + 1
+    end
   end
 
   local tResp = {

@@ -3,6 +3,8 @@
 -- xpm — Xen Package Manager for AxisOS
 --
 -- Syntax (Void/Arch hybrid):
+--   xpm init                  Initialize local database
+--   xpm config [key] [val]    View/edit configuration
 --   xpm sync                  Sync package database
 --   xpm install <pkg> [...]   Install package(s)
 --   xpm remove <pkg> [...]    Remove package(s)
@@ -10,6 +12,7 @@
 --   xpm list                  List installed packages
 --   xpm info <pkg>            Show package details
 --   xpm update                Re-download all installed packages
+--   xpm sign <file>           Sign a package file (requires APPROVED key)
 --
 -- Short flags:
 --   xpm -Sy                   sync
@@ -29,11 +32,15 @@ local tArgs = env.ARGS or {}
 -- CONFIGURATION
 -- =============================================
 
-local REPO_URL       = "https://repo.axis-os.ru"
-local INDEX_URL      = REPO_URL .. "/_sys/pkgindex"
+local DEFAULT_REPO   = "https://repo.axis-os.ru"
 local DB_DIR         = "/etc/xpm"
+local CONF_PATH      = DB_DIR .. "/xpm.conf"
 local DB_PATH        = DB_DIR .. "/pkgdb.lua"
 local INSTALLED_PATH = DB_DIR .. "/installed.lua"
+
+-- These are set from config at load time
+local REPO_URL  = DEFAULT_REPO
+local INDEX_URL  = DEFAULT_REPO .. "/_sys/pkgindex.php"
 
 -- =============================================
 -- COLORS
@@ -64,12 +71,27 @@ local CAT_LABELS = {
 -- =============================================
 -- OUTPUT HELPERS
 -- =============================================
+local _buf = {}
+local _bufN = 0
 
-local function arrow(s)   io.write(C.BLU .. ":: " .. C.R .. s .. "\n") end
-local function step(s)    io.write(C.GRN .. "   " .. C.R .. s .. "\n") end
-local function warn(s)    io.write(C.YLW .. ":: " .. C.R .. s .. "\n") end
-local function fail(s)    io.write(C.RED .. ":: " .. C.R .. s .. "\n") end
-local function dim(s)     io.write(C.GRY .. "   " .. s .. C.R .. "\n") end
+local function out(s)
+    _bufN = _bufN + 1
+    _buf[_bufN] = s
+end
+
+local function flush()
+    if _bufN > 0 then
+        for i = _bufN + 1, #_buf do _buf[i] = nil end
+        io.write(table.concat(_buf))
+        _bufN = 0
+    end
+end
+
+local function arrow(s)   out(C.BLU .. ":: " .. C.R .. s .. "\n") end
+local function step(s)    out(C.GRN .. "   " .. C.R .. s .. "\n") end
+local function warn(s)    out(C.YLW .. ":: " .. C.R .. s .. "\n") end
+local function fail(s)    out(C.RED .. ":: " .. C.R .. s .. "\n") end
+local function dim(s)     out(C.GRY .. "   " .. s .. C.R .. "\n") end
 
 local function fmtSize(n)
   if n >= 1048576 then return string.format("%.1f MB", n / 1048576) end
@@ -77,7 +99,9 @@ local function fmtSize(n)
   return n .. " B"
 end
 
+-- Progress bar: flushes buffer first, then writes directly for \r updates
 local function progress(nCur, nTotal, sLabel)
+  flush()
   local nW = 28
   local nPct = math.floor((nCur / math.max(nTotal, 1)) * 100)
   local nFill = math.floor((nCur / math.max(nTotal, 1)) * nW)
@@ -87,15 +111,25 @@ local function progress(nCur, nTotal, sLabel)
 end
 
 -- =============================================
--- DATABASE
+-- FILESYSTEM HELPERS
 -- =============================================
 
-local g_tDb = nil         -- cached package index
-local g_tInstalled = nil  -- installed tracking
-
 local function ensureDir()
+  fs.mkdir("/etc")
   fs.mkdir(DB_DIR)
 end
+
+local function stripBom(s)
+  if not s then return s end
+  if s:sub(1, 3) == "\239\187\191" then return s:sub(4) end
+  return s
+end
+
+-- =============================================
+-- CONFIG SYSTEM
+-- =============================================
+
+local g_tConf = nil
 
 local function loadLuaFile(sPath)
   local h = fs.open(sPath, "r")
@@ -103,12 +137,63 @@ local function loadLuaFile(sPath)
   local s = fs.read(h, math.huge)
   fs.close(h)
   if not s or #s == 0 then return nil end
+  s = stripBom(s)
+  -- Use kernel load to parse safely
   local f = load(s, sPath, "t", {})
   if not f then return nil end
   local bOk, tResult = pcall(f)
   if bOk and type(tResult) == "table" then return tResult end
   return nil
 end
+
+local function loadConf()
+  if g_tConf then return g_tConf end
+  g_tConf = loadLuaFile(CONF_PATH)
+  if not g_tConf then
+    -- Default config (xpm not initialized)
+    g_tConf = {
+      repos = {{name = "axis", url = DEFAULT_REPO, siglevel = "Optional"}},
+      siglevel = "Optional",
+      cache_dir = "/tmp/xpm",
+    }
+  end
+  -- Apply repo URL from config
+  if g_tConf.repos and g_tConf.repos[1] and g_tConf.repos[1].url then
+    REPO_URL = g_tConf.repos[1].url
+  end
+  INDEX_URL = REPO_URL .. "/_sys/pkgindex.php"
+  return g_tConf
+end
+
+local function saveConf(tConf)
+  ensureDir()
+  local h = fs.open(CONF_PATH, "w")
+  if not h then return false end
+  fs.write(h, "-- /etc/xpm/xpm.conf\n")
+  fs.write(h, "-- xpm package manager configuration\n")
+  fs.write(h, "return {\n")
+  fs.write(h, "  repos = {\n")
+  for _, repo in ipairs(tConf.repos or {}) do
+    fs.write(h, string.format('    {name="%s", url="%s", siglevel="%s"},\n',
+      repo.name or "axis",
+      repo.url or DEFAULT_REPO,
+      repo.siglevel or "Optional"))
+  end
+  fs.write(h, "  },\n")
+  fs.write(h, string.format('  siglevel = "%s",\n', tConf.siglevel or "Optional"))
+  fs.write(h, string.format('  cache_dir = "%s",\n', tConf.cache_dir or "/tmp/xpm"))
+  fs.write(h, "}\n")
+  fs.close(h)
+  g_tConf = tConf
+  return true
+end
+
+-- =============================================
+-- DATABASE
+-- =============================================
+
+local g_tDb = nil
+local g_tInstalled = nil
 
 local function saveLuaFile(sPath, tData)
   ensureDir()
@@ -119,7 +204,7 @@ local function saveLuaFile(sPath, tData)
     local parts = {}
     for k, v in pairs(t) do
       if type(v) == "string" then
-        table.insert(parts, k .. '="' .. v .. '"')
+        table.insert(parts, k .. '="' .. v:gsub('"', '\\"') .. '"')
       elseif type(v) == "number" then
         table.insert(parts, k .. '=' .. v)
       end
@@ -167,7 +252,6 @@ end
 
 local function addInstalled(tPkg)
   local tInst = loadInstalled()
-  -- remove old entry if exists
   local tNew = {}
   for _, p in ipairs(tInst) do
     if p.name ~= tPkg.name then table.insert(tNew, p) end
@@ -194,10 +278,79 @@ local function removeInstalled(sName)
 end
 
 -- =============================================
+-- SIGNATURE VERIFICATION
+-- =============================================
+
+local function getSigLevel()
+  local tConf = loadConf()
+  return tConf.siglevel or "Optional"
+end
+
+local function verifySig(sContent, tSigData)
+  -- Returns: true/false, reason string
+  if not tSigData then return false, "no signature" end
+  if not tSigData.hash or not tSigData.sig or not tSigData.signer then
+    return false, "malformed signature"
+  end
+
+  local bOk, crypto = pcall(require, "crypto")
+  if not bOk then return false, "crypto library unavailable" end
+
+  local bInit, nTier = crypto.Init()
+  if not bInit then return false, "no data card" end
+
+  -- Verify hash matches content
+  local sHash = crypto.Encode64(crypto.SHA256(sContent))
+  if sHash ~= tSigData.hash then
+    return false, "hash mismatch (content modified)"
+  end
+
+  -- If Tier 3, verify ECDSA signature
+  if nTier >= 3 then
+    -- Load approved keystore
+    local tKeys = loadLuaFile("/etc/pki_keystore.lua") or {}
+    local tKeyInfo = tKeys[tSigData.signer]
+    if not tKeyInfo then
+      return false, "signer key not in approved keystore"
+    end
+    local oPubKey = crypto.DeserializeKey(tKeyInfo.public_key, "ec-public")
+    if not oPubKey then
+      return false, "cannot deserialize signer public key"
+    end
+    local sSigRaw = crypto.Decode64(tSigData.sig)
+    local bValid = crypto.Verify(sContent, sSigRaw, oPubKey)
+    if not bValid then
+      return false, "ECDSA signature INVALID"
+    end
+    return true, "verified (signer: " .. (tKeyInfo.username or "?") .. ")"
+  end
+
+  -- Tier < 3: hash-only verification passed
+  return true, "hash verified (no ECDSA - Tier < 3)"
+end
+
+local function fetchSig(sUrl)
+  -- Try to download <url>.sig
+  local sSigUrl = sUrl .. ".sig"
+  local resp = http.get(sSigUrl)
+  if not resp or resp.code ~= 200 or not resp.body or #resp.body == 0 then
+    return nil
+  end
+  local sBody = stripBom(resp.body)
+  local f = load(sBody, "sig", "t", {})
+  if not f then return nil end
+  local bOk, tResult = pcall(f)
+  if bOk and type(tResult) == "table" then return tResult end
+  return nil
+end
+
+-- =============================================
 -- NETWORK
 -- =============================================
 
 local function download(sUrl, sDest, nExpectedSize)
+  flush()
+
   local stream, sErr = http.open(sUrl)
   if not stream then return nil, sErr end
 
@@ -234,7 +387,7 @@ local function download(sUrl, sDest, nExpectedSize)
 
   fs.close(hFile)
   stream:close()
-  io.write("\n")  -- newline after progress bar
+  out("\n")
   return nRecv
 end
 
@@ -242,43 +395,218 @@ end
 -- COMMANDS
 -- =============================================
 
+-- === INIT ===
+local function cmdInit()
+  arrow("Initializing xpm package manager...")
+
+  ensureDir()
+
+  -- Check if already initialized
+  local tExisting = loadLuaFile(CONF_PATH)
+  if tExisting then
+    warn("xpm is already initialized.")
+    dim("Config:    " .. CONF_PATH)
+    dim("Database:  " .. DB_PATH)
+    dim("Installed: " .. INSTALLED_PATH)
+    print("")
+    dim("Run 'xpm config' to view/modify settings.")
+    return true
+  end
+
+  -- Create default config
+  local tDefConf = {
+    repos = {{name = "axis", url = DEFAULT_REPO, siglevel = "Optional"}},
+    siglevel = "Optional",
+    cache_dir = "/tmp/xpm",
+  }
+  if not saveConf(tDefConf) then
+    fail("Cannot create config file at " .. CONF_PATH)
+    return false
+  end
+  step("Created " .. CONF_PATH)
+
+  -- Create empty installed database
+  if not loadLuaFile(INSTALLED_PATH) then
+    saveLuaFile(INSTALLED_PATH, {})
+    step("Created " .. INSTALLED_PATH)
+  end
+
+  -- Create cache dir
+  fs.mkdir("/tmp")
+  fs.mkdir("/tmp/xpm")
+
+  print("")
+  arrow(C.GRN .. "xpm initialized successfully." .. C.R)
+  print("")
+  dim("Configuration:")
+  dim("  SigLevel:  Optional  (warn on unsigned)")
+  dim("  Repository: " .. DEFAULT_REPO)
+  print("")
+  dim("Next steps:")
+  dim("  xpm sync              Sync package database")
+  dim("  xpm config siglevel   Change signature policy")
+  dim("  xpm search <term>     Find packages")
+  dim("  xpm install <pkg>     Install packages")
+  return true
+end
+
+-- === CONFIG ===
+local function cmdConfig(tRest)
+  local tConf = loadConf()
+
+  -- No args: show everything
+  if #tRest == 0 then
+    arrow("xpm configuration (" .. CONF_PATH .. ")")
+    print("")
+
+    io.write(C.CYN .. "  Repositories:" .. C.R .. "\n")
+    for i, repo in ipairs(tConf.repos or {}) do
+      io.write(string.format("    [%d] %s%s%s\n", i, C.WHT, repo.name, C.R))
+      dim("        URL:      " .. repo.url)
+      local sRL = repo.siglevel or tConf.siglevel or "Optional"
+      local sRC = sRL == "Required" and C.RED or (sRL == "Never" and C.GRY or C.YLW)
+      dim("        SigLevel: " .. sRC .. sRL .. C.GRY)
+    end
+
+    print("")
+    local sSL = tConf.siglevel or "Optional"
+    local sSC = sSL == "Required" and C.RED or (sSL == "Never" and C.GRY or C.YLW)
+    io.write(C.CYN .. "  Global SigLevel: " .. sSC .. sSL .. C.R .. "\n")
+    print("")
+    dim("  SigLevel values:")
+    dim("    Required — refuse unsigned packages entirely")
+    dim("    Optional — install unsigned, warn if sig invalid")
+    dim("    Never    — skip all signature verification")
+    print("")
+    dim("  Set with: xpm config siglevel <Required|Optional|Never>")
+    dim("  Set repo: xpm config repo <url>")
+    return
+  end
+
+  local sKey = tRest[1]
+  local sVal = tRest[2]
+
+  if sKey == "siglevel" then
+    if not sVal then
+      step("Current SigLevel: " .. (tConf.siglevel or "Optional"))
+      return
+    end
+    -- Normalize capitalization
+    local sNorm = sVal:sub(1,1):upper() .. sVal:sub(2):lower()
+    if sNorm ~= "Required" and sNorm ~= "Optional" and sNorm ~= "Never" then
+      fail("Invalid SigLevel: " .. sVal)
+      dim("Must be one of: Required, Optional, Never")
+      return
+    end
+    tConf.siglevel = sNorm
+    -- Also update all repos that don't have explicit override
+    for _, repo in ipairs(tConf.repos or {}) do
+      repo.siglevel = sNorm
+    end
+    saveConf(tConf)
+    step("SigLevel set to: " .. C.WHT .. sNorm .. C.R)
+
+  elseif sKey == "repo" then
+    if not sVal then
+      step("Current repo URL: " .. (tConf.repos[1] and tConf.repos[1].url or DEFAULT_REPO))
+      return
+    end
+    if not sVal:match("^https?://") then
+      fail("Invalid URL: " .. sVal)
+      return
+    end
+    if tConf.repos[1] then
+      tConf.repos[1].url = sVal
+    else
+      tConf.repos = {{name = "custom", url = sVal, siglevel = tConf.siglevel}}
+    end
+    saveConf(tConf)
+    step("Repository URL set to: " .. C.WHT .. sVal .. C.R)
+
+  else
+    fail("Unknown config key: " .. sKey)
+    dim("Available keys: siglevel, repo")
+  end
+end
+
 -- === SYNC ===
 local function cmdSync()
+  loadConf()
+
+  local tExisting = loadLuaFile(CONF_PATH)
+  if not tExisting then
+    warn("xpm not initialized. Running init first...")
+    flush()
+    cmdInit()
+    loadConf()
+  end
+
   arrow("Syncing package database...")
   dim(INDEX_URL)
+  flush()  -- show "Syncing..." before network wait
 
-  local resp = http.get(INDEX_URL)
+  local resp = http.get(INDEX_URL, nil, 15)  -- 15s timeout for slow connections
 
   if not resp or resp.code ~= 200 or not resp.body then
     fail("Failed to fetch package index")
-    if resp then dim("HTTP " .. (resp.code or "?") .. " " .. (resp.error or "")) end
+    if resp then
+      dim("HTTP " .. (resp.code or "?") .. " " .. (resp.error or ""))
+      if resp.body and #resp.body > 0 then
+        warn("Response (" .. #resp.body .. " bytes): " .. resp.body:sub(1, 80))
+      end
+    end
+    dim("URL: " .. INDEX_URL)
+    dim("Check: xpm config repo")
     return false
   end
 
-  -- Validate the response is actually Lua
-  local fTest = load(resp.body, "pkgindex", "t", {})
+  -- ... rest unchanged
+
+  local sBody = stripBom(resp.body)
+
+  -- Trim leading whitespace
+  sBody = sBody:gsub("^%s+", "")
+
+  if #sBody == 0 then
+    fail("Empty response from server")
+    return false
+  end
+
+  -- Validate the response is Lua
+  local fTest, sLoadErr = load(sBody, "pkgindex", "t", {})
   if not fTest then
-    fail("Received invalid package index")
+    fail("Received invalid package index (not valid Lua)")
+    dim("Parse error: " .. tostring(sLoadErr))
+    dim("First 80 chars: " .. sBody:sub(1, 80))
     return false
   end
 
   local bOk, tTest = pcall(fTest)
-  if not bOk or type(tTest) ~= "table" then
-    fail("Package index is corrupt")
+  if not bOk then
+    fail("Package index execution error")
+    dim("Error: " .. tostring(tTest))
+    dim("This may indicate a server-side issue.")
     return false
   end
 
-  -- Save to disk
+  if type(tTest) ~= "table" then
+    fail("Package index returned " .. type(tTest) .. " (expected table)")
+    warn("First 80 chars: " .. sBody:sub(1, 80))    -- was dim(), now visible
+    warn("Body length: " .. #sBody .. " bytes")       -- ADD this line
+    return false
+  end
+
+  -- Save raw response to disk (not re-serialized — preserve server format)
   ensureDir()
   local h = fs.open(DB_PATH, "w")
   if not h then
     fail("Cannot write to " .. DB_PATH)
     return false
   end
-  fs.write(h, resp.body)
+  fs.write(h, sBody)
   fs.close(h)
 
-  g_tDb = tTest  -- update cache
+  g_tDb = tTest
 
   -- Count by category
   local tCounts = {}
@@ -303,12 +631,15 @@ local function cmdInstall(tNames)
     return
   end
 
+  loadConf()
+
   -- Auto-sync if no DB
   if not loadDb() then
     warn("No package database. Syncing...")
     if not cmdSync() then return end
   end
 
+  local sSigLevel = getSigLevel()
   local nInstalled = 0
 
   for _, sName in ipairs(tNames) do
@@ -343,6 +674,43 @@ local function cmdInstall(tNames)
       goto nextPkg
     end
 
+    -- Signature verification
+    if sSigLevel ~= "Never" then
+      local hCheck = fs.open(sDest, "r")
+      local sContent = hCheck and fs.read(hCheck, math.huge) or nil
+      if hCheck then fs.close(hCheck) end
+
+      if sContent then
+        local tSigData = fetchSig(sUrl)
+
+        if tSigData then
+          local bValid, sReason = verifySig(sContent, tSigData)
+          if bValid then
+            step(C.GRN .. "Signature OK" .. C.R .. " (" .. sReason .. ")")
+          else
+            if sSigLevel == "Required" then
+              fail("Signature FAILED: " .. sReason)
+              fail("SigLevel=Required — refusing to install.")
+              fs.remove(sDest)
+              goto nextPkg
+            else
+              warn("Signature issue: " .. sReason)
+            end
+          end
+        else
+          -- No signature available
+          if sSigLevel == "Required" then
+            fail("No signature found for " .. sName)
+            fail("SigLevel=Required — refusing to install unsigned package.")
+            fs.remove(sDest)
+            goto nextPkg
+          elseif sSigLevel == "Optional" then
+            dim("No signature available (SigLevel=Optional, proceeding)")
+          end
+        end
+      end
+    end
+
     -- Track installation
     addInstalled(tPkg)
     nInstalled = nInstalled + 1
@@ -350,7 +718,6 @@ local function cmdInstall(tNames)
     step(C.GRN .. "Installed " .. C.R .. sName ..
          C.GRY .. " (" .. fmtSize(nBytes) .. ")" .. C.R)
 
-    -- Special post-install actions
     if tPkg.cat == "drivers" then
       dim("Load with: insmod " .. sDest)
     end
@@ -361,6 +728,60 @@ local function cmdInstall(tNames)
   if nInstalled > 0 then
     print("")
     arrow(C.GRN .. nInstalled .. " package(s) installed." .. C.R)
+  end
+end
+
+-- === OUTDATED ===
+local function cmdOutdated()
+  loadConf()
+  if not loadDb() then
+    warn("No database. Run: xpm sync")
+    return
+  end
+  local tInst = loadInstalled()
+  if #tInst == 0 then
+    warn("No packages installed.")
+    return
+  end
+
+  arrow("Checking for updates...")
+  flush()
+
+  local nOutdated = 0
+  for _, tEntry in ipairs(tInst) do
+    local tRemote = findPkg(tEntry.name)
+    if not tRemote then
+      warn(tEntry.name .. ": removed from repository")
+      nOutdated = nOutdated + 1
+    else
+      -- Compare file size as a simple change indicator
+      -- (proper versioning would need a version field in the index)
+      local sPath = tEntry.path or (tEntry.dest .. tEntry.file)
+      local hLocal = fs.open(sPath, "r")
+      if hLocal then
+        local sData = fs.read(hLocal, math.huge) or ""
+        fs.close(hLocal)
+        if #sData ~= tRemote.size then
+          nOutdated = nOutdated + 1
+          out(string.format("  %s%-16s%s  local: %s  remote: %s  %s%s%s\n",
+              C.WHT, tEntry.name, C.R,
+              fmtSize(#sData), fmtSize(tRemote.size),
+              C.YLW, "UPDATE AVAILABLE", C.R))
+        end
+      else
+        nOutdated = nOutdated + 1
+        out(string.format("  %s%-16s%s  %sMISSING (reinstall needed)%s\n",
+            C.WHT, tEntry.name, C.R, C.RED, C.R))
+      end
+    end
+  end
+
+  if nOutdated == 0 then
+    arrow(C.GRN .. "All packages up to date." .. C.R)
+  else
+    out("\n")
+    arrow(nOutdated .. " package(s) can be updated.")
+    dim("Run: xpm update")
   end
 end
 
@@ -375,7 +796,6 @@ local function cmdRemove(tNames)
   local nRemoved = 0
 
   for _, sName in ipairs(tNames) do
-    -- Find in installed list
     local tEntry = nil
     for _, p in ipairs(tInst) do
       if p.name == sName then tEntry = p; break end
@@ -414,6 +834,8 @@ local function cmdSearch(sTerm)
     print("   Usage: xpm search <term>")
     return
   end
+
+  loadConf()
 
   if not loadDb() then
     warn("No package database. Syncing...")
@@ -482,12 +904,127 @@ local function cmdList()
   end
 end
 
+local function cmdRemoteList(tRest)
+  loadConf()
+
+  if not loadDb() then
+    warn("No package database. Syncing...")
+    flush()
+    if not cmdSync() then return end
+  end
+
+  local tDb = loadDb()
+  if not tDb or #tDb == 0 then
+    warn("Package database is empty.")
+    dim("Repository may have no packages, or sync failed.")
+    return
+  end
+
+  local sFilter = tRest[1]
+  local sLower = sFilter and sFilter:lower() or nil
+
+  -- Group by category
+  local tGroups = {}
+  local tGroupOrder = {"drivers", "modules", "multilib", "executable"}
+  for _, cat in ipairs(tGroupOrder) do tGroups[cat] = {} end
+
+  local nTotal = 0
+  local nInstalled = 0
+
+  for _, p in ipairs(tDb) do
+    -- Apply filter
+    if sLower then
+      local bMatch = false
+      if p.name:lower():find(sLower, 1, true) then bMatch = true end
+      if p.desc and p.desc:lower():find(sLower, 1, true) then bMatch = true end
+      if p.cat:lower():find(sLower, 1, true) then bMatch = true end
+      if not bMatch then goto skipPkg end
+    end
+
+    local cat = p.cat or "executable"
+    if not tGroups[cat] then tGroups[cat] = {} end
+    local bInst = isInstalled(p.name)
+    table.insert(tGroups[cat], {pkg = p, installed = bInst})
+    nTotal = nTotal + 1
+    if bInst then nInstalled = nInstalled + 1 end
+
+    ::skipPkg::
+  end
+
+  if nTotal == 0 then
+    if sFilter then
+      warn("No packages matching '" .. sFilter .. "'")
+    else
+      warn("No packages available.")
+    end
+    return
+  end
+
+  -- Header
+  local sFilterMsg = sFilter and (" matching '" .. C.WHT .. sFilter .. C.R .. "'") or ""
+  arrow(nTotal .. " packages available" .. sFilterMsg ..
+        C.GRY .. " (" .. nInstalled .. " installed)" .. C.R)
+  out("\n")
+
+  -- Render each category
+  for _, cat in ipairs(tGroupOrder) do
+    local tList = tGroups[cat]
+    if tList and #tList > 0 then
+      local sColor = CAT_COLORS[cat] or C.GRY
+      local sLabel = CAT_LABELS[cat] or cat
+      out(string.format("  %s%s%s (%d)\n", sColor, sLabel .. "s", C.R, #tList))
+
+      -- Column header
+      out(string.format("  %s  %-20s %8s  %s%s\n",
+          C.GRY, "NAME", "SIZE", "STATUS", C.R))
+      out(C.GRY .. "  " .. string.rep("-", 52) .. C.R .. "\n")
+
+      for _, entry in ipairs(tList) do
+        local p = entry.pkg
+        local sName = p.name
+        if #sName > 18 then sName = sName:sub(1, 15) .. "..." end
+
+        local sStatus
+        if entry.installed then
+          sStatus = C.GRN .. " [installed]" .. C.R
+        else
+          sStatus = ""
+        end
+
+        local sDesc = ""
+        if p.desc and #p.desc > 0 then
+          local nMaxDesc = 30
+          sDesc = p.desc
+          if #sDesc > nMaxDesc then sDesc = sDesc:sub(1, nMaxDesc - 2) .. ".." end
+          sDesc = C.GRY .. " " .. sDesc .. C.R
+        end
+
+        out(string.format("  %s  %s%-20s%s %8s %s%s\n",
+            sColor .. "\x07" .. C.R,
+            C.WHT, sName, C.R,
+            fmtSize(p.size),
+            sStatus,
+            sDesc))
+      end
+      out("\n")
+    end
+  end
+
+  -- Footer
+  dim(string.format("  %d total, %d installed, %d available",
+      nTotal, nInstalled, nTotal - nInstalled))
+  out("\n")
+  dim("Install with: xpm install <name>")
+end
+
 -- === INFO ===
 local function cmdInfo(sName)
   if not sName then
     fail("No package specified")
     return
   end
+
+  loadConf()
 
   if not loadDb() then
     warn("No database. Syncing...")
@@ -546,7 +1083,6 @@ local function cmdUpdate()
   local nFailed  = 0
 
   for _, tEntry in ipairs(tInst) do
-    -- Look up current info from fresh DB
     local tPkg = findPkg(tEntry.name)
     if not tPkg then
       warn(tEntry.name .. ": no longer in repository (skipped)")
@@ -578,6 +1114,165 @@ local function cmdUpdate()
     nFailed > 0 and C.RED or C.GRN, nFailed, C.R))
 end
 
+-- === SIGN ===
+local function cmdSign(tRest)
+  local sPath = tRest[1]
+  if not sPath then
+    fail("Usage: xpm sign <file>")
+    dim("Signs a package file with your ECDSA key.")
+    dim("Requires an APPROVED key in the PKI system.")
+    return
+  end
+
+  -- Resolve path
+  if sPath:sub(1,1) ~= "/" then
+    sPath = (env.PWD or "/") .. "/" .. sPath
+  end
+  sPath = sPath:gsub("//", "/")
+
+  -- Load crypto
+  local bCryptoOk, crypto = pcall(require, "crypto")
+  if not bCryptoOk then
+    fail("crypto library not available")
+    return
+  end
+
+  local bInit, nTier = crypto.Init()
+  if not bInit then
+    fail("No data card found")
+    return
+  end
+  if nTier < 3 then
+    fail("Tier 3 data card required for ECDSA signing (current: Tier " .. nTier .. ")")
+    return
+  end
+
+  -- Load keys
+  local hPriv = fs.open("/etc/signing/private.key", "r")
+  if not hPriv then
+    fail("No private key found at /etc/signing/private.key")
+    dim("Generate keys first: sign -g")
+    return
+  end
+  local sPrivB64 = fs.read(hPriv, math.huge)
+  fs.close(hPriv)
+
+  local hPub = fs.open("/etc/signing/public.key", "r")
+  if not hPub then
+    fail("No public key found at /etc/signing/public.key")
+    return
+  end
+  local sPubB64 = fs.read(hPub, math.huge)
+  fs.close(hPub)
+
+  -- Check key is APPROVED via PKI
+  arrow("Checking key approval status...")
+  local bApproved = false
+  local sKeyStatus = "unknown"
+
+  local bPkiOk, oPki = pcall(require, "pki_client")
+  if bPkiOk and oPki then
+    if oPki.LoadConfig() then
+      sKeyStatus = oPki.CheckKeyStatus(sPubB64) or "unknown"
+      if sKeyStatus == "approved" then
+        bApproved = true
+        step("Key status: " .. C.GRN .. "APPROVED" .. C.R)
+      else
+        fail("Key status: " .. C.RED .. tostring(sKeyStatus):upper() .. C.R)
+      end
+    else
+      fail("Cannot load PKI config (/etc/pki.cfg)")
+      dim("Configure with: xpm config or edit /etc/pki.cfg")
+    end
+  else
+    fail("PKI client not available")
+    dim("Install pki_client: xpm install pki_client (or check /lib/pki_client.lua)")
+  end
+
+  if not bApproved then
+    fail("Only APPROVED keys may sign packages.")
+    dim("Key must be registered and approved by a PKI admin.")
+    dim("  1. Generate key:   sign -g")
+    dim("  2. Register key:   sign -r")
+    dim("  3. Wait for admin approval on pki.axis-os.ru")
+    return
+  end
+
+  -- Read file content
+  local hFile = fs.open(sPath, "r")
+  if not hFile then
+    fail("Cannot read file: " .. sPath)
+    return
+  end
+  local sContent = fs.read(hFile, math.huge)
+  fs.close(hFile)
+
+  if not sContent or #sContent == 0 then
+    fail("File is empty: " .. sPath)
+    return
+  end
+
+  -- Sign
+  arrow("Signing " .. sPath .. "...")
+  local oPrivKey = crypto.DeserializeKey(sPrivB64, "ec-private")
+  if not oPrivKey then
+    fail("Cannot deserialize private key")
+    return
+  end
+
+  local sHash = crypto.Encode64(crypto.SHA256(sContent))
+  local sSig = crypto.Sign(sContent, oPrivKey)
+  if not sSig then
+    fail("Signing operation failed")
+    return
+  end
+  local sSigB64 = crypto.Encode64(sSig)
+  local sFp = crypto.Encode64(crypto.SHA256(sPubB64))
+
+  -- Write .sig file
+  local sSigPath = sPath .. ".sig"
+  local hSig = fs.open(sSigPath, "w")
+  if not hSig then
+    fail("Cannot write signature file: " .. sSigPath)
+    return
+  end
+  fs.write(hSig, "-- xpm package signature\n")
+  fs.write(hSig, "return {\n")
+  fs.write(hSig, '  hash="' .. sHash .. '",\n')
+  fs.write(hSig, '  signer="' .. sFp .. '",\n')
+  fs.write(hSig, '  sig="' .. sSigB64 .. '",\n')
+  fs.write(hSig, "}\n")
+  fs.close(hSig)
+
+  print("")
+  arrow(C.GRN .. "Package signed successfully." .. C.R)
+  step("File:      " .. sPath)
+  step("Signature: " .. sSigPath)
+  step("Hash:      " .. sHash:sub(1, 20) .. "...")
+  step("Signer:    " .. sFp:sub(1, 20) .. "...")
+  print("")
+  dim("Upload the .sig file alongside the package on the repository.")
+  dim("Signature files are hidden from the package index automatically.")
+end
+
+local function cmdClean()
+  local tConf = loadConf()
+  local sCache = tConf.cache_dir or "/tmp/xpm"
+  local tList = fs.list(sCache)
+  if not tList or #tList == 0 then
+    arrow("Cache already clean.")
+    return
+  end
+  local nRemoved = 0
+  for _, sName in ipairs(tList) do
+    local sClean = sName:gsub("/$", "")
+    if fs.remove(sCache .. "/" .. sClean) then
+      nRemoved = nRemoved + 1
+    end
+  end
+  arrow(nRemoved .. " cached file(s) removed.")
+end
+
 -- =============================================
 -- HELP
 -- =============================================
@@ -587,14 +1282,26 @@ local function cmdHelp()
   print(C.CYN .. "  xpm" .. C.R .. " — Xen Package Manager for AxisOS")
   print(C.GRY .. "  " .. string.rep("-", 44) .. C.R)
   print("")
+  print("  " .. C.WHT .. "Setup:" .. C.R)
+  print("    xpm init              Initialize local database & config")
+  print("    xpm config [key] [v]  View/edit configuration")
+  print("")
   print("  " .. C.WHT .. "Commands:" .. C.R)
   print("    xpm sync              Sync package database")
   print("    xpm install <pkg>     Install package(s)")
+  print("    xpm outdated            Check for updates")
+  print("    xpm clean               Clear download cache")
+  print("    xpm remote-list [term]  List all available packages")
+  print("    -Sl [term]              remote-list (with optional filter)")
   print("    xpm remove <pkg>      Remove package(s)")
   print("    xpm search <term>     Search available packages")
   print("    xpm list              List installed packages")
   print("    xpm info <pkg>        Show package details")
   print("    xpm update            Update all installed packages")
+  print("")
+  print("  " .. C.WHT .. "Security:" .. C.R)
+  print("    xpm sign <file>       Sign a package (requires APPROVED key)")
+  print("    xpm config siglevel   Set signature policy")
   print("")
   print("  " .. C.WHT .. "Short flags:" .. C.R)
   print("    -Sy                   sync")
@@ -605,16 +1312,25 @@ local function cmdHelp()
   print("    -Qi <pkg>             info")
   print("    -Syu                  sync + update")
   print("")
+  print("  " .. C.WHT .. "SigLevel values:" .. C.R)
+  print("    Required              Refuse unsigned packages")
+  print("    Optional              Warn on unsigned, install anyway")
+  print("    Never                 Skip signature checks")
+  print("")
   print("  " .. C.WHT .. "Examples:" .. C.R)
+  print("    xpm init")
+  print("    xpm config siglevel Required")
   print("    xpm install curl ping")
-  print("    xpm search net")
-  print("    xpm -S iter -Syu")
+  print("    xpm sign /usr/commands/mypkg.lua")
   print("")
 end
 
 -- =============================================
 -- ARGUMENT DISPATCH
 -- =============================================
+
+-- Load config early (sets REPO_URL, INDEX_URL)
+loadConf()
 
 if #tArgs == 0 then
   cmdHelp()
@@ -626,13 +1342,18 @@ local tRest = {}
 for i = 2, #tArgs do table.insert(tRest, tArgs[i]) end
 
 -- English commands
-if sCmd == "sync"    then cmdSync()
+if sCmd == "init"    then cmdInit()
+elseif sCmd == "config"  then cmdConfig(tRest)
+elseif sCmd == "sync"    then cmdSync()
 elseif sCmd == "install" or sCmd == "add"    then cmdInstall(tRest)
+elseif sCmd == "outdated" or sCmd == "stale" then cmdOutdated()
 elseif sCmd == "remove"  or sCmd == "rm"     then cmdRemove(tRest)
 elseif sCmd == "search"  or sCmd == "find"   then cmdSearch(tRest[1])
 elseif sCmd == "list"    or sCmd == "ls"     then cmdList()
+elseif sCmd == "remote-list" or sCmd == "available" or sCmd == "rl" then cmdRemoteList(tRest)
 elseif sCmd == "info"    or sCmd == "show"   then cmdInfo(tRest[1])
 elseif sCmd == "update"  or sCmd == "upgrade"then cmdUpdate()
+elseif sCmd == "sign"    then cmdSign(tRest)
 elseif sCmd == "help"    or sCmd == "-h"     then cmdHelp()
 
 -- Pacman-style compound flags
@@ -645,7 +1366,6 @@ elseif sCmd == "-Qi"   then cmdInfo(tRest[1])
 elseif sCmd == "-Syu"  then cmdUpdate()
 
 else
-  -- Maybe they just typed a package name?
   if sCmd:sub(1, 1) ~= "-" then
     warn("Unknown command: " .. sCmd)
     dim("Did you mean: xpm install " .. sCmd .. "?")
@@ -655,3 +1375,5 @@ else
   print("")
   cmdHelp()
 end
+
+flush()
