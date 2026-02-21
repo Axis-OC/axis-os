@@ -6,6 +6,7 @@ local tStatus = require("errcheck")
 local tDKStructs = require("shared_structs")
 
 local oSec = {}
+local oHvci = nil
 
 -- Signature block format embedded in driver files:
 -- Last lines of the file contain:
@@ -88,6 +89,7 @@ function oSec.Initialize(tConfig)
             end
         end
     end
+    
 
     local nKeys = 0
     for _ in pairs(g_tApprovedKeys) do nKeys = nKeys + 1 end
@@ -97,6 +99,21 @@ function oSec.Initialize(tConfig)
     syscall("kernel_log", "[SEC] ── Ready in " .. nMs .. "ms ──")
 
     g_bInitialized = true
+
+        -- =============================================
+    -- STEP 4: HVCI (Code Integrity)
+    -- =============================================
+    syscall("kernel_log", "[SEC] [4/4] HVCI driver whitelist...")
+    local bHvciOk
+    bHvciOk, oHvci = pcall(require, "hvci")
+    if bHvciOk and oHvci then
+        oHvci.Initialize(g_nSecurityLevel)
+        syscall("kernel_log", "[SEC] [4/4] HVCI mode " .. g_nSecurityLevel)
+    else
+        oHvci = nil
+        syscall("kernel_log", "[SEC] [4/4] HVCI not available (no hvci.lua)")
+    end
+    
     return true
 end
 
