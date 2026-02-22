@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.6-HV-beta
+-- AxisOS Xen XKA v0.7-HV-beta
 --
 local kernel = {
     tProcessTable = {},
@@ -25,6 +25,18 @@ local kernel = {
     tBootLog = {},
     tLoadedModules = {}
 }
+
+-- Lua 5.3 compatibility: synthesize bit32 from native operators
+if not bit32 then
+    bit32 = {}
+    bit32.band   = load("return function(a,b) return (a & b) & 0xFFFFFFFF end")()
+    bit32.bor    = load("return function(a,b) return (a | b) & 0xFFFFFFFF end")()
+    bit32.bxor   = load("return function(a,b) return (a ~ b) & 0xFFFFFFFF end")()
+    bit32.bnot   = load("return function(a) return (~a) & 0xFFFFFFFF end")()
+    bit32.rshift = load("return function(a,n) return (a >> n) & 0xFFFFFFFF end")()
+    bit32.lshift = load("return function(a,n) return (a << n) & 0xFFFFFFFF end")()
+    bit32.btest  = load("return function(a,b) return (a & b) ~= 0 end")()
+end
 
 local g_nCurrentPid = 0
 local g_nDebugY = 2
@@ -169,7 +181,7 @@ local nMinScreenPriority = tLogLevelsPriority[sCurrentLogLevel] or 2
 -- tBootLog is ALSO maintained for PM drain (backwards compat).
 -- =============================================
 
-local DMESG_MAX_ENTRIES = 1024
+local DMESG_MAX_ENTRIES = 100
 local g_tDmesg = {}
 local g_nDmesgSeq = 0
 
@@ -296,6 +308,12 @@ function kprint(sLevel, ...)
 
     -- Always push to boot log drain (PM picks these up)
     table.insert(kernel.tBootLog, sFullLine)
+    
+    -- FIX: Cap the boot log to prevent OOM if PM is blocked on signal_pull 
+    -- (e.g. during heavy component/disk activity that bypasses VFS IPC)
+    if #kernel.tBootLog > 64 then
+        table.remove(kernel.tBootLog, 1)
+    end
 
     -- Screen output (filtered by boot arg log level)
     if nMsgPriority < nMinScreenPriority then
@@ -933,7 +951,7 @@ do
     end
 end
 
-kprint("info", "AxisOS Xen XKA v0.6-HV starting...")
+kprint("info", "AxisOS Xen XKA v0.7-HV starting...")
 kprint("info", "Copyright (C) 2026 AxisOS")
 kprint("none", "")
 
@@ -948,198 +966,179 @@ kprint("none", "")
 
 local g_oPrimitiveFs
 
-if _G.boot_fs_type == "axfs" then
-    -- Booted from AXFS create minimal volume reader
-    -- Load bpack inline (can't require yet)
-    local function r16(s, o)
-        return s:byte(o) * 256 + s:byte(o + 1)
-    end
+if boot_fs_type == "axfs" then
+    -- Booted from AXFS v2 — create minimal volume reader
+    local function r16(s, o) return s:byte(o) * 256 + s:byte(o + 1) end
     local function r32(s, o)
-        return s:byte(o) * 16777216 + s:byte(o + 1) * 65536 + s:byte(o + 2) * 256 + s:byte(o + 3)
-    end
-    local function rstr(s, o, n)
-        local r = s:sub(o, o + n - 1);
-        local z = r:find("\0", 1, true);
-        return z and r:sub(1, z - 1) or r
+        return s:byte(o) * 16777216 + s:byte(o + 1) * 65536
+             + s:byte(o + 2) * 256 + s:byte(o + 3)
     end
 
-    local oDrv = raw_component.proxy(_G.boot_drive_addr)
-    local nPOff = _G.boot_part_offset
+    local oDrv = raw_component.proxy(boot_drive_addr)
+    local nPOff = boot_part_offset
     local ss = oDrv.getSectorSize()
 
-    local function prs(n)
-        return oDrv.readSector(nPOff + n + 1)
-    end
+    local function prs(n) return oDrv.readSector(nPOff + n + 1) end
 
+    -- Read superblock to get layout
     local sb = prs(0)
-    local nDS = r16(sb, 20)
-    local ips = math.floor(ss / 64)
+    if not sb or sb:sub(1, 4) ~= "AXF2" then
+        kernel.panic("AXFS v2 superblock invalid")
+    end
+    local nDS = r16(sb, 20)   -- dataStart
+    local nIT = r16(sb, 22)   -- itableStart
+    local ips = math.floor(ss / 80)  -- v2: 80-byte inodes
+    local dpb = math.floor(ss / 32)  -- directory entries per block
 
+    -- Read inode (v2: 80 bytes, extent-based, inline support)
     local function ri(n)
-        local sec = 3 + math.floor(n / ips);
-        local off = (n % ips) * 64
-        local sd = prs(sec);
-        if not sd then
-            return nil
-        end
+        local sec = nIT + math.floor(n / ips)
+        local off = (n % ips) * 80
+        local sd = prs(sec)
+        if not sd then return nil end
         local o = off + 1
+        local flags = sd:byte(o + 22)
+        local nExt = sd:byte(o + 23)
         local t = {
             iType = r16(sd, o),
             size = r32(sd, o + 8),
-            nBlk = r16(sd, o + 22),
-            dir = {},
-            ind = r16(sd, o + 44)
+            flags = flags,
+            nExtents = nExt,
+            extents = {},
+            indirect = r16(sd, o + 76),
+            inlineData = nil,
         }
-        for i = 1, 10 do
-            t.dir[i] = r16(sd, o + 24 + (i - 1) * 2)
+        if flags % 2 == 1 then  -- F_INLINE
+            t.inlineData = sd:sub(o + 24, o + 24 + math.min(t.size, 52) - 1)
+        else
+            for i = 1, math.min(nExt, 13) do
+                local eo = o + 24 + (i - 1) * 4
+                t.extents[i] = {r16(sd, eo), r16(sd, eo + 2)}
+            end
         end
         return t
     end
-    local function rb(n)
-        return prs(nDS + n)
-    end
+
+    local function rb(n) return prs(nDS + n) end
+
+    -- Get all data block numbers for an inode (extent-based)
     local function blks(t)
+        if t.flags % 2 == 1 then return {} end  -- inline
         local r = {}
-        for i = 1, math.min(10, t.nBlk) do
-            if t.dir[i] and t.dir[i] > 0 then
-                r[#r + 1] = t.dir[i]
+        for i = 1, math.min(t.nExtents, 13) do
+            local ext = t.extents[i]
+            if ext and (ext[1] > 0 or ext[2] > 0) then
+                for j = 0, ext[2] - 1 do r[#r + 1] = ext[1] + j end
             end
         end
-        if t.nBlk > 10 and t.ind > 0 then
-            local si = rb(t.ind);
+        if t.nExtents > 13 and t.indirect > 0 then
+            local si = rb(t.indirect)
             if si then
-                for i = 1, math.floor(ss / 2) do
-                    local p2 = r16(si, (i - 1) * 2 + 1);
-                    if p2 > 0 then
-                        r[#r + 1] = p2
+                local ppb = math.floor(ss / 4)
+                for i = 1, ppb do
+                    local eS = r16(si, (i - 1) * 4 + 1)
+                    local eC = r16(si, (i - 1) * 4 + 3)
+                    if eC > 0 then
+                        for j = 0, eC - 1 do r[#r + 1] = eS + j end
                     end
                 end
             end
         end
         return r
     end
+
     local function dfind(di, nm)
-        local dpb = math.floor(ss / 32)
         for _, bn in ipairs(blks(di)) do
-            local sd = rb(bn);
+            local sd = rb(bn)
             if sd then
                 for i = 0, dpb - 1 do
-                    local o = i * 32 + 1;
+                    local o = i * 32 + 1
                     local ino = r16(sd, o)
                     if ino > 0 then
-                        local nl = sd:byte(o + 3);
-                        if sd:sub(o + 4, o + 3 + nl) == nm then
-                            return ino
-                        end
+                        local nl = sd:byte(o + 3)
+                        if sd:sub(o + 4, o + 3 + nl) == nm then return ino end
                     end
                 end
             end
         end
     end
+
     local function resolve(p)
-        local c = 1;
+        local cur = 1  -- root inode
         for seg in p:gmatch("[^/]+") do
-            local t = ri(c);
-            if not t or t.iType ~= 2 then
-                return nil
-            end
-            c = dfind(t, seg);
-            if not c then
-                return nil
-            end
+            local t = ri(cur)
+            if not t or t.iType ~= 2 then return nil end
+            cur = dfind(t, seg)
+            if not cur then return nil end
         end
-        return c
+        return cur
     end
+
     local function readfile(p)
-        local n = resolve(p);
-        if not n then
-            return nil
+        local n = resolve(p)
+        if not n then return nil end
+        local t = ri(n)
+        if not t or t.iType ~= 1 then return nil end
+        -- Handle inline data (files <= 52 bytes)
+        if t.flags % 2 == 1 and t.inlineData then
+            return t.inlineData:sub(1, t.size)
         end
-        local t = ri(n);
-        if not t or t.iType ~= 1 then
-            return nil
-        end
-        local ch = {};
+        local ch = {}
         local rem = t.size
         for _, bn in ipairs(blks(t)) do
-            local sd = rb(bn);
+            local sd = rb(bn)
             if sd then
-                ch[#ch + 1] = sd:sub(1, math.min(rem, ss));
+                ch[#ch + 1] = sd:sub(1, math.min(rem, ss))
                 rem = rem - ss
             end
-            if rem <= 0 then
-                break
-            end
+            if rem <= 0 then break end
         end
         return table.concat(ch)
     end
 
-    -- Now load axfs_core + axfs_proxy properly
+    -- Now load axfs_core + axfs_proxy properly for full volume access
     local sAxCode = readfile("/lib/axfs_core.lua")
     local sBpCode = readfile("/lib/bpack.lua")
     local sPxCode = readfile("/lib/axfs_proxy.lua")
 
     if sAxCode and sBpCode and sPxCode then
-        -- Load bpack
-        local tBpEnv = {
-            string = string,
-            math = math,
-            table = table
-        }
+        local tBpEnv = { string = string, math = math, table = table, bit32 = bit32 }
         local fBp = load(sBpCode, "@bpack", "t", tBpEnv)
         local oBpack = fBp()
 
-        -- Load axfs_core with bpack available
         local tAxEnv = {
-            string = string,
-            math = math,
-            table = table,
-            os = os,
-            type = type,
-            tostring = tostring,
-            pairs = pairs,
-            ipairs = ipairs,
-            setmetatable = setmetatable,
+            string = string, math = math, table = table,
+            os = os, type = type, tostring = tostring,
+            pairs = pairs, ipairs = ipairs, setmetatable = setmetatable,
+            bit32 = bit32,
             require = function(m)
-                if m == "bpack" then
-                    return oBpack
-                end
+                if m == "bpack" then return oBpack end
                 error("Cannot require '" .. m .. "' during AXFS boot")
             end
         }
         local fAx = load(sAxCode, "@axfs_core", "t", tAxEnv)
         local oAXFS = fAx()
 
-        -- Load proxy module
         local tPxEnv = {
-            string = string,
-            math = math,
-            table = table,
-            tostring = tostring,
-            type = type,
-            pairs = pairs,
-            ipairs = ipairs,
+            string = string, math = math, table = table,
+            tostring = tostring, type = type,
+            pairs = pairs, ipairs = ipairs,
             require = function(m)
-                if m == "axfs_core" then
-                    return oAXFS
-                end
-                if m == "bpack" then
-                    return oBpack
-                end
+                if m == "axfs_core" then return oAXFS end
+                if m == "bpack" then return oBpack end
             end
         }
         local fPx = load(sPxCode, "@axfs_proxy", "t", tPxEnv)
         local oProxy = fPx()
 
-        -- Create proper AXFS volume
-        local tDisk = oAXFS.wrapDrive(oDrv, nPOff, _G.boot_part_size)
+        local tDisk = oAXFS.wrapDrive(oDrv, nPOff, boot_part_size)  -- ✅ was: _G.boot_part_size
         local vol, vErr = oAXFS.mount(tDisk)
 
         if vol then
             g_oAxfsVol = vol
             g_bAxfsRoot = true
             g_oPrimitiveFs = oProxy.createProxy(vol, "root")
-            __gpu_dprint("AXFS root mounted (" .. vol.su.label .. ")")
+            __gpu_dprint("AXFS v2 root mounted (" .. vol.su.label .. ")")
         else
             kernel.panic("Failed to mount AXFS root: " .. tostring(vErr))
         end
@@ -2350,6 +2349,7 @@ kernel.tSyscallTable["patchguard_check"] = {
     allowed_rings = {0, 1}
 }
 
+
 kernel.tSyscallTable["critical_file_modified"] = {
     func = function(nPid, sPath, nWriterPid)
         kprint("sec", string.format(
@@ -3410,6 +3410,22 @@ kernel.tSyscallTable["ke_ipc_stats"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["disk_list_drives"] = {
+    func = function(nPid)
+        local tResult = {}
+        for addr, ctype in raw_component.list("drive") do
+            local p = raw_component.proxy(addr)
+            tResult[addr] = {
+                capacity = p.getCapacity(),
+                sectorSize = p.getSectorSize(),
+                label = pcall(p.getLabel) and p.getLabel() or ""
+            }
+        end
+        return tResult
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
 -- ==========================================
 -- SCHEDULER DIAGNOSTICS
 -- ==========================================
@@ -3505,9 +3521,9 @@ kernel.tSyscallTable["mem_info"] = {
 kernel.tSyscallTable["dmesg_read"] = {
     func = function(nPid, nLastSeq, nMaxEntries, sLevelFilter)
         nLastSeq = nLastSeq or 0
-        nMaxEntries = nMaxEntries or 200
-        if nMaxEntries > 500 then
-            nMaxEntries = 500
+        nMaxEntries = nMaxEntries or 50
+        if nMaxEntries > 100 then
+            nMaxEntries = 100
         end
 
         local tResult = {}
@@ -3605,6 +3621,8 @@ kernel.tSyscallTable["raw_component_list"] = {
     allowed_rings = {0, 1, 2}
 }
 
+--[[
+
 kernel.tSyscallTable["raw_component_invoke"] = {
     func = function(nPid, sAddress, sMethod, ...)
         local oProxy = raw_component.proxy(sAddress)
@@ -3618,6 +3636,41 @@ kernel.tSyscallTable["raw_component_invoke"] = {
 
 kernel.tSyscallTable["raw_component_proxy"] = {
     func = function(nPid, sAddress)
+        local bIsOk, oProxy = pcall(raw_component.proxy, sAddress)
+        if bIsOk then
+            return oProxy
+        else
+            return nil, "Invalid component address"
+        end
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+]]
+
+kernel.tSyscallTable["raw_component_invoke"] = {
+    func = function(nPid, sAddress, sMethod, ...)
+        -- AXFS root fast-path: proxy is a Lua table, not a real OC component
+        if g_bAxfsRoot and g_oPrimitiveFs and sAddress == g_oPrimitiveFs.address then
+            local fMethod = g_oPrimitiveFs[sMethod]
+            if not fMethod then return nil, "No method: " .. tostring(sMethod) end
+            return pcall(fMethod, ...)
+        end
+        local oProxy = raw_component.proxy(sAddress)
+        if not oProxy then
+            return nil, "Invalid component"
+        end
+        return pcall(oProxy[sMethod], ...)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+kernel.tSyscallTable["raw_component_proxy"] = {
+    func = function(nPid, sAddress)
+        -- AXFS root: return the proxy table directly
+        if g_bAxfsRoot and g_oPrimitiveFs and sAddress == g_oPrimitiveFs.address then
+            return g_oPrimitiveFs
+        end
         local bIsOk, oProxy = pcall(raw_component.proxy, sAddress)
         if bIsOk then
             return oProxy
@@ -4040,12 +4093,13 @@ kprint("info", "Starting Ring 1 services...")
 local g_tCriticalPaths = {}
 for _, s in ipairs({
     "/kernel.lua", "/lib/pipeline_manager.lua",
-    "/bin/init.lua", "/etc/passwd.lua",
+    "/bin/init.lua", -- "/etc/passwd.lua",
     "/system/dkms.lua", "/lib/ob_manager.lua",
     "/lib/ke_ipc.lua", "/lib/preempt.lua",
-    "/drivers/tty.sys.lua", "/etc/perms.lua",
+    "/drivers/tty.sys.lua", -- "/etc/perms.lua",
     "/sys/security/patchguard.lua",
-    "/boot/loader.cfg", "/boot/boot.lua",
+    -- "/boot/loader.cfg", 
+    "/boot/boot.lua",
 }) do
     g_tCriticalPaths[s] = true
 end
@@ -4263,6 +4317,177 @@ kprint("none", "")
 
 table.insert(kernel.tProcessTable[nPipelinePid].run_queue, "start")
 
+-- ═══════════════════════════════════════════
+-- GDI INIT
+-- ═══════════════════════════════════════════
+local g_oGdi = nil
+do
+    local sGdiCode = primitive_load("/system/gdi.lua")
+    if sGdiCode then
+        local tGdiEnv = {
+            string = string, math = math, table = table,
+            pairs = pairs, ipairs = ipairs, type = type,
+            tostring = tostring, tonumber = tonumber,
+            next = next, pcall = pcall, error = error,
+            setmetatable = setmetatable,
+            raw_component = raw_component,
+        }
+        local fGdi, sGdiErr = load(sGdiCode, "@/system/gdi.lua", "t", tGdiEnv)
+        if fGdi then
+            local bGdiOk, oGdiResult = pcall(fGdi)
+            if bGdiOk and type(oGdiResult) == "table" then
+                oGdiResult.Initialize({ fLog = function(s) kprint("info", s) end })
+                g_oGdi = oGdiResult
+                kprint("ok", "[GDI] Graphics Device Interface loaded")
+            else
+                kprint("fail", "[GDI] Init error: " .. tostring(oGdiResult))
+            end
+        else
+            kprint("fail", "[GDI] Parse error: " .. tostring(sGdiErr))
+        end
+    else
+        kprint("warn", "[GDI] /system/gdi.lua not found — GX extensions unavailable")
+    end
+end
+
+-- Register GDI syscalls
+if g_oGdi then
+    local GDI = g_oGdi
+
+    -- Surface lifecycle
+    kernel.tSyscallTable["gdi_create_surface"] = {
+        func = function(nPid, nW, nH, tOpts)
+            tOpts = tOpts or {}
+            tOpts.nOwnerPid = nPid
+            return GDI.CreateSurface(nW, nH, tOpts)
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_destroy_surface"] = {
+        func = function(nPid, h)
+            local s = GDI.GetSurface and GDI.GetSurface(h)
+            -- Only owner or Ring 0-1 can destroy
+            if s and s.nOwnerPid ~= nPid then
+                local nRing = kernel.tProcessTable[nPid]
+                    and kernel.tProcessTable[nPid].ring or 3
+                if nRing > 1 then return nil, "access denied" end
+            end
+            return GDI.DestroySurface(h)
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_resize_surface"] = {
+        func = function(_, h, nW, nH) return GDI.ResizeSurface(h, nW, nH) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+
+    -- Drawing
+    kernel.tSyscallTable["gdi_surface_set"] = {
+        func = function(_, h, x, y, s, fg, bg)
+            return GDI.SurfaceSet(h, x, y, s, fg, bg)
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_fill"] = {
+        func = function(_, h, x, y, w, nh, c, fg, bg)
+            return GDI.SurfaceFill(h, x, y, w, nh, c, fg, bg)
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_scroll"] = {
+        func = function(_, h, n) return GDI.SurfaceScroll(h, n) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_clear"] = {
+        func = function(_, h, fg, bg) return GDI.SurfaceClear(h, fg, bg) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_batch_submit"] = {
+        func = function(_, h, tOps) return GDI.BatchSubmit(h, tOps) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+
+    -- Visibility / position / z-order
+    kernel.tSyscallTable["gdi_surface_set_visible"] = {
+        func = function(_, h, b) return GDI.SurfaceSetVisible(h, b) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_set_position"] = {
+        func = function(_, h, x, y) return GDI.SurfaceSetPosition(h, x, y) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_set_z"] = {
+        func = function(_, h, z) return GDI.SurfaceSetZ(h, z) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_bring_to_front"] = {
+        func = function(_, h) return GDI.SurfaceBringToFront(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_get_size"] = {
+        func = function(_, h) return GDI.SurfaceGetSize(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_surface_set_gpu"] = {
+        func = function(_, h, idx) return GDI.SurfaceSetGpu(h, idx) end,
+        allowed_rings = {0, 1},
+    }
+
+    -- Input
+    kernel.tSyscallTable["gdi_set_focus"] = {
+        func = function(_, h) return GDI.SetFocus(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_get_focus"] = {
+        func = function() return GDI.GetFocus() end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_pop_input"] = {
+        func = function(_, h) return GDI.PopInput(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_push_input"] = {
+        func = function(_, h, evt) return GDI.PushInput(h, evt) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_input_queue_size"] = {
+        func = function(_, h) return GDI.InputQueueSize(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+
+    -- Compositor
+    kernel.tSyscallTable["gdi_composite"] = {
+        func = function() return GDI.Composite() end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_force_redraw"] = {
+        func = function() return GDI.ForceFullRedraw() end,
+        allowed_rings = {0, 1},
+    }
+
+    -- GPU management
+    kernel.tSyscallTable["gdi_get_gpu_count"] = {
+        func = function() return GDI.GetGpuCount() end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_get_gpu_info"] = {
+        func = function(_, n) return GDI.GetGpuInfo(n) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_bind_gpu"] = {
+        func = function(_, n, a) return GDI.BindGpu(n, a) end,
+        allowed_rings = {0, 1},
+    }
+    kernel.tSyscallTable["gdi_get_surface_list"] = {
+        func = function() return GDI.GetSurfaceList() end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_get_raw_gpu"] = {
+        func = function() return nil, "use GX_SYS_direct_access" end,
+        allowed_rings = {0},
+    }
+end
+
 -- =================================================================
 -- MAIN KERNEL EVENT LOOP   Preemptive Round-Robin Scheduler
 --
@@ -4382,6 +4607,13 @@ while true do
                 if g_oObManager then
                     g_oObManager.ObDestroyProcess(nPid)
                 end
+                if nPid == kernel.nPipelinePid then
+                    kernel.panic("CRITICAL SERVICE DIED: Pipeline Manager")
+                end
+
+                if g_oIpc then
+                    g_oIpc.NotifyChildDeath(nPid)
+                end
 
                 for _, nWaiterPid in ipairs(tProcess.wait_queue or {}) do
                     local tWaiter = kernel.tProcessTable[nWaiterPid]
@@ -4399,7 +4631,9 @@ while true do
                         end
                     end
                 end
-                -- fKernelGC("step", 100)
+                kernel.tPidMap[tProcess.co] = nil
+                kernel.tRings[nPid] = nil
+                kernel.tProcessTable[nPid] = nil
             end
 
             -- ======================================================
@@ -4410,6 +4644,9 @@ while true do
             -- ======================================================
             local sIntEvt, ip1, ip2, ip3, ip4, ip5 = computer.pullSignal(0)
             if sIntEvt then
+                 if g_oGdi and (sIntEvt == "key_down" or sIntEvt == "key_up") then
+                    g_oGdi.OnKeyEvent(sIntEvt, ip1, ip2, ip3, ip4)
+                end
                 pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid, "os_event", sIntEvt, ip1, ip2, ip3,
                     ip4, ip5)
             end
@@ -4429,9 +4666,10 @@ while true do
         g_oPatchGuard.Tick(nWorkDone > 0)
     end
 
+    if g_oGdi then g_oGdi.Composite() end
 
     -- ====== OOM KILLER ======
-    local FREE_MEMORY_FLOOR = 32768
+    local FREE_MEMORY_FLOOR = 2048
     local nFreeMem = computer.freeMemory()
     if nFreeMem < FREE_MEMORY_FLOOR then
         local nVictimPid = nil
@@ -4457,6 +4695,9 @@ while true do
     local sEventName, p1, p2, p3, p4, p5 = computer.pullSignal(nTimeout)
 
     if sEventName then
+        if g_oGdi and (sEventName == "key_down" or sEventName == "key_up") then
+            g_oGdi.OnKeyEvent(sEventName, p1, p2, p3, p4)
+        end
         pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid, "os_event", sEventName, p1, p2, p3, p4, p5)
     end
 end

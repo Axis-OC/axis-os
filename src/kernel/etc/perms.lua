@@ -1,30 +1,50 @@
+--
+-- /etc/perms.lua
+-- AxisOS File System Permissions
+--
 return {
-  ["/etc/pki_keystore.lua"] = { uid = 0, gid = 0, mode = 600 },
-  ["/all_code.txt"] = { uid = 1000, gid = 0, mode = 777 },
-  ["/etc/perms.lua"] = { uid = 0, gid = 0, mode = 600 },
-  ["/boot/kernel.lua"] = { uid = 0, gid = 0, mode = 400 },
-  ["/etc/pki.cfg"] = { uid = 0, gid = 0, mode = 600 },
-  ["/dev/gpu0"] = { uid = 0, gid = 0, mode = 660 },
-  ["/dev/ringlog"] = { uid = 0, gid = 0, mode = 644 },
-  ["/etc/passwd.lua"] = { uid = 0, gid = 0, mode = 600 },
-  ["/dev/tty"] = { uid = 0, gid = 0, mode = 666 },
-  ["/etc/signing/private.key"] = { uid = 0, gid = 0, mode = 600 },
-  ["/etc/secureboot.cfg"] = { uid = 0, gid = 0, mode = 600 },
+  ["/"]            = { uid = 0, gid = 0, mode = 755 },
+  ["/bin"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/boot"]        = { uid = 0, gid = 0, mode = 755 },
+  ["/dev"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/drivers"]     = { uid = 0, gid = 0, mode = 755 },
+  ["/etc"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/lib"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/sys"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/system"]      = { uid = 0, gid = 0, mode = 755 },
+  ["/usr"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/log"]         = { uid = 0, gid = 0, mode = 755 },
+  ["/vbl"]         = { uid = 0, gid = 0, mode = 755 },
 
-  -- System directories: read-only for all non-kernel processes
-  -- uid=0 gid=0 mode=755 means: owner(root) rwx, group rx, others rx
-  -- Write requires uid=0 AND Ring ≤ 1 (enforced by VFS)
+  ["/home"]        = { uid = 0, gid = 0, mode = 755 },
+  ["/home/guest"]  = { uid = 1000, gid = 0, mode = 755 },
+  ["/tmp"]         = { uid = 0, gid = 0, mode = 777 },
 
-  ["/sys"]                     = { uid = 0, gid = 0, mode = 755, ring = 1 },
-  ["/sys/drivers"]             = { uid = 0, gid = 0, mode = 755, ring = 1 },
-  ["/sys/drivers/gpu.lua"]     = { uid = 0, gid = 0, mode = 644, ring = 1 },
-  ["/sys/drivers/fs.lua"]      = { uid = 0, gid = 0, mode = 644, ring = 1 },
-  ["/sys/drivers/net.lua"]     = { uid = 0, gid = 0, mode = 644, ring = 1 },
-  ["/sys/drivers/eeprom.lua"]  = { uid = 0, gid = 0, mode = 644, ring = 1 },
+  ["/kernel.lua"]                 = { uid = 0, gid = 0, mode = 644 },
+  ["/bin/init.lua"]               = { uid = 0, gid = 0, mode = 644 },
+  ["/bin/sh.lua"]                 = { uid = 0, gid = 0, mode = 644 },
+  ["/system/dkms.lua"]            = { uid = 0, gid = 0, mode = 644 },
+  ["/system/driverdispatch.lua"]  = { uid = 0, gid = 0, mode = 644 },
+  ["/lib/pipeline_manager.lua"]   = { uid = 0, gid = 0, mode = 644 },
+  ["/sys/security/patchguard.lua"]= { uid = 0, gid = 0, mode = 644 },
+  ["/sys/security/dkms_sec.lua"]  = { uid = 0, gid = 0, mode = 644 },
+  ["/sys/security/hvci.lua"]      = { uid = 0, gid = 0, mode = 644 },
 
-  -- Also protect /bin, /sbin, /etc from Ring 3 writes
-  ["/bin"]                     = { uid = 0, gid = 0, mode = 755, ring = 1 },
-  ["/sbin"]                    = { uid = 0, gid = 0, mode = 755, ring = 1 },
-  ["/etc"]                     = { uid = 0, gid = 0, mode = 755, ring = 2 },
+  ["/etc/passwd.lua"]             = { uid = 0, gid = 0, mode = 600 },
+  ["/etc/perms.lua"]              = { uid = 0, gid = 0, mode = 600 },
+  ["/etc/pki.cfg"]                = { uid = 0, gid = 0, mode = 600 },
+  ["/etc/sys.cfg"]                = { uid = 0, gid = 0, mode = 644 },
+  ["/etc/fstab.lua"]              = { uid = 0, gid = 0, mode = 644 },
+  ["/etc/drivers.cfg"]            = { uid = 0, gid = 0, mode = 644 },
+  ["/boot/loader.cfg"]            = { uid = 0, gid = 0, mode = 644 },
+  ["/etc/pki_keystore.lua"]       = { uid = 0, gid = 0, mode = 644 },
 
+  ["/etc/signing"]                = { uid = 0, gid = 0, mode = 700 },
+  ["/etc/signing/private.key"]    = { uid = 0, gid = 0, mode = 600 },
+  ["/etc/signing/public.key"]     = { uid = 0, gid = 0, mode = 644 },
+
+  ["/dev/tty"]                    = { uid = 0, gid = 0, mode = 666 },
+  ["/dev/gpu0"]                   = { uid = 0, gid = 0, mode = 666 },
+  ["/dev/ringlog"]                = { uid = 0, gid = 0, mode = 666 },
+  ["/dev/net"]                    = { uid = 0, gid = 0, mode = 666 },
 }

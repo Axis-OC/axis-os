@@ -12,16 +12,17 @@ if not hStdin or not hStdout then
   syscall("kernel_log", "[INIT] FATAL: Could not open /dev/tty!")
 end
 
-local function readFileSimple(sPath)
+local function readFileRaw(sPath)
   local h = oFs.open(sPath, "r")
   if not h then return nil end
   local d = oFs.read(h, math.huge)
   oFs.close(h)
   if type(d) ~= "string" then return nil end
-  return d:gsub("\n", "")
+  return d
 end
 
-local sHostname = readFileSimple("/etc/hostname") or "localhost"
+local sHostnameRaw = readFileRaw("/etc/hostname")
+local sHostname = sHostnameRaw and sHostnameRaw:gsub("[%c%s]", "") or "localhost"
 
 local function fHash(sPassword)
   return string.reverse(sPassword) .. "AURA_SALT"
@@ -30,15 +31,18 @@ end
 local tPasswdDb = {}
 
 local function fLoadPasswd()
-  local sContent = readFileSimple("/etc/passwd.lua")
+  local sContent = readFileRaw("/etc/passwd.lua")
   if sContent and #sContent > 0 then
       local f, err = load(sContent, "passwd", "t", {})
       if f then 
          local tResult = f()
          if type(tResult) == "table" then tPasswdDb = tResult end
+      else
+         syscall("kernel_log", "[INIT] Parse error in passwd.lua: " .. tostring(err))
       end
   end
   if not tPasswdDb or not next(tPasswdDb) then
+     syscall("kernel_log", "[INIT] Using fallback root account")
      tPasswdDb = { root = { hash = fHash("root"), home = "/", shell = "/bin/sh.lua", uid=0 } }
   end
 end
@@ -47,32 +51,30 @@ fLoadPasswd()
 
 oFs.write(hStdout, "\f")
 
-
 while true do
-  io.write("    _        _          ___   ____  ",
- "   / \\  __ _(_)_______/ _ \\/ ___| ",
- "  / _ \\ \\ \\/ / / __| | | \\___ \\ ",
- " / ___ \\ >  <| \\__ \\ |_| |___) |",
- "/_/   \\_/_/\\_\\_|___/\\___/|____/ ")
+  io.write("    _        _       ___   ____  \n",
+           "   / \\  __ _(_)____/ _ \\/ ___| \n",
+           "  / _ \\ \\ \\/ / / __| | | \\___ \\ \n",
+           " / ___ \\ >  <| \\__ \\ |_| |___) |\n",
+           "/_/   \\_/_/\\_\\_|___/\\___/|____/ \n")
 
-  io.write("AxisOS v0.6-HV-beta\n")
-  io.write("")
+  io.write("AxisOS v0.7-HV-beta\n")
   io.write("\n________________________________________________\n\n")
-  io.write("XEN XKA v0.6-HV-beta on " .. sHostname .. "\n\n")
+  io.write("XEN XKA v0.7-HV-beta on " .. sHostname .. "\n\n")
   
-  io.write(sHostname .. " login: ")   -- No buffering, appears immediately
+  io.write(sHostname .. " login: ")
   
   local sUsername = oFs.read(hStdin)
   
   if sUsername then
-    sUsername = sUsername:gsub("\n", ""):gsub(" ", "")
+    sUsername = sUsername:gsub("[%c%s]", "")
     
     local tUserEntry = tPasswdDb[sUsername]
     
-    io.write("Password: ")             -- No buffering
+    io.write("Password: ")
     
     local sPassword = oFs.read(hStdin) 
-    if sPassword then sPassword = sPassword:gsub("\n", "") end
+    if sPassword then sPassword = sPassword:gsub("[%c%s]", "") end
 
     if tUserEntry and tUserEntry.hash == fHash(sPassword or "") then
       io.write("\nAccess Granted.\n")
@@ -98,7 +100,7 @@ while true do
       end
     else
       io.write("\nLogin incorrect\n")
-      syscall("process_yield")  -- yield instead of wait(0) which does nothing
+      syscall("process_yield")
     end
   else
     syscall("kernel_log", "[INIT] Error reading stdin. Retrying...")

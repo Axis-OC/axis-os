@@ -14,8 +14,6 @@ end
 function oKMD.DkCreateDevice(pDriverObject, sDeviceName)
   oKMD.DkPrint("DkCreateDevice: " .. sDeviceName)
   
-  -- Removed pDriverObject.nDriverPid.
-  -- DKMS will automatically determine the caller's PID.
   local pDeviceObject, nStatus = CallDkms("dkms_create_device", sDeviceName)
   
   if pDeviceObject then
@@ -49,7 +47,6 @@ function oKMD.DkCompleteRequest(pIrp, nStatus, vInformation)
 end
 
 function oKMD.DkGetHardwareProxy(sAddress)
-    -- direct syscall, returns data immediately
     local oProxyOrErr, sErr = fSyscall("raw_component_proxy", sAddress)
     if oProxyOrErr then
         return tStatus.STATUS_SUCCESS, oProxyOrErr
@@ -63,45 +60,42 @@ function oKMD.DkRegisterInterrupt(sEventName)
     return nStatus
 end
 
-function oKMD.DkCreateComponentDevice(pDriverObject, sDeviceTypeName)
-  -- 1. Verify we are actually a component driver
-  local sAddress = env.address
+-- FIX: Accept sAddress as explicit parameter instead of reading env.address
+-- via the module's _ENV (which may be bound to a different process due to
+-- global module caching in kernel.custom_require).
+function oKMD.DkCreateComponentDevice(pDriverObject, sDeviceTypeName, sAddress)
+  -- If address not passed explicitly, try reading from env (may fail
+  -- if module was first loaded by a different process)
   if not sAddress then
-    oKMD.DkPrint("DkCreateComponentDevice: No address in env! Are you a CMD?")
+    local bOk, addr = pcall(function() return env.address end)
+    sAddress = bOk and addr or nil
+  end
+
+  if not sAddress then
+    oKMD.DkPrint("DkCreateComponentDevice: No component address provided!")
     return tStatus.STATUS_INVALID_PARAMETER
   end
   
-  -- 2. Get the next available index from DKMS
   local nIndex, _ = CallDkms("dkms_get_next_index", sDeviceTypeName)
-  if not nIndex then nIndex = 0 end -- fallback, shouldn't happen
+  if not nIndex then nIndex = 0 end
   
-  -- 3. Format the names
-  -- short address is first 6 chars. enough to be unique-ish.
   local sShortAddr = string.sub(sAddress, 1, 6)
-  
-  -- Internal Kernel Name: \Device\iter_a1b2c3
-  -- We don't strictly need the index here if address is unique, but let's keep it clean.
   local sInternalName = string.format("\\Device\\%s_%s", sDeviceTypeName, sShortAddr)
-  
-  -- User-facing Symlink: /dev/iter_a1b2c3_0
   local sSymlinkName = string.format("/dev/%s_%s_%d", sDeviceTypeName, sShortAddr, nIndex)
   
   oKMD.DkPrint("Auto-creating CMD Device: " .. sSymlinkName)
   
-  -- 4. Create the Device Object
   local nStatus, pDeviceObject = oKMD.DkCreateDevice(pDriverObject, sInternalName)
   if nStatus ~= tStatus.STATUS_SUCCESS then
     return nStatus, nil
   end
   
-  -- 5. Create the Symlink
   nStatus = oKMD.DkCreateSymbolicLink(sSymlinkName, sInternalName)
   if nStatus ~= tStatus.STATUS_SUCCESS then
     oKMD.DkDeleteDevice(pDeviceObject)
     return nStatus, nil
   end
   
-  -- Store the auto-generated names in the extension so we can delete them later easily
   pDeviceObject.pDeviceExtension.sAutoSymlink = sSymlinkName
   
   return tStatus.STATUS_SUCCESS, pDeviceObject

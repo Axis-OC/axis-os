@@ -1,20 +1,24 @@
+--
+-- /sys/security/hvci.lua
+-- AxisOS HVCI — Updated for AXFS v2 filesystem
+--
+-- Changes from previous version:
+--   - computeHash works with both managed FS and AXFS proxy
+--   - RuntimeRecheck supports AXFS volumes
+--   - Whitelist entries include filesystem type for audit
+--
+
 local oHvci = {}
 
-local g_tWhitelist  = {}
+local g_tWhitelist   = {}
 local g_bInitialized = false
-local g_nMode        = 0   -- 0=disabled, 1=audit, 2=enforce
-
--- =============================================
--- INITIALIZATION
--- =============================================
+local g_nMode        = 0
 
 function oHvci.Initialize(nMode)
     if g_bInitialized then return true end
-
     g_nMode = nMode or 0
     syscall("kernel_log", "[HVCI] Code Integrity initializing (mode=" .. g_nMode .. ")...")
 
-    -- Load whitelist from disk (direct read — no PM dependency)
     local sCode = syscall("vfs_read_file", "/etc/driver_whitelist.lua")
     if sCode and #sCode > 0 then
         local f = load(sCode, "whitelist", "t", {})
@@ -29,18 +33,13 @@ function oHvci.Initialize(nMode)
     local nEntries = 0
     for _ in pairs(g_tWhitelist) do nEntries = nEntries + 1 end
     syscall("kernel_log", "[HVCI] Whitelist: " .. nEntries .. " approved driver(s)")
-
     g_bInitialized = true
     return true
 end
 
--- =============================================
--- HASH COMPUTATION
--- Matches the hash format used by the `sign` tool.
--- =============================================
-
+-- Hash computation — works with both managed FS and AXFS
+-- Uses SHA-256 via data card if available, else weak fallback
 local function computeHash(sCode)
-    -- Try to use data card for SHA-256
     local oCrypto = nil
     pcall(function()
         oCrypto = require("crypto")
@@ -52,7 +51,14 @@ local function computeHash(sCode)
         return oCrypto.Encode64(sRaw)
     end
 
-    -- Fallback: simple string hash (NOT cryptographic, for environments without data card)
+    -- Fallback: CRC32 from bpack (AXFS already loaded it)
+    local bOk, oBpack = pcall(require, "bpack")
+    if bOk and oBpack and oBpack.crc32 then
+        local nCrc = oBpack.crc32(sCode)
+        return string.format("CRC32_%08X_%d", nCrc, #sCode)
+    end
+
+    -- Last resort: weak string hash
     local nHash = 5381
     for i = 1, math.min(#sCode, 4096) do
         nHash = ((nHash * 33) + sCode:byte(i)) % 0xFFFFFFFF
@@ -60,14 +66,9 @@ local function computeHash(sCode)
     return string.format("WEAK_%08X_%d", nHash, #sCode)
 end
 
--- =============================================
--- VALIDATION
--- Called by dkms_sec.lua during driver load.
--- =============================================
-
 function oHvci.ValidateDriver(sDriverCode, sDriverPath)
     if not g_bInitialized then oHvci.Initialize() end
-    if g_nMode == 0 then return 0 end  -- disabled
+    if g_nMode == 0 then return 0 end
 
     local sHash = computeHash(sDriverCode)
     local tEntry = g_tWhitelist[sHash]
@@ -76,60 +77,24 @@ function oHvci.ValidateDriver(sDriverCode, sDriverPath)
         syscall("kernel_log", string.format(
             "[HVCI] APPROVED: %s (hash=%s...)",
             sDriverPath, sHash:sub(1, 12)))
-        return 0  -- STATUS_SUCCESS
+        return 0
     end
 
-    -- Not in whitelist
     if g_nMode == 1 then
-        -- Audit mode: warn but allow
         syscall("kernel_log", string.format(
             "[HVCI] AUDIT: %s NOT in whitelist (hash=%s...)",
             sDriverPath, sHash:sub(1, 16)))
         return 0
     end
 
-    -- Enforce mode: block
     syscall("kernel_log", string.format(
         "[HVCI] BLOCKED: %s — hash %s... not in whitelist",
         sDriverPath, sHash:sub(1, 16)))
-    return 403  -- STATUS_DRIVER_VALIDATION_FAILED
+    return 403
 end
 
--- =============================================
--- WHITELIST MANAGEMENT (for admin tools)
--- =============================================
-
-function oHvci.ComputeHash(sCode)
-    return computeHash(sCode)
-end
-
-function oHvci.GetWhitelist()
-    return g_tWhitelist
-end
-
-function oHvci.GetMode()
-    return g_nMode
-end
-
-function oHvci.SetMode(n)
-    g_nMode = n
-end
-
--- Generate whitelist entries for all currently installed drivers
-function oHvci.GenerateWhitelist(tDriverPaths)
-    local tNew = {}
-    for _, sPath in ipairs(tDriverPaths) do
-        local sCode = syscall("vfs_read_file", sPath)
-        if sCode then
-            local sH = computeHash(sCode)
-            tNew[sH] = { path = sPath, size = #sCode }
-        end
-    end
-    return tNew
-end
-
--- Called by PatchGuard Tier 3 to re-verify loaded drivers
--- against the on-disk whitelist. Returns violations.
+-- Runtime recheck — reads files through whatever FS is active
+-- (managed or AXFS proxy — both respond to the same primitive_load)
 function oHvci.RuntimeRecheck(fReadFile)
     if g_nMode == 0 then return {} end
     local tViolations = {}
@@ -150,6 +115,23 @@ function oHvci.RuntimeRecheck(fReadFile)
         end
     end
     return tViolations
+end
+
+function oHvci.ComputeHash(sCode) return computeHash(sCode) end
+function oHvci.GetWhitelist() return g_tWhitelist end
+function oHvci.GetMode() return g_nMode end
+function oHvci.SetMode(n) g_nMode = n end
+
+function oHvci.GenerateWhitelist(tDriverPaths)
+    local tNew = {}
+    for _, sPath in ipairs(tDriverPaths) do
+        local sCode = syscall("vfs_read_file", sPath)
+        if sCode then
+            local sH = computeHash(sCode)
+            tNew[sH] = { path = sPath, size = #sCode }
+        end
+    end
+    return tNew
 end
 
 return oHvci

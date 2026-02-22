@@ -65,7 +65,7 @@ local logo = {
 
 d.setBackground(BLACK); d.setForeground(WHITE)
 d.fill(1, 1, W, H, " ")
-d.set(1, 1, "AxisBIOS v0.6-HV")
+d.set(1, 1, "AxisBIOS v0.7-HV")
 d.set(1, 2, "(C) 2025 Axis Corp")
 b.beep(1100, 0.1)
 

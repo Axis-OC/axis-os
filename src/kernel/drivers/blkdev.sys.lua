@@ -66,14 +66,22 @@ function DriverEntry(pDO)
   pDO.tDispatch[tDKStructs.IRP_MJ_CREATE] = fCreate
   pDO.tDispatch[tDKStructs.IRP_MJ_CLOSE] = fClose
   pDO.tDispatch[tDKStructs.IRP_MJ_DEVICE_CONTROL] = fCtl
-  local st, dev = oKMD.DkCreateComponentDevice(pDO, "drive")
+
+  -- FIX: kmd_api is cached from the first process that loaded it (e.g. TTY).
+  -- Its internal env reference is bound to that process's sandbox, not ours.
+  -- Capture env.address HERE (in our own sandbox) and pass it explicitly,
+  -- otherwise DkCreateComponentDevice reads the wrong process's address.
+  local addr = env.address
+  local st, dev = oKMD.DkCreateComponentDevice(pDO, "drive", addr)
   if st ~= tStatus.STATUS_SUCCESS then return st end
   g_pDev = dev
-  local addr = env.address
+
   local ps, p = oKMD.DkGetHardwareProxy(addr)
   if ps ~= tStatus.STATUS_SUCCESS then return ps end
   g_oProxy = p
-  local ss = p.getSectorSize(); local cap = p.getCapacity()
+
+  local ss = p.getSectorSize()
+  local cap = p.getCapacity()
   oKMD.DkPrint(string.format("AxisBlockDev: %dKB, %d-byte sectors", cap/1024, ss))
   return tStatus.STATUS_SUCCESS
 end
@@ -82,7 +90,8 @@ function DriverUnload(pDO)
   if g_pDev and g_pDev.pDeviceExtension.sAutoSymlink then
     oKMD.DkDeleteSymbolicLink(g_pDev.pDeviceExtension.sAutoSymlink)
   end
-  oKMD.DkDeleteDevice(g_pDev); return tStatus.STATUS_SUCCESS
+  oKMD.DkDeleteDevice(g_pDev)
+  return tStatus.STATUS_SUCCESS
 end
 
 while true do

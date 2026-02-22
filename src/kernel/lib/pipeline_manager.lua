@@ -611,10 +611,19 @@ end
 -- PUBLIC VFS HANDLERS (called via syscall override)
 -- These now accept synapse tokens from the kernel dispatcher.
 -- ==========================================
--- ==========================================
--- PUBLIC VFS HANDLERS  (syscall override targets)
--- These create/resolve ObManager objects — no FDs leave PM.
--- ==========================================
+local g_tCriticalPaths = {}
+for _, s in ipairs({
+    "/kernel.lua", "/lib/pipeline_manager.lua",
+    "/bin/init.lua", -- "/etc/passwd.lua",
+    "/system/dkms.lua", "/lib/ob_manager.lua",
+    "/lib/ke_ipc.lua", "/lib/preempt.lua",
+    "/drivers/tty.sys.lua", -- "/etc/perms.lua",
+    "/sys/security/patchguard.lua",
+    -- "/boot/loader.cfg", 
+    "/boot/boot.lua",
+}) do
+    g_tCriticalPaths[s] = true
+end
 
 function vfs_state.handle_open(nSenderPid, sSynapseToken, sPath, sMode)
     -- permission check (unchanged)

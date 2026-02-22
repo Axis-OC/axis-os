@@ -1,0 +1,184 @@
+-- AxisOS SecureBoot EEPROM v2.0 (Stage 1)
+-- Three-stage: EEPROM → /boot/setup.lua → @RDB::EFI
+-- Fits 4KB after minification.
+
+-- ── Synthesize bit32 if missing (Lua 5.3 without compat) ──
+if not bit32 then
+  bit32={}
+  local s,f
+  s,f=pcall(load,"return function(a,b)return(a&b)&0xFFFFFFFF end")
+  if s and f then bit32.band=f()
+    s,f=pcall(load,"return function(a,b)return(a~b)&0xFFFFFFFF end");bit32.bxor=f()
+    s,f=pcall(load,"return function(a,n)return(a>>n)&0xFFFFFFFF end");bit32.rshift=f()
+    s,f=pcall(load,"return function(a,n)return(a<<n)&0xFFFFFFFF end");bit32.lshift=f()
+    s,f=pcall(load,"return function(a)return(~a)&0xFFFFFFFF end");bit32.bnot=f()
+    bit32.bor=function(a,b) return bit32.bnot(bit32.band(bit32.bnot(a),bit32.bnot(b))) end
+  end
+end
+
+local C=component local I=C.invoke
+local g,s
+for a in C.list("gpu")do g=a break end
+for a in C.list("screen")do s=a break end
+if g and s then I(g,"bind",s) end
+if g then
+  local W,H=I(g,"maxResolution")
+  I(g,"setResolution",W,H)
+  I(g,"setBackground",0)
+  I(g,"fill",1,1,W,H," ")
+end
+local cy=1
+local function p(t,c)
+  if g then I(g,"setForeground",c or 0xFFFFFF) I(g,"set",1,cy,t) cy=cy+1 end
+end
+local function die(m)
+  p("PANIC: "..m,0xFF0000)
+  computer.beep(200,1)
+  while true do computer.pullSignal(1) end
+end
+
+-- CRC32 (strictly 2-arg bit32 calls)
+local ct={}
+for i=0,255 do
+  local c=i
+  for _=1,8 do
+    if c%2==1 then c=bit32.bxor(bit32.rshift(c,1),0xEDB88320)
+    else c=bit32.rshift(c,1) end
+  end
+  ct[i]=c
+end
+local function crc(s)
+  local c=0xFFFFFFFF
+  for i=1,#s do
+    local idx=bit32.band(bit32.bxor(c,s:byte(i)),0xFF)
+    c=bit32.bxor(bit32.rshift(c,8),ct[idx])
+  end
+  return bit32.bxor(c,0xFFFFFFFF)
+end
+
+local function r16(s,o) return s:byte(o)*256+s:byte(o+1) end
+local function r32(s,o)
+  return s:byte(o)*0x1000000+s:byte(o+1)*0x10000
+        +s:byte(o+2)*0x100+s:byte(o+3)
+end
+
+p("AxisOS SecureBoot v2.0",0x00AAFF)
+
+-- Find boot drive
+local D
+for a in C.list("drive") do D=a break end
+if not D then die("No drive") end
+local ss=I(D,"getSectorSize")
+local function rs(n) return I(D,"readSector",n+1) end
+
+-- RDB at sector 0 (Amiga RDSK)
+local rdb=rs(0)
+if not rdb or #rdb<4 then die("Read error") end
+local sMagic=rdb:sub(1,4)
+
+-- Support both ARDB (AxisOS compact) and RDSK (full Amiga)
+local np, tParts
+if sMagic=="ARDB" then
+  np=rdb:byte(6)
+  tParts={}
+  for i=0,np-1 do
+    local o=9+i*32
+    tParts[i]={type=rdb:sub(o,o+7):gsub("\0",""),off=r32(rdb,o+8),sz=r32(rdb,o+12)}
+  end
+elseif sMagic=="RDSK" then
+  -- Walk PART linked list
+  local function ri32(s,o)
+    local u=r32(s,o); if u>=2147483648 then return u-4294967296 end; return u
+  end
+  tParts={}; np=0
+  local ns=ri32(rdb,25)
+  for _=1,16 do
+    if ns<0 then break end
+    local q=rs(ns)
+    if not q or q:sub(1,4)~="PART" then break end
+    local nLen=q:byte(25) or 0; if nLen>30 then nLen=30 end
+    local sName=q:sub(26,25+nLen)
+    local fsType=r32(q,65)
+    tParts[np]={type=sName,off=r32(q,57),sz=r32(q,61),fsType=fsType}
+    np=np+1
+    ns=ri32(q,17)
+  end
+else
+  die("No RDB (got "..sMagic..")")
+end
+
+-- Find AXEFI partition
+local eo,ez
+for i=0,np-1 do
+  local pt=tParts[i]
+  if pt then
+    local sType=pt.type:gsub("%s+","")
+    -- Check by name or fsType
+    if sType=="AXEFI" or sType=="EFI0" or pt.fsType==0x41584546 then
+      eo=pt.off; ez=pt.sz; break
+    end
+  end
+end
+if not eo then die("No EFI partition") end
+p("EFI @ sector "..eo,0xAAAAAA)
+
+-- EFI header
+local eh=rs(eo)
+if not eh or eh:sub(1,4)~="AEFI" then die("Bad EFI header") end
+local bcSz  = r16(eh,6)
+local bcCrc  = r32(eh,8)
+local kbSec  = r16(eh,12)
+local kbCnt  = r16(eh,14)
+local bcOff  = r16(eh,16)
+local bcCnt  = r16(eh,18)
+local sbFlag = eh:byte(20)
+-- Verify header CRC
+local ehCrc = r32(eh,53)
+if crc(eh:sub(1,52))~=ehCrc then die("EFI header CRC fail") end
+
+-- Load boot code (Stage 3)
+p("Loading stage 3 ("..bcSz.."B)...",0xFFFF00)
+local ch={}
+for i=0,bcCnt-1 do
+  local sd=rs(eo+bcOff+i)
+  if sd then ch[#ch+1]=sd end
+end
+local bc=table.concat(ch):sub(1,bcSz)
+if crc(bc)~=bcCrc then die("Boot code CRC fail") end
+p("CRC OK",0x00FF00)
+
+-- Check for DEL key (enter setup)
+p("Press DEL for BIOS Setup",0xAAAAAA)
+local bSetup=false
+local dl=computer.uptime()+2
+while computer.uptime()<dl do
+  local ev,_,_,cd=computer.pullSignal(0.1)
+  if ev=="key_down" then
+    if cd==211 then bSetup=true; break end
+    if cd==28 then break end
+  end
+end
+
+-- Execute Stage 3
+local env={
+  _efi_drive=D, _efi_off=eo, _efi_sz=ez,
+  _efi_sb=sbFlag, _efi_ss=ss, _rdb=rdb,
+  _efi_setup_requested=bSetup,
+  _rdb_parts=tParts, _rdb_nparts=np,
+  component=C, computer=computer, bit32=bit32,
+  math=math, string=string, table=table, os=os,
+  pairs=pairs, ipairs=ipairs, type=type,
+  tostring=tostring, tonumber=tonumber,
+  pcall=pcall, xpcall=xpcall, error=error,
+  load=load, select=select, next=next,
+  rawset=rawset, rawget=rawget,
+  rawequal=rawequal, rawlen=rawlen,
+  setmetatable=setmetatable, getmetatable=getmetatable,
+  coroutine=coroutine, debug=debug,
+  unpack=unpack or table.unpack,
+}
+env._G=env; env._ENV=env
+local fn,e=load(bc,"=efi/boot","t",env)
+if not fn then die("Stage3: "..tostring(e)) end
+p("Entering stage 3...",0x00FF00)
+fn()

@@ -411,10 +411,14 @@ while true do
             local nLoadedCount = 0
             local nLastStatus = tStatus.STATUS_NO_SUCH_DEVICE
 
+            -- FIX: Check if any hardware was found BEFORE iterating
+            local bHasHardware = false
             if bOk and tList then
+                for _ in pairs(tList) do bHasHardware = true; break end
+            end
+
+            if bHasHardware then
                 for sAddr, _ in pairs(tList) do
-                    -- try to load for THIS specific address
-                    -- we pass the address in the environment
                     local nSt = load_driver(sPath, {
                         address = sAddr
                     })
@@ -427,11 +431,18 @@ while true do
 
             if nLoadedCount > 0 then
                 local sMsg = string.format("Auto-loaded %d instances of %s", nLoadedCount, tInfo.sDriverName)
-                -- return success (0) and our custom message as the "Name"
                 syscall("signal_send", nSenderPid, "load_driver_result", nOriginalRequester, tStatus.STATUS_SUCCESS,
                     sMsg, 0)
+            elseif not bHasHardware then
+                -- FIX: No hardware found is NOT an error — just nothing to bind to.
+                -- Return success with 0 instances so PM doesn't report a failure.
+                local sMsg = string.format("%s: no '%s' components found (0 instances)",
+                    tInfo.sDriverName, tInfo.sSupportedComponent)
+                syscall("kernel_log", "[DKMS] " .. sMsg)
+                syscall("signal_send", nSenderPid, "load_driver_result", nOriginalRequester,
+                    tStatus.STATUS_SUCCESS, sMsg, 0)
             else
-                -- found nothing or failed all
+                -- Hardware found but all loads failed — this IS an error
                 syscall("signal_send", nSenderPid, "load_driver_result", nOriginalRequester, nLastStatus,
                     tInfo.sDriverName, -1)
             end

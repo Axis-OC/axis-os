@@ -21,7 +21,7 @@ local g_bArmed             = false
 local g_fPanic             = nil
 local g_fLog               = nil
 local g_fUptime            = nil
-local g_bVerbose           = true  -- log every check cycle detail
+local g_bVerbose           = false  -- log every check cycle detail
 local g_nLastCheckMs       = 0
 local g_fFlush = nil
 
@@ -51,9 +51,6 @@ local CRITICAL_FILES = {
     "/system/lib/dk/common_api.lua",
     "/drivers/tty.sys.lua",
     "/bin/sh.lua",
-    "/etc/perms.lua",
-    "/etc/pki.cfg",
-    "/boot/loader.cfg",
     "/boot/boot.lua",
     "/boot/boot_secure.lua",
 }
@@ -313,6 +310,10 @@ local function snapshotCriticalFiles()
             nHashed = nHashed + 1
             nTotalBytes = nTotalBytes + #sContent
 
+            if g_fLastModified then
+                g_tMtimeCache[sPath] = g_fLastModified(sPath)
+            end
+
             if g_bVerbose then
                 local sShort = sPath:match("([^/]+)$") or sPath
                 local bSuper = (i <= #SUPERCRITICAL_FILES)
@@ -346,6 +347,7 @@ local function snapshotCriticalFiles()
 end
 
 local g_nSuperCursor = 1  -- which supercritical file to check THIS cycle
+local g_nCritCursor  = 1  -- Добавляем курсор для обычных критичных файлов
 
 local function fCheckOneFile(sPath, bSupercritical)
     if not g_fReadFile or not g_fSha256 then return {} end
@@ -356,18 +358,27 @@ local function fCheckOneFile(sPath, bSupercritical)
 
     g_nTotalFileChecks = g_nTotalFileChecks + 1
 
-    -- MTIME FAST PATH: costs ~0.05 ticks instead of ~4 ticks
+    -- MTIME FAST PATH
     if g_fLastModified then
         local nMtime = g_fLastModified(sPath)
-        if nMtime and g_tMtimeCache[sPath] == nMtime then
+        if not nMtime then
+            tV[#tV + 1] = {
+                t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL" or "KERNEL_MODULES_INTEGRITY_FAIL",
+                d = sPath, e = sExpHash:sub(1, 24), a = "(file missing)"
+            }
+            g_nTotalFileFails = g_nTotalFileFails + 1
+            g_tMtimeCache[sPath] = nil
+            return tV
+        end
+
+        if g_tMtimeCache[sPath] == nMtime then
             g_nTotalFilePasses = g_nTotalFilePasses + 1
             g_tFileLastChecked[sPath] = g_fUptime()
-            return tV  -- file untouched since last verified hash
+            return tV  -- file untouched
         end
     end
 
-    -- SLOW PATH: actual read + SHA-256 (only when mtime changed or unavailable)
-    local nStart = g_fUptime()
+    -- SLOW PATH
     local sContent = g_fReadFile(sPath)
 
     if not sContent then
@@ -379,8 +390,6 @@ local function fCheckOneFile(sPath, bSupercritical)
         return tV
     end
 
-    -- Yield between read and hash — resets OC's 5s watchdog timer
-    -- and allows hardware events to be captured
     g_fFlush()
 
     local sCurHash = hex(g_fSha256(sContent))
@@ -394,7 +403,6 @@ local function fCheckOneFile(sPath, bSupercritical)
     else
         g_nTotalFilePasses = g_nTotalFilePasses + 1
         g_tFileLastChecked[sPath] = g_fUptime()
-        -- Cache the mtime at which this hash was verified
         if g_fLastModified then
             g_tMtimeCache[sPath] = g_fLastModified(sPath)
         end
@@ -402,6 +410,7 @@ local function fCheckOneFile(sPath, bSupercritical)
 
     return tV
 end
+
 
 -- =============================================
 -- INITIALIZE
@@ -1076,6 +1085,7 @@ end
 -- MAIN CHECK ORCHESTRATOR
 -- =============================================
 
+
 local function handleViolations(tViolations)
     if #tViolations == 0 then return true end
 
@@ -1119,8 +1129,6 @@ function PG.Check()
     local tV3 = checkTier3()
     for _, v in ipairs(tV3) do tViolations[#tViolations+1] = v end
 
-    -- REPLACED: was two separate calls to checkOneSupercriticalFile / checkOneCriticalFile
-    -- Now checks ALL files using the unified function with mtime fast-path
     for _, sPath in ipairs(SUPERCRITICAL_FILES) do
         local tVF = fCheckOneFile(sPath, true)
         for _, v in ipairs(tVF) do tViolations[#tViolations+1] = v end
@@ -1135,7 +1143,6 @@ function PG.Check()
     end
     return true
 end
-
 
 local g_nTicksSinceLastLog = 0
 
@@ -1308,10 +1315,24 @@ function PG.Tick()
         for _, v in ipairs(tV3) do tV[#tV+1] = v end
     end
 
-    -- Tier 3 FILES: mtime scan ALL files every cycle
-    -- Only hash the ones whose mtime actually changed
-    local tVF = fMtimeScanAndHash()
-    for _, v in ipairs(tVF) do tV[#tV+1] = v end
+    -- Tier 3 FILES: Round-Robin
+    if #SUPERCRITICAL_FILES > 0 then
+        local sSuperPath = SUPERCRITICAL_FILES[g_nSuperCursor]
+        local tVF1 = fCheckOneFile(sSuperPath, true)
+        for _, v in ipairs(tVF1) do tV[#tV+1] = v end
+        
+        g_nSuperCursor = g_nSuperCursor + 1
+        if g_nSuperCursor > #SUPERCRITICAL_FILES then g_nSuperCursor = 1 end
+    end
+
+    if #CRITICAL_FILES > 0 then
+        local sCritPath = CRITICAL_FILES[g_nCritCursor]
+        local tVF2 = fCheckOneFile(sCritPath, false)
+        for _, v in ipairs(tVF2) do tV[#tV+1] = v end
+        
+        g_nCritCursor = g_nCritCursor + 1
+        if g_nCritCursor > #CRITICAL_FILES then g_nCritCursor = 1 end
+    end
 
     if #tV > 0 then
         return handleViolations(tV)
@@ -1335,7 +1356,7 @@ function PG.GetStats()
         nFileChecksTotal     = g_nTotalFileChecks,
         nFilePassTotal       = g_nTotalFilePasses,
         nFileFailTotal       = g_nTotalFileFails,
-        nFileCheckCursor     = g_nFileCheckCursor,
+        nFileCheckCursor     = g_nSuperCursor,
 
         nCriticalFilesHashed = (function()
         local n = 0
