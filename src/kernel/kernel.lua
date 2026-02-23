@@ -4484,6 +4484,7 @@ do
             next = next, pcall = pcall, error = error,
             setmetatable = setmetatable,
             raw_component = raw_component,
+            unicode = unicode,
         }
         local fGdi, sGdiErr = load(sGdiCode, "@/system/gdi.lua", "t", tGdiEnv)
         if fGdi then
@@ -4716,8 +4717,36 @@ if g_oGdi then
         func = function() return GDI.HasGpuDriver() end,
         allowed_rings = {0, 1, 2, 2.5, 3},
     }
+    kernel.tSyscallTable["gdi_set_desktop_background"] = {
+    func = function(_, nFg, nBg)
+        if g_oGdi and g_oGdi.SetDesktopBackground then
+            g_oGdi.SetDesktopBackground(nFg, nBg)
+        end
+        return true
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    --[[
+    kernel.tSyscallTable["gdi_set_multi_gpu_mode"] = {
+        func = function(nPid, tConfig)
+            if not g_oGdi then return false, "GDI not loaded" end
+            if not g_oGdi.SetMultiGpuMode then return false, "Not supported" end
+            return g_oGdi.SetMultiGpuMode(tConfig)
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_get_multi_gpu_info"] = {
+        func = function()
+            if not g_oGdi then return nil end
+            if not g_oGdi.GetMultiGpuInfo then return nil end
+            return g_oGdi.GetMultiGpuInfo()
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    --]]
         
 end
+
 
 -- =================================================================
 -- MAIN KERNEL EVENT LOOP   Preemptive Round-Robin Scheduler
@@ -4846,6 +4875,8 @@ while true do
                     g_oIpc.NotifyChildDeath(nPid)
                 end
 
+                if g_oAwc then g_oAwc.CleanupProcess(nPid) end
+
                 for _, nWaiterPid in ipairs(tProcess.wait_queue or {}) do
                     local tWaiter = kernel.tProcessTable[nWaiterPid]
                     if tWaiter and tWaiter.status == "sleeping" and tWaiter.wait_reason == "wait_pid" then
@@ -4875,11 +4906,24 @@ while true do
             -- ======================================================
             local sIntEvt, ip1, ip2, ip3, ip4, ip5 = computer.pullSignal(0)
             if sIntEvt then
-                 if g_oGdi and (sIntEvt == "key_down" or sIntEvt == "key_up") then
-                    g_oGdi.OnKeyEvent(sIntEvt, ip1, ip2, ip3, ip4)
+                local bIntConsumed = false
+                if g_oGdi then
+                    if sIntEvt == "key_down" or sIntEvt == "key_up" then
+                        g_oGdi.OnKeyEvent(sIntEvt, ip1, ip2, ip3, ip4)
+                    elseif sIntEvt == "touch" then
+                        bIntConsumed = g_oGdi.OnTouchEvent(ip1, ip2, ip3, ip4, ip5) or false
+                    elseif sIntEvt == "drag" then
+                        bIntConsumed = g_oGdi.OnDragEvent(ip1, ip2, ip3, ip4, ip5) or false
+                    elseif sIntEvt == "drop" then
+                        bIntConsumed = g_oGdi.OnDropEvent(ip1, ip2, ip3, ip4, ip5) or false
+                    elseif sIntEvt == "scroll" then
+                        bIntConsumed = g_oGdi.OnScrollEvent(ip1, ip2, ip3, ip4, ip5) or false
+                    end
                 end
-                pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid, "os_event", sIntEvt, ip1, ip2, ip3,
-                    ip4, ip5)
+                if not bIntConsumed then
+                    pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid,
+                        "os_event", sIntEvt, ip1, ip2, ip3, ip4, ip5)
+                end
             end
 
         end -- if status == "ready"
@@ -4926,9 +4970,27 @@ while true do
     local sEventName, p1, p2, p3, p4, p5 = computer.pullSignal(nTimeout)
 
     if sEventName then
-        if g_oGdi and (sEventName == "key_down" or sEventName == "key_up") then
-            g_oGdi.OnKeyEvent(sEventName, p1, p2, p3, p4)
+        local bGdiConsumed = false
+
+        if g_oGdi then
+            if sEventName == "key_down" or sEventName == "key_up" then
+                g_oGdi.OnKeyEvent(sEventName, p1, p2, p3, p4)
+            elseif sEventName == "touch" then
+                bGdiConsumed = g_oGdi.OnTouchEvent(p1, p2, p3, p4, p5) or false
+            elseif sEventName == "drag" then
+                bGdiConsumed = g_oGdi.OnDragEvent(p1, p2, p3, p4, p5) or false
+            elseif sEventName == "drop" then
+                bGdiConsumed = g_oGdi.OnDropEvent(p1, p2, p3, p4, p5) or false
+            elseif sEventName == "scroll" then
+                bGdiConsumed = g_oGdi.OnScrollEvent(p1, p2, p3, p4, p5) or false
+            end
         end
-        pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid, "os_event", sEventName, p1, p2, p3, p4, p5)
+
+        -- Forward to PM/DKMS only if GDI didn't consume the event
+        if not bGdiConsumed then
+            pcall(kernel.syscalls.signal_send, nKernelPid,
+                kernel.nPipelinePid, "os_event",
+                sEventName, p1, p2, p3, p4, p5)
+        end
     end
 end

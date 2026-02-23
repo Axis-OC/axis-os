@@ -1,6 +1,6 @@
 --
 -- /bin/init.lua
--- Paranoid Mode
+-- Paranoid Mode + Display Manager Support
 --
 local oFs = require("filesystem")
 local oSys = require("syscall")
@@ -49,61 +49,125 @@ end
 
 fLoadPasswd()
 
-oFs.write(hStdout, "\f")
+-- =============================================
+-- CHECK DISPLAY MANAGER CONFIGURATION
+-- =============================================
 
-while true do
-  io.write("    _        _       ___   ____  \n",
-           "   / \\  __ _(_)_____/ _ \\/ ___| \n",
-           "  / _ \\ \\ \\/ / / __| | | \\___ \\ \n",
-           " / ___ \\ >  <| \\__ \\ |_| |___) |\n",
-           "/_/   \\_/_/\\_\\_|___/\\___/|____/ \n")
+local bDmEnabled = false
+local tDmCfg = nil
 
-  io.write("AxisOS v0.7-HV-beta\n")
-  io.write("\n________________________________________________\n\n")
-  io.write("XEN XKA v0.7-HV-beta on " .. sHostname .. "\n\n")
-  
-  io.write(sHostname .. " login: ")
-  
-  local sUsername = oFs.read(hStdin)
-  
-  if sUsername then
-    sUsername = sUsername:gsub("[%c%s]", "")
-    
-    local tUserEntry = tPasswdDb[sUsername]
-    
-    io.write("Password: ")
-    
-    local sPassword = oFs.read(hStdin) 
-    if sPassword then sPassword = sPassword:gsub("[%c%s]", "") end
-
-    if tUserEntry and tUserEntry.hash == fHash(sPassword or "") then
-      io.write("\nAccess Granted.\n")
-      
-      local nTargetRing = tUserEntry.ring or 3
-      
-      if nTargetRing == 0 then
-         io.write("\27[31mWARNING: SPAWNING IN RING 0 (KERNEL MODE)\27[37m\n")
-      end
-
-      local nPid = oSys.spawn(tUserEntry.shell, nTargetRing, { 
-        USER = sUsername,
-        UID = tUserEntry.uid,
-        HOME = tUserEntry.home,
-        PWD = tUserEntry.home,
-        PATH = "/usr/commands",
-        HOSTNAME = sHostname
-      })
-      
-      if nPid then
-        oSys.wait(nPid)
-        io.write("\f")
-      end
-    else
-      io.write("\nLogin incorrect\n")
-      syscall("process_yield")
+local sDmCfgRaw = readFileRaw("/etc/dm.cfg")
+if sDmCfgRaw and #sDmCfgRaw > 0 then
+    local f = load(sDmCfgRaw, "dm.cfg", "t", {})
+    if f then
+        local bOk, tResult = pcall(f)
+        if bOk and type(tResult) == "table" then
+            tDmCfg = tResult
+            bDmEnabled = (tResult.enabled == true)
+        end
     end
-  else
-    syscall("kernel_log", "[INIT] Error reading stdin. Retrying...")
-    syscall("process_yield")
-  end
+end
+
+-- =============================================
+-- DISPLAY MANAGER MODE
+-- =============================================
+
+if bDmEnabled and tDmCfg then
+    syscall("kernel_log", "[INIT] Display Manager mode enabled — launching DM")
+
+    -- Configure multi-GPU if specified
+    if tDmCfg.multi_gpu and tDmCfg.multi_gpu.enabled then
+        pcall(function()
+            syscall("gdi_set_multi_gpu_mode", tDmCfg.multi_gpu)
+        end)
+    end
+
+    while true do
+        -- Launch the display manager
+        local nDmPid = oSys.spawn("/system/dm.lua", 3, {
+            USER = "root",
+            UID = 0,
+            HOME = "/root",
+            PWD = "/",
+            PATH = "/usr/commands",
+            HOSTNAME = sHostname,
+            DM_CONFIG = tDmCfg,
+            PASSWD_DB = tPasswdDb,
+        })
+
+        if nDmPid then
+            oSys.wait(nDmPid)
+            -- DM exited — restart it (unless machine is shutting down)
+            oFs.write(hStdout, "\f")
+        else
+            syscall("kernel_log", "[INIT] Failed to spawn display manager, falling back to text mode")
+            bDmEnabled = false
+            break
+        end
+    end
+end
+
+-- =============================================
+-- TEXT MODE LOGIN (classic behavior)
+-- =============================================
+
+if not bDmEnabled then
+    oFs.write(hStdout, "\f")
+
+    while true do
+      io.write("    _        _       ___   ____  \n",
+               "   / \\  __ _(_)_____/ _ \\/ ___| \n",
+               "  / _ \\ \\ \\/ / / __| | | \\___ \\ \n",
+               " / ___ \\ >  <| \\__ \\ |_| |___) |\n",
+               "/_/   \\_/_/\\_\\_|___/\\___/|____/ \n")
+
+      io.write("AxisOS v0.7-HV-beta\n")
+      io.write("\n________________________________________________\n\n")
+      io.write("XEN XKA v0.7-HV-beta on " .. sHostname .. "\n\n")
+      
+      io.write(sHostname .. " login: ")
+      
+      local sUsername = oFs.read(hStdin)
+      
+      if sUsername then
+        sUsername = sUsername:gsub("[%c%s]", "")
+        
+        local tUserEntry = tPasswdDb[sUsername]
+        
+        io.write("Password: ")
+        
+        local sPassword = oFs.read(hStdin) 
+        if sPassword then sPassword = sPassword:gsub("[%c%s]", "") end
+
+        if tUserEntry and tUserEntry.hash == fHash(sPassword or "") then
+          io.write("\nAccess Granted.\n")
+          
+          local nTargetRing = tUserEntry.ring or 3
+          
+          if nTargetRing == 0 then
+             io.write("\27[31mWARNING: SPAWNING IN RING 0 (KERNEL MODE)\27[37m\n")
+          end
+
+          local nPid = oSys.spawn(tUserEntry.shell, nTargetRing, { 
+            USER = sUsername,
+            UID = tUserEntry.uid,
+            HOME = tUserEntry.home,
+            PWD = tUserEntry.home,
+            PATH = "/usr/commands",
+            HOSTNAME = sHostname
+          })
+          
+          if nPid then
+            oSys.wait(nPid)
+            io.write("\f")
+          end
+        else
+          io.write("\nLogin incorrect\n")
+          syscall("process_yield")
+        end
+      else
+        syscall("kernel_log", "[INIT] Error reading stdin. Retrying...")
+        syscall("process_yield")
+      end
+    end
 end

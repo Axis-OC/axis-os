@@ -103,6 +103,31 @@ local function sendDeviceControl(sDevName, sMethod, tArgs)
 end
 
 -- ==========================================
+-- ENSURE PARENT DIRECTORIES EXIST
+-- Called before opening a file for writing.
+-- Creates each missing segment of the path.
+-- ==========================================
+
+local function fEnsureParentDirs(sPath)
+    if not g_oRootFs then return end
+    local sParent = sPath:match("^(.+)/[^/]+$")
+    if not sParent or sParent == "" then return end
+
+    -- Quick check: does the parent already exist?
+    local bCheckOk, bIsDir = syscall("raw_component_invoke",
+        g_oRootFs.address, "isDirectory", sParent)
+    if bCheckOk and bIsDir then return end  -- parent exists, nothing to do
+
+    -- Walk path segments and create each missing directory
+    local sBuilt = ""
+    for sSeg in sParent:gmatch("[^/]+") do
+        sBuilt = sBuilt .. "/" .. sSeg
+        -- makeDirectory is idempotent (returns false if already exists)
+        syscall("raw_component_invoke", g_oRootFs.address, "makeDirectory", sBuilt)
+    end
+end
+
+-- ==========================================
 -- VFS HANDLERS
 -- ==========================================
 
@@ -119,8 +144,16 @@ function tHandlers.vfs_open(nSenderPid, sSynapseToken, sPath, sMode)
         tBody.sDeviceName = sDevName
         tBody.nDriverPid = nDrvPid
     else
+        -- FIX: For write/append modes, ensure parent directories exist
+        -- before attempting to open.  This fixes file creation failures
+        -- when the parent directory hasn't been created yet (e.g. /root,
+        -- /log, /vbl on first boot).
+        if sMode == "w" or sMode == "a" then
+            fEnsureParentDirs(sPath)
+        end
+
         local bOk, hRaw = syscall("raw_component_invoke", g_oRootFs.address, "open", sPath, sMode)
-        if not hRaw then return nil, "File not found" end
+        if not hRaw then return nil, "Cannot open file: " .. tostring(sPath) end
         tBody.sCategory = "file"
         tBody.hRawHandle = hRaw
     end
@@ -217,6 +250,8 @@ end
 
 function tHandlers.vfs_mkdir(nSenderPid, sPath)
     if sPath:sub(1, 5) == "/dev/" then return nil, "Cannot mkdir in /dev" end
+    -- FIX: Ensure parent directories exist for mkdir too
+    fEnsureParentDirs(sPath)
     local bOk, sR = syscall("raw_component_invoke", g_oRootFs.address, "makeDirectory", sPath)
     return bOk and true or nil, tostring(sR)
 end

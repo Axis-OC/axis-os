@@ -95,8 +95,8 @@ local g_fReadFile          = nil   -- read file from disk
 -- local g_nCheckInterval     = 50
 
 local g_nNextCheckTime     = 0     -- uptime() when next check fires
-local g_nMinCheckSec       = 1.5   -- minimum seconds between checks
-local g_nMaxCheckSec       = 5.0   -- maximum seconds between checks
+local g_nMinCheckSec       = 111.5   -- minimum seconds between checks
+local g_nMaxCheckSec       = 115.0   -- maximum seconds between checks
 local g_nChecksPerformed   = 0
 local g_nTier2Counter      = 0
 local g_nTier3Counter      = 0

@@ -140,29 +140,39 @@ local function fDiscoverAdapters()
     g_tScreens  = {}
     g_nAdapterCount = 0
 
-    -- Collect all screens
+    -- Collect all screens into a sorted list for deterministic pairing
     local bOkS, tScreenList = syscall("raw_component_list", "screen")
+    local tScreenAddrs = {}
     if bOkS and tScreenList then
         for sAddr in pairs(tScreenList) do
             g_tScreens[sAddr] = true
+            tScreenAddrs[#tScreenAddrs + 1] = sAddr
         end
     end
+    table.sort(tScreenAddrs)   -- deterministic ordering
 
-    -- Collect all GPUs
+    -- Collect all GPUs into a sorted list
     local bOkG, tGpuList = syscall("raw_component_list", "gpu")
     if not bOkG or not tGpuList then return 0 end
 
+    local tGpuAddrs = {}
     for sAddr in pairs(tGpuList) do
+        tGpuAddrs[#tGpuAddrs + 1] = sAddr
+    end
+    table.sort(tGpuAddrs)      -- deterministic ordering
+
+    for _, sAddr in ipairs(tGpuAddrs) do
         if g_nAdapterCount >= MAX_ADAPTERS then break end
 
         local nProxySt, oProxy = oKMD.DkGetHardwareProxy(sAddr)
-        if nProxySt ~= tStatus.STATUS_SUCCESS then goto nextGpu end
+        if nProxySt ~= tStatus.STATUS_SUCCESS or not oProxy then
+            oKMD.DkPrint("GPU_GX: SKIP " .. sAddr:sub(1,8) .. " — proxy failed")
+            goto nextGpu
+        end
 
         local nTier = fDetectTier(oProxy)
         local bMaxOk, nMaxW, nMaxH = pcall(oProxy.maxResolution)
         if not bMaxOk then nMaxW, nMaxH = 80, 25 end
-
-        local bBuf = (nTier >= TIER_BUFFER)
 
         g_nAdapterCount = g_nAdapterCount + 1
         local nIdx = g_nAdapterCount
@@ -173,58 +183,55 @@ local function fDiscoverAdapters()
             nTier      = nTier,
             nMaxW      = nMaxW,
             nMaxH      = nMaxH,
-            bBufSupport = bBuf,
-            sScreen    = nil,    -- bound screen address
+            bBufSupport = (nTier >= TIER_BUFFER),
+            sScreen    = nil,
             bBound     = false,
         }
-
-        -- Initialize pipeline state cache
-        g_tPipelineState[nIdx] = {
-            nLastFg      = -1,
-            nLastBg      = -1,
-            nActiveBuffer = 0,
-            nW           = 0,
-            nH           = 0,
-        }
+        g_tPipelineState[nIdx] = { nLastFg = -1, nLastBg = -1, nActiveBuffer = 0, nW = 0, nH = 0 }
 
         oKMD.DkPrint(string.format(
             "GPU_GX: Adapter %d: %s Tier %d (%dx%d) buf=%s",
-            nIdx, sAddr:sub(1, 8), nTier, nMaxW, nMaxH, tostring(bBuf)))
+            nIdx, sAddr:sub(1, 8), nTier, nMaxW, nMaxH, tostring(nTier >= TIER_BUFFER)))
 
         ::nextGpu::
     end
 
-    -- Auto-bind: pair GPUs with screens round-robin
-    local nScreenIdx = 1
-    local tScreenAddrs = {}
-    for sAddr in pairs(g_tScreens) do
-        tScreenAddrs[#tScreenAddrs + 1] = sAddr
-    end
-
+    -- Auto-bind: pair GPU N with Screen N (round-robin, deterministic)
     for nIdx = 1, g_nAdapterCount do
-        if nScreenIdx <= #tScreenAddrs then
-            local sScr = tScreenAddrs[nScreenIdx]
+        if nIdx <= #tScreenAddrs then
+            local sScr = tScreenAddrs[nIdx]
             local oP = g_tAdapters[nIdx].oProxy
-            local bBindOk = pcall(oP.bind, sScr)
-            if bBindOk then
+
+            -- Attempt bind; check BOTH pcall success AND bind return value
+            local bPcOk, bBindRet = pcall(oP.bind, sScr, false)
+            if bPcOk and bBindRet ~= false then
                 g_tAdapters[nIdx].sScreen = sScr
                 g_tAdapters[nIdx].bBound = true
+                fInvalidatePipeline(nIdx)
+
                 local bResOk, nW, nH = pcall(oP.getResolution)
-                if bResOk then
+                if bResOk and nW then
                     g_tPipelineState[nIdx].nW = nW
                     g_tPipelineState[nIdx].nH = nH
                 end
+
                 oKMD.DkPrint(string.format(
                     "GPU_GX: Adapter %d bound to screen %s (%dx%d)",
                     nIdx, sScr:sub(1, 8), nW or 0, nH or 0))
-                nScreenIdx = nScreenIdx + 1
+            else
+                oKMD.DkPrint(string.format(
+                    "GPU_GX: Adapter %d BIND FAILED to screen %s (pcall=%s ret=%s)",
+                    nIdx, sScr:sub(1, 8), tostring(bPcOk), tostring(bBindRet)))
             end
+        else
+            oKMD.DkPrint(string.format(
+                "GPU_GX: Adapter %d — no screen available (have %d screens for %d GPUs)",
+                nIdx, #tScreenAddrs, g_nAdapterCount))
         end
     end
 
     return g_nAdapterCount
 end
-
 -- =============================================
 -- 4. PIPELINE STATE CACHE
 -- Track last-set fg/bg per adapter to avoid
@@ -459,7 +466,8 @@ local function fEndCmdBuffer(nHandle)
 end
 
 -- Submit: execute all recorded commands on the target adapter.
--- Optimization: sort by color to minimize GPU state changes.
+-- Collision-Aware Chunking: preserve draw order for overlapping regions
+-- while color-sorting non-overlapping regions within each chunk.
 local function fSubmitCmdBuffer(nHandle, nFenceHandle)
     local tCB = g_tCmdBuffers[nHandle]
     if not tCB or tCB.bRecording then return nil, "Not ready" end
@@ -471,35 +479,43 @@ local function fSubmitCmdBuffer(nHandle, nFenceHandle)
 
     g_tStats.nTotalCmdSubmit = g_tStats.nTotalCmdSubmit + 1
 
-    -- ---- Optimization: color-sort the SET commands ----
-    -- Group by (fg, bg) to minimize setForeground/setBackground calls.
-    -- Non-drawing commands (resolution, bind, etc.) execute in order.
-
-    local tDrawOps  = {}  -- { {cmd, fg, bg}, ... }
-    local tOtherOps = {}  -- { {idx, cmd}, ... }
+    -- ---- Classify commands into draw ops and non-draw ops ----
+    local tDrawOps  = {}  -- preserves original order
+    local tOtherOps = {}  -- {originalIndex, cmd}
 
     for i = 1, tCB.nCmdCount do
         local tCmd = tCB.tCommands[i]
         local nT = tCmd[1]
         if nT == CMD_SET then
             -- {CMD_SET, x, y, text, fg, bg}
-            tDrawOps[#tDrawOps + 1] = {tCmd, tCmd[5] or 0xFFFFFF, tCmd[6] or 0x000000}
+            local sText = tCmd[4] or ""
+            tDrawOps[#tDrawOps + 1] = {
+                cmd = tCmd,
+                fg  = tCmd[5] or 0xFFFFFF,
+                bg  = tCmd[6] or 0x000000,
+                -- Bounding rect for overlap detection
+                rx  = tCmd[2],
+                ry  = tCmd[3],
+                rw  = #sText,  -- byte length ≥ cell width (safe overapproximation)
+                rh  = 1,
+            }
         elseif nT == CMD_FILL then
             -- {CMD_FILL, x, y, w, h, ch, fg, bg}
-            tDrawOps[#tDrawOps + 1] = {tCmd, tCmd[7] or 0xFFFFFF, tCmd[8] or 0x000000}
+            tDrawOps[#tDrawOps + 1] = {
+                cmd = tCmd,
+                fg  = tCmd[7] or 0xFFFFFF,
+                bg  = tCmd[8] or 0x000000,
+                rx  = tCmd[2],
+                ry  = tCmd[3],
+                rw  = tCmd[4] or 1,
+                rh  = tCmd[5] or 1,
+            }
         else
             tOtherOps[#tOtherOps + 1] = {i, tCmd}
         end
     end
 
-    -- Sort draw ops by color (fg*0x1000000 + bg gives unique key)
-    table.sort(tDrawOps, function(a, b)
-        local ka = a[2] * 0x1000000 + a[3]
-        local kb = b[2] * 0x1000000 + b[3]
-        return ka < kb
-    end)
-
-    -- Execute non-draw ops first (in original order)
+    -- ---- Execute non-draw ops first (in original order) ----
     for _, tPair in ipairs(tOtherOps) do
         local tCmd = tPair[2]
         local nT = tCmd[1]
@@ -517,7 +533,6 @@ local function fSubmitCmdBuffer(nHandle, nFenceHandle)
             pcall(oP.bitblt, tCmd[2], tCmd[3], tCmd[4],
                   tCmd[5], tCmd[6], tCmd[7], tCmd[8], tCmd[9])
         elseif nT == CMD_SCROLL then
-            -- Scroll by N lines: copy + fill
             local nLines = tCmd[2] or 1
             local tPS = g_tPipelineState[nIdx]
             if tPS and tPS.nW > 0 and tPS.nH > 0 then
@@ -528,20 +543,75 @@ local function fSubmitCmdBuffer(nHandle, nFenceHandle)
         end
     end
 
-    -- Execute sorted draw ops with pipeline state caching
-    for _, tDraw in ipairs(tDrawOps) do
-        local tCmd = tDraw[1]
-        local nFg, nBg = tDraw[2], tDraw[3]
-        fSetFg(nIdx, nFg)
-        fSetBg(nIdx, nBg)
+    -- ---- Collision-Aware Chunking for draw ops ----
+    -- Walk draw ops in original order. Build "chunks" of non-overlapping
+    -- draws. Within each chunk, color-sorting is safe because
+    -- non-overlapping operations commute (order doesn't matter).
+    -- When a new draw overlaps something already in the current chunk,
+    -- a new chunk is started — preserving the visual layering.
 
-        local nT = tCmd[1]
-        if nT == CMD_SET then
-            pcall(oP.set, tCmd[2], tCmd[3], tCmd[4])
-            g_tStats.nTotalSets = g_tStats.nTotalSets + 1
-        elseif nT == CMD_FILL then
-            pcall(oP.fill, tCmd[2], tCmd[3], tCmd[4], tCmd[5], tCmd[6])
-            g_tStats.nTotalFills = g_tStats.nTotalFills + 1
+    local tChunks = {}  -- { {drawOp, drawOp, ...}, ... }
+
+    -- AABB overlap test: two rects overlap iff they intersect on both axes
+    local function fRectsOverlap(a, b)
+        if a.rw <= 0 or a.rh <= 0 or b.rw <= 0 or b.rh <= 0 then
+            return false
+        end
+        return a.rx < b.rx + b.rw
+           and b.rx < a.rx + a.rw
+           and a.ry < b.ry + b.rh
+           and b.ry < a.ry + a.rh
+    end
+
+    for _, tDraw in ipairs(tDrawOps) do
+        local bPlaced = false
+
+        -- Try to add to the most recent chunk (common case: sequential
+        -- draws to non-overlapping screen regions)
+        if #tChunks > 0 then
+            local tLastChunk = tChunks[#tChunks]
+            local bOverlaps = false
+            for _, tExisting in ipairs(tLastChunk) do
+                if fRectsOverlap(tDraw, tExisting) then
+                    bOverlaps = true
+                    break
+                end
+            end
+            if not bOverlaps then
+                tLastChunk[#tLastChunk + 1] = tDraw
+                bPlaced = true
+            end
+        end
+
+        if not bPlaced then
+            -- Overlap detected (or first command): start a new chunk
+            tChunks[#tChunks + 1] = { tDraw }
+        end
+    end
+
+    -- ---- Execute chunks in order ----
+    -- Within each chunk, sort by color to minimize setFg/setBg calls.
+    for _, tChunk in ipairs(tChunks) do
+        -- Color-sort within this chunk (safe: no overlaps)
+        table.sort(tChunk, function(a, b)
+            local ka = a.fg * 0x1000000 + a.bg
+            local kb = b.fg * 0x1000000 + b.bg
+            return ka < kb
+        end)
+
+        for _, tDraw in ipairs(tChunk) do
+            local tCmd = tDraw.cmd
+            fSetFg(nIdx, tDraw.fg)
+            fSetBg(nIdx, tDraw.bg)
+
+            local nT = tCmd[1]
+            if nT == CMD_SET then
+                pcall(oP.set, tCmd[2], tCmd[3], tCmd[4])
+                g_tStats.nTotalSets = g_tStats.nTotalSets + 1
+            elseif nT == CMD_FILL then
+                pcall(oP.fill, tCmd[2], tCmd[3], tCmd[4], tCmd[5], tCmd[6])
+                g_tStats.nTotalFills = g_tStats.nTotalFills + 1
+            end
         end
     end
 
@@ -1045,7 +1115,7 @@ function DriverEntry(pDriverObject)
 
     pcall(syscall, "kernel_register_gpu_fast_path", tFastPathExport)
     oKMD.DkPrint("GPU_GX: Fast-path registered with kernel/GDI")
-    
+
     return tStatus.STATUS_SUCCESS
 end
 
