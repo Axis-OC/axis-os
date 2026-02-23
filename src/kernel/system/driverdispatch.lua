@@ -49,7 +49,6 @@ function oDispatch.DispatchIrp(pIrp, g_tDeviceTree, g_tSymbolicLinks)
   return tStatus.STATUS_PENDING
 end
 
--- NEW: Pass IRP down the device stack (called by filter drivers)
 function oDispatch.IoCallDriver(pLowerDevice, pIrp)
     if not pLowerDevice then return tStatus.STATUS_NO_SUCH_DEVICE end
     local pDriverObject = pLowerDevice.pDriverObject

@@ -429,10 +429,10 @@ local function writeToScreen(pDeviceObject, sData)
                                 elseif n == 7 then
                                     pExt.nCurrentFg, pExt.nCurrentBg = pExt.nCurrentBg, pExt.nCurrentFg
                                     bAny = true
-                                elseif n == 27 then -- ADD
-                                    pExt.nCurrentFg = DEFAULT_FG -- ADD
-                                    pExt.nCurrentBg = DEFAULT_BG -- ADD
-                                    bAny = true -- ADD                 
+                                elseif n == 27 then
+                                    pExt.nCurrentFg = DEFAULT_FG
+                                    pExt.nCurrentBg = DEFAULT_BG
+                                    bAny = true               
                                 elseif n == 0 then
                                     pExt.nCurrentFg = DEFAULT_FG
                                     pExt.nCurrentBg = DEFAULT_BG
