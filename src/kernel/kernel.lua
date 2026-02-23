@@ -25,6 +25,7 @@ local kernel = {
     tBootLog = {},
     tLoadedModules = {}
 }
+local g_tGpuFastPath = nil
 
 -- Lua 5.3 compatibility: synthesize bit32 from native operators
 if not bit32 then
@@ -4050,6 +4051,18 @@ kernel.tSyscallTable["secureboot_compute_kernel_hash"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["gpu_register_fast_path"] = {
+    func = function(nPid, tFP)
+        g_tGpuFastPath = tFP
+        if g_oGdi then
+            g_oGdi.RegisterGpuFastPath(tFP)
+        end
+        kprint("ok", "[GDI] GPU fast-path registered by PID " .. nPid)
+        return true
+    end,
+    allowed_rings = {1, 2},
+}
+
 -------------------------------------------------
 -- KERNEL INITIALIZATION
 -------------------------------------------------
@@ -4626,6 +4639,84 @@ if g_oGdi then
         func = function() return nil, "use GX_SYS_direct_access" end,
         allowed_rings = {0},
     }
+        -- GPU Driver Fast-Path Registration
+    kernel.tSyscallTable["kernel_register_gpu_fast_path"] = {
+        func = function(nPid, tFastPath)
+            if g_oGdi and g_oGdi.AttachGpuDriver then
+                g_oGdi.AttachGpuDriver(tFastPath)
+                kprint("ok", "[GDI] GPU driver fast-path attached from PID " .. nPid)
+            end
+            return true
+        end,
+        allowed_rings = {1, 2},
+    }
+
+    -- Swapchain syscalls
+    kernel.tSyscallTable["gdi_create_swapchain"] = {
+        func = function(_, nGpu, nW, nH) return GDI.CreateSwapchain(nGpu, nW, nH) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_present_swapchain"] = {
+        func = function(_, h) return GDI.PresentSwapchain(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_acquire_image"] = {
+        func = function(_, h) return GDI.AcquireImage(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_destroy_swapchain"] = {
+        func = function(_, h) GDI.DestroySwapchain(h); return true end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+
+    -- Command buffer syscalls
+    kernel.tSyscallTable["gdi_create_cmd_buffer"] = {
+        func = function(_, nGpu) return GDI.CreateCmdBuffer(nGpu) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_begin_cmd_buffer"] = {
+        func = function(_, h) return GDI.BeginCmdBuffer(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_cmd_set"] = {
+        func = function(_, h, x, y, s, fg, bg) return GDI.CmdSet(h, x, y, s, fg, bg) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_cmd_fill"] = {
+        func = function(_, h, x, y, w, nh, c, fg, bg)
+            return GDI.CmdFill(h, x, y, w, nh, c, fg, bg)
+        end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_end_cmd_buffer"] = {
+        func = function(_, h) return GDI.EndCmdBuffer(h) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_submit_cmd_buffer"] = {
+        func = function(_, h, fence) return GDI.SubmitCmdBuffer(h, fence) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_destroy_cmd_buffer"] = {
+        func = function(_, h) GDI.DestroyCmdBuffer(h); return true end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+
+    -- Multi-GPU broadcast drawing
+    kernel.tSyscallTable["gdi_multi_gpu_draw"] = {
+        func = function(_, tBatch) return GDI.MultiGpuDraw(tBatch) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+    kernel.tSyscallTable["gdi_gpu_draw"] = {
+        func = function(_, nGpu, tBatch) return GDI.GpuDraw(nGpu, tBatch) end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+
+    -- Query GPU driver fast-path status
+    kernel.tSyscallTable["gdi_has_gpu_driver"] = {
+        func = function() return GDI.HasGpuDriver() end,
+        allowed_rings = {0, 1, 2, 2.5, 3},
+    }
+        
 end
 
 -- =================================================================

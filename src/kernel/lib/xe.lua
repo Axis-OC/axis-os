@@ -266,13 +266,11 @@ function XE.createContext(cfg)
         ext.XE_ui_imgui_navigation = true
     end
 
-    local hIn  = fs.open("/dev/tty", "r")
-    local hOut = fs.open("/dev/tty", "w")
-    if not hIn or not hOut then return nil, "no tty" end
-
+   local hIn  = fs.open("/dev/tty", "r")
+    if not hIn then return nil, "no tty" end
     fs.deviceControl(hIn, "set_mode", {"raw"})
-    -- Enable non-blocking reads for live-updating apps
     fs.deviceControl(hIn, "set_nonblock", {true})
+
     local bSz, tSz = fs.deviceControl(hIn, "get_size", {})
     local W = (bSz and tSz and tSz.w) or (cfg.width  or 80)
     local H = (bSz and tSz and tSz.h) or (cfg.height or 25)
@@ -280,6 +278,22 @@ function XE.createContext(cfg)
     if ext.XE_ui_alt_screen_query then
         fs.deviceControl(hIn, "enter_alt_screen", {})
     end
+
+    -- ===== CREATE GDI SURFACE for output =====
+    local hGdiSurface = syscall("gdi_create_surface", W, H, {
+        bVisible   = true,
+        nScreenX   = 1,
+        nScreenY   = 1,
+        nZOrder    = 100,
+        sLabel     = "XE_Context",
+    })
+    if not hGdiSurface then
+        fs.close(hIn)
+        return nil, "failed to create GDI surface"
+    end
+
+    -- Set GDI focus for keyboard input routing
+    syscall("gdi_set_focus", hGdiSurface)
 
     local bShadow = (ext.XE_ui_shadow_buffering_render_batch
                   or ext.XE_ui_shadow_buffering_generic_render) and true or false
@@ -296,6 +310,7 @@ function XE.createContext(cfg)
     local ctx = {
         W = W, H = H,
         _hIn = hIn, _hOut = hOut,
+        _hGdiSurface = hGdiSurface,
         _ext = ext, _alive = true,
 
         _bShadow = bShadow, _bDiff = bDiff, _bBatch = bBatch,
@@ -441,24 +456,20 @@ end
 function XE._M:destroy()
     if not self._alive then return end
     self._alive = false
-    -- Restore blocking reads for subsequent apps (shell, vi, etc.)
+
+    -- Restore TTY
     fs.deviceControl(self._hIn, "set_nonblock", {false})
-    if self._gpuBufId and self._bGpuBuf then
-        fs.deviceControl(self._hIn, "gpu_free_buffer", {self._gpuBufId})
-        self._gpuBufId = nil
-    end
-    for sId, pg in pairs(self._pages) do
-        if pg.gpuBuf and self._bGpuBuf then
-            fs.deviceControl(self._hIn, "gpu_free_buffer", {pg.gpuBuf})
-        end
-    end
-    self._pages = {}
     if self._ext.XE_ui_alt_screen_query then
         fs.deviceControl(self._hIn, "leave_alt_screen", {})
     end
     fs.deviceControl(self._hIn, "set_mode", {"cooked"})
     fs.close(self._hIn)
-    fs.close(self._hOut)
+
+    -- Destroy GDI surface
+    if self._hGdiSurface then
+        syscall("gdi_destroy_surface", self._hGdiSurface)
+        self._hGdiSurface = nil
+    end
 end
 
 -- =============================================
@@ -648,55 +659,35 @@ function XE._M:endFrame()
         end
         self._pendingDropdown = nil
     end
-
     -- ===== DIFF + FLUSH =====
     if self._bShadow then
         local hasClear = (self._clearBg ~= _NOCLEAR)
         if hasClear then
             self:_flushWithClear()
         else
-            if self._nDty == 0 then
-                if self._gpuBufId then
-                    fs.deviceControl(self._hIn, "gpu_set_active_buffer", {0})
-                end
-                return
-            end
+            if self._nDty == 0 then return end
             if self._bDiff then
                 self:_flushDiff()
             else
                 self:_flushShadowNoDiff()
             end
         end
-    else
-        if self._nB == 0 then
-            if self._gpuBufId then
-                fs.deviceControl(self._hIn, "gpu_set_active_buffer", {0})
-            end
-            return
-        end
     end
 
-    -- ===== EMIT BATCH =====
+    -- ===== SEND BATCH TO GDI SURFACE =====
     if self._nB > 0 then
         local bat = self._bat
-        for i = self._nB + 1, #bat do bat[i] = nil end
-
-        if self._bGenR then
-            local nStart = 1
-            while nStart <= self._nB do
-                local curY = bat[nStart][2]
-                local nEnd = nStart
-                while nEnd < self._nB and bat[nEnd+1][2] == curY do nEnd = nEnd+1 end
-                local tRow = {}
-                for i = nStart, nEnd do tRow[#tRow+1] = bat[i] end
-                fs.deviceControl(self._hIn, "render_batch", tRow)
-                nStart = nEnd + 1
-            end
-        else
-            fs.deviceControl(self._hIn, "render_batch", bat)
+        local tOps = {}
+        for i = 1, self._nB do
+            local e = bat[i]
+            tOps[i] = {"set", e[1], e[2], e[3], e[4], e[5]}
         end
+        syscall("gdi_batch_submit", self._hGdiSurface, tOps)
         self._nB = 0
     end
+
+    -- ===== TRIGGER GDI COMPOSITOR =====
+    syscall("gdi_composite")
 
     -- ===== GPU DOUBLE BUFFER =====
     if self._gpuBufId then

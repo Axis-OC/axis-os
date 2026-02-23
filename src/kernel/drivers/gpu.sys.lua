@@ -997,6 +997,55 @@ function DriverEntry(pDriverObject)
     end)
 
     oKMD.DkPrint("AxisGPU_GX v2.0: Ready with " .. nFound .. " adapter(s)")
+
+    -- ═══════════════════════════════════════
+    -- REGISTER FAST-PATH WITH KERNEL / GDI
+    -- Passes direct function references (closures over driver state).
+    -- GDI calls these from kernel context — zero IRP overhead.
+    -- ═══════════════════════════════════════
+
+    local tFastPathExport = {
+        -- Adapter data
+        tAdapters      = g_tAdapters,
+        nAdapterCount  = g_nAdapterCount,
+        tPipelineState = g_tPipelineState,
+        tScreens       = g_tScreens,
+        tStats         = g_tStats,
+
+        -- Pipeline state
+        fSetFg              = fSetFg,
+        fSetBg              = fSetBg,
+        fInvalidatePipeline = fInvalidatePipeline,
+
+        -- Fast rendering
+        fFastRenderBatch = fFastRenderBatch,
+        fFastFill        = fFastFill,
+
+        -- Swapchain
+        fCreateSwapchain  = fCreateSwapchain,
+        fPresentSwapchain = fPresentSwapchain,
+        fDestroySwapchain = fDestroySwapchain,
+        fAcquireImage     = fAcquireImage,
+
+        -- Command buffers
+        fCreateCmdBuffer  = fCreateCmdBuffer,
+        fBeginCmdBuffer   = fBeginCmdBuffer,
+        fRecordCmd        = fRecordCmd,
+        fEndCmdBuffer     = fEndCmdBuffer,
+        fSubmitCmdBuffer  = fSubmitCmdBuffer,
+        fDestroyCmdBuffer = fDestroyCmdBuffer,
+
+        -- Buffer pool
+        fAllocBuffer = fAllocBuffer,
+        fFreeBuffer  = fFreeBuffer,
+
+        -- Legacy invoke
+        fGpuInvoke = fGpuInvoke,
+    }
+
+    pcall(syscall, "kernel_register_gpu_fast_path", tFastPathExport)
+    oKMD.DkPrint("GPU_GX: Fast-path registered with kernel/GDI")
+    
     return tStatus.STATUS_SUCCESS
 end
 
