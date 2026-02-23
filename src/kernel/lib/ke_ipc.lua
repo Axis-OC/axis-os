@@ -1199,4 +1199,103 @@ function oIpc.GetStats()
     }
 end
 
+-- =============================================
+-- 18. I/O COMPLETION PORTS
+-- A process creates a port, associates file handles with it,
+-- submits async I/O, then waits on the port for any completion.
+-- Internally the port is a manual-reset event that re-signals
+-- each time a completed IRP is enqueued.
+-- =============================================
+
+oIpc.WAIT_TYPE_IOCP = 7
+
+function oIpc.KeCreateIoCompletionPort(nPid, nMaxConcurrent)
+    nMaxConcurrent = nMaxConcurrent or 0  -- 0 = unlimited
+    local tBody = {
+        tDH = fNewDispatchHeader(oIpc.WAIT_TYPE_IOCP, true, false),
+        tQueue       = {},   -- completed {pIrp, vKey, nBytes, nStatus}
+        nMaxConc     = nMaxConcurrent,
+        nAssociated  = 0,
+        tAssocKeys   = {},   -- [handleToken] = completionKey
+    }
+    local pH = g_oOb.ObCreateObject("IoCompletionPort", tBody)
+    local sSyn = g_tPT[nPid] and g_tPT[nPid].synapseToken or ""
+    local sH = g_oOb.ObCreateHandle(nPid, pH, 0x007F, sSyn)
+    g_fLog("[IPC] IoCompletionPort created for PID " .. nPid)
+    return sH
+end
+
+-- Associate a file handle with a completion port + key
+function oIpc.KeAssociateCompletion(nPid, sPortHandle, sFileHandle, nCompletionKey)
+    local pPort = g_oOb.ObReferenceObjectByHandle(
+        nPid, sPortHandle, 0, g_tPT[nPid] and g_tPT[nPid].synapseToken or "")
+    if not pPort or not pPort.pBody then return nil, "Invalid port" end
+    pPort.pBody.tAssocKeys[sFileHandle] = nCompletionKey or 0
+    pPort.pBody.nAssociated = pPort.pBody.nAssociated + 1
+    return true
+end
+
+-- Post a completion result (called by I/O manager when IRP finishes)
+function oIpc.KePostCompletion(nPid, sPortHandle, nCompletionKey, nBytes, nStatus, vUserData)
+    local pPort = g_oOb.ObReferenceObjectByHandle(
+        nPid, sPortHandle, 0, g_tPT[nPid] and g_tPT[nPid].synapseToken or "")
+    if not pPort or not pPort.pBody then return nil, "Invalid port" end
+    local b = pPort.pBody
+    table.insert(b.tQueue, {
+        nKey    = nCompletionKey or 0,
+        nBytes  = nBytes or 0,
+        nStatus = nStatus or 0,
+        vData   = vUserData,
+    })
+    -- Signal the port's dispatch header to wake waiters
+    fSignalObject(b.tDH)
+    return true
+end
+
+-- Dequeue one completion (blocking with optional timeout)
+function oIpc.KeGetCompletion(nPid, sPortHandle, nTimeoutMs)
+    local pPort = g_oOb.ObReferenceObjectByHandle(
+        nPid, sPortHandle, 0, g_tPT[nPid] and g_tPT[nPid].synapseToken or "")
+    if not pPort or not pPort.pBody then return nil, "Invalid port" end
+    local b = pPort.pBody
+
+    local nDeadline = nTimeoutMs and (g_fUp() + nTimeoutMs / 1000) or nil
+
+    while #b.tQueue == 0 do
+        if nDeadline and g_fUp() >= nDeadline then return nil, "timeout" end
+        if not fCanBlock(nPid) then return nil, "Would block" end
+
+        fUnsignalObject(b.tDH)
+        fAddWaiter(b.tDH, nPid, 0)
+
+        if nDeadline then
+            g_tWaitTimeouts[nPid] = { nDeadline = nDeadline, tDH = b.tDH }
+        end
+
+        g_tPT[nPid]._nWaitResult = nil
+        g_tPT[nPid].status = "sleeping"
+        g_tPT[nPid].wait_reason = "iocp"
+        g_fYield()
+
+        g_tWaitTimeouts[nPid] = nil
+        if g_tPT[nPid]._nWaitResult == oIpc.STATUS_TIMEOUT then
+            g_tPT[nPid]._nWaitResult = nil
+            return nil, "timeout"
+        end
+        g_tPT[nPid]._nWaitResult = nil
+    end
+
+    local tResult = table.remove(b.tQueue, 1)
+    if #b.tQueue == 0 then fUnsignalObject(b.tDH) end
+    return tResult.nKey, tResult.nBytes, tResult.nStatus, tResult.vData
+end
+
+-- Get the dispatch header for WaitForMultipleObjects
+function oIpc.KeGetCompletionPortWaitable(nPid, sPortHandle)
+    local pPort = g_oOb.ObReferenceObjectByHandle(
+        nPid, sPortHandle, 0, g_tPT[nPid] and g_tPT[nPid].synapseToken or "")
+    if not pPort or not pPort.pBody then return nil end
+    return pPort.pBody.tDH
+end
+
 return oIpc
