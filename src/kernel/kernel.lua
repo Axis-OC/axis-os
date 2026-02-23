@@ -3410,6 +3410,42 @@ kernel.tSyscallTable["ke_ipc_stats"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+-- ==========================================
+-- I/O COMPLETION PORT SYSCALLS
+-- ==========================================
+
+kernel.tSyscallTable["ke_create_iocp"] = {
+    func = function(nPid, nMaxConc)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeCreateIoCompletionPort(nPid, nMaxConc)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["ke_associate_iocp"] = {
+    func = function(nPid, sPort, sFile, nKey)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeAssociateCompletion(nPid, sPort, sFile, nKey)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["ke_post_completion"] = {
+    func = function(nPid, sPort, nKey, nBytes, nStatus, vData)
+        if not g_oIpc then return nil end
+        return g_oIpc.KePostCompletion(nPid, sPort, nKey, nBytes, nStatus, vData)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["ke_get_completion"] = {
+    func = function(nPid, sPort, nTimeout)
+        if not g_oIpc then return nil end
+        return g_oIpc.KeGetCompletion(nPid, sPort, nTimeout)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
 kernel.tSyscallTable["disk_list_drives"] = {
     func = function(nPid)
         local tResult = {}
