@@ -6,7 +6,7 @@ local tStatus = require("errcheck")
 local oKMD = require("kmd_api")
 local tDKStructs = require("shared_structs")
 
-g_tDriverInfo = { sDriverName = "AxisKeyboardStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 200 }
+g_tDriverInfo = { sDriverName = "AxisKeyboardStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 200, bAsyncIoSupported = true, }
 
 function DriverEntry(pDriverObject)
   oKMD.DkPrint("Keyboard Stub Driver loaded. TTY is still doing all the work.")

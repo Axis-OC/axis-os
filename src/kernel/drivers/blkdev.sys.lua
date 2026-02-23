@@ -12,6 +12,7 @@ g_tDriverInfo = {
   nLoadPriority = 300,
   sVersion = "1.0.0",
   sSupportedComponent = "drive",
+  bAsyncIoSupported = true,
 }
 
 local g_pDev = nil

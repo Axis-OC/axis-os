@@ -21,7 +21,7 @@ local g_bArmed             = false
 local g_fPanic             = nil
 local g_fLog               = nil
 local g_fUptime            = nil
-local g_bVerbose           = false  -- log every check cycle detail
+local g_bVerbose           = true  -- log every check cycle detail
 local g_nLastCheckMs       = 0
 local g_fFlush = nil
 
@@ -91,8 +91,12 @@ local g_fHex               = nil   -- binary → hex string
 local g_fReadFile          = nil   -- read file from disk
 
 -- Counters
-local g_nTickCounter       = 0
-local g_nCheckInterval     = 50
+-- local g_nTickCounter       = 0
+-- local g_nCheckInterval     = 50
+
+local g_nNextCheckTime     = 0     -- uptime() when next check fires
+local g_nMinCheckSec       = 1.5   -- minimum seconds between checks
+local g_nMaxCheckSec       = 5.0   -- maximum seconds between checks
 local g_nChecksPerformed   = 0
 local g_nTier2Counter      = 0
 local g_nTier3Counter      = 0
@@ -143,7 +147,9 @@ local function hex(s)
 end
 
 local function randomize()
-    g_nCheckInterval = 30 + math.random(0, 70)
+    -- g_nCheckInterval = 30 + math.random(0, 70)\
+    g_nNextCheckTime = g_fUptime() + g_nMinCheckSec +
+        math.random() * (g_nMaxCheckSec - g_nMinCheckSec)
 end
 
 local function safeDump(f)
@@ -347,7 +353,7 @@ local function snapshotCriticalFiles()
 end
 
 local g_nSuperCursor = 1  -- which supercritical file to check THIS cycle
-local g_nCritCursor  = 1  -- Добавляем курсор для обычных критичных файлов
+local g_nCritCursor  = 1
 
 local function fCheckOneFile(sPath, bSupercritical)
     if not g_fReadFile or not g_fSha256 then return {} end
@@ -544,7 +550,6 @@ local function checkTier1()
             nFuncOk = nFuncOk + 1
         end
     end
-    -- ONE line, AFTER the loop
     if g_bVerbose then
         g_fLog(string.format("[PG]   1a func_identity: %d/%d OK",
             nFuncOk, nFuncTotal))
@@ -1296,9 +1301,11 @@ end
 function PG.Tick()
     if not g_bArmed then return true end
 
-    g_nTickCounter = g_nTickCounter + 1
-    if g_nTickCounter < g_nCheckInterval then return true end
-    g_nTickCounter = 0
+    -- g_nTickCounter = g_nTickCounter + 1
+    -- if g_nTickCounter < g_nCheckInterval then return true end
+    -- g_nTickCounter = 0
+    if g_fUptime() < g_nNextCheckTime then return true end
+
     randomize()
     g_nChecksPerformed = g_nChecksPerformed + 1
 
@@ -1349,14 +1356,16 @@ function PG.GetStats()
         bArmed             = g_bArmed,
         nChecksPerformed   = g_nChecksPerformed,
         nViolations        = g_nViolations,
-        nCheckInterval     = g_nCheckInterval,
+        -- nCheckInterval     = g_nCheckInterval,
+        nMinCheckSec       = g_nMinCheckSec,
+        nMaxCheckSec       = g_nMaxCheckSec,
         bSecureBootActive  = g_bSecureBootExpected,
         bEepromMonitored   = g_sEepromCodeHash ~= nil,
-        nCriticalFiles       = #CRITICAL_FILES,
-        nFileChecksTotal     = g_nTotalFileChecks,
-        nFilePassTotal       = g_nTotalFilePasses,
-        nFileFailTotal       = g_nTotalFileFails,
-        nFileCheckCursor     = g_nSuperCursor,
+        nCriticalFiles     = #CRITICAL_FILES,
+        nFileChecksTotal   = g_nTotalFileChecks,
+        nFilePassTotal     = g_nTotalFilePasses,
+        nFileFailTotal     = g_nTotalFileFails,
+        nFileCheckCursor   = g_nSuperCursor,
 
         nCriticalFilesHashed = (function()
         local n = 0

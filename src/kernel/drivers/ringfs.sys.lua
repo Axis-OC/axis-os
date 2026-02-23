@@ -13,6 +13,7 @@ g_tDriverInfo = {
   sDriverType = tDKStructs.DRIVER_TYPE_KMD, -- it's a generic utility driver
   nLoadPriority = 400,
   sVersion = "1.0.0",
+  bAsyncIoSupported = true,
 }
 
 local g_pDeviceObject = nil

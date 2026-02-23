@@ -244,7 +244,6 @@ function oSec.fValidateDriverSignature(sDriverCode)
     return tStatus.STATUS_SUCCESS
 end
 
--- Unchanged from original
 function oSec.fValidateDriverInfo(tDriverInfo)
     if type(tDriverInfo) ~= "table" then
         return tStatus.STATUS_INVALID_DRIVER_INFO, "g_tDriverInfo is not a table"
@@ -255,13 +254,24 @@ function oSec.fValidateDriverInfo(tDriverInfo)
     if type(tDriverInfo.sDriverType) ~= "string" then
         return tStatus.STATUS_INVALID_DRIVER_INFO, "Missing sDriverType"
     end
-    if tDriverInfo.sDriverType ~= tDKStructs.DRIVER_TYPE_KMD and 
+    if tDriverInfo.sDriverType ~= tDKStructs.DRIVER_TYPE_KMD and
        tDriverInfo.sDriverType ~= tDKStructs.DRIVER_TYPE_UMD and
        tDriverInfo.sDriverType ~= tDKStructs.DRIVER_TYPE_CMD then
         return tStatus.STATUS_INVALID_DRIVER_TYPE, "Unknown sDriverType"
     end
     if type(tDriverInfo.nLoadPriority) ~= "number" then
         return tStatus.STATUS_INVALID_DRIVER_INFO, "Missing nLoadPriority"
+    end
+    -- ═══════════════════════════════════════════
+    -- MANDATORY ASYNC I/O (WaitForMultipleObjects)
+    -- All drivers must complete IRPs asynchronously
+    -- via DkCompleteRequest → signal → IOCP post.
+    -- This enables callers to use ke_wait_multiple()
+    -- across multiple pending driver operations.
+    -- ═══════════════════════════════════════════
+    if tDriverInfo.bAsyncIoSupported ~= true then
+        return tStatus.STATUS_DRIVER_VALIDATION_FAILED,
+            "Async I/O required: set bAsyncIoSupported=true in g_tDriverInfo"
     end
     return tStatus.STATUS_SUCCESS
 end

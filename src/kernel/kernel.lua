@@ -45,6 +45,7 @@ local g_oGpu = nil
 local g_nWidth, g_nHeight = 80, 25
 local g_nCurrentLine = 0
 local tBootArgs = boot_args or {}
+local g_tDKStructsFastPath = nil
 
 local g_bAxfsRoot = false
 local g_oAxfsVol = nil
@@ -54,6 +55,8 @@ local g_oIpc = nil -- Kernel IPC subsystem
 
 local g_oPatchGuard = nil   -- Kernel integrity monitor
 local g_oHypervisor = nil   -- Metatable protection primitives
+local g_tKernelDeviceTree = nil     -- ref to DKMS's g_tDeviceTree
+local g_tKernelSymlinks   = nil     -- ref to DKMS's g_tSymbolicLinks
 
 local g_tSchedStats = {
     nTotalResumes = 0,
@@ -1371,6 +1374,14 @@ local function __load_patchguard()
     return nil
 end
 
+pcall(function()
+    local sCode = primitive_load("/system/lib/dk/shared_structs.lua")
+    if sCode then
+        local f = load(sCode, "@shared_structs", "t", {string=string, math=math, table=table})
+        if f then g_tDKStructsFastPath = f() end
+    end
+end)
+
 -------------------------------------------------
 -- PROCESS & MODULE MANAGEMENT
 -------------------------------------------------
@@ -2146,6 +2157,69 @@ function kernel.syscall_dispatch(sName, ...)
             end
         end
     end
+
+    -- ======================================================
+    -- FAST-PATH: Direct device I/O dispatch (Feature 4)
+    -- If we have a kernel-level device tree and the syscall
+    -- is a VFS op on a device handle, dispatch the IRP
+    -- directly to the driver without going through PM/DKMS.
+    -- ======================================================
+    if g_tKernelDeviceTree and g_oObManager then
+        local bFastPath = false
+        if sName == "vfs_write" or sName == "vfs_read" then
+            local vHandle = select(1, ...)
+            -- Resolve handle to see if it's a device
+            local tProc = kernel.tProcessTable[nPid]
+            if tProc then
+                local sSyn = tProc.synapseToken or ""
+                local pObj = g_oObManager.ObReferenceObjectByHandle(nPid, vHandle, 0, sSyn)
+                if pObj and pObj.pBody and pObj.pBody.sCategory == "device" then
+                    local sDevName = pObj.pBody.sDeviceName
+                    local pDev = g_tKernelDeviceTree[sDevName]
+                    if not pDev and g_tKernelSymlinks then
+                        local sResolved = g_tKernelSymlinks[sDevName]
+                        if sResolved then pDev = g_tKernelDeviceTree[sResolved] end
+                    end
+                    if pDev and pDev.pDriverObject then
+                        local tDKStructs = g_tDKStructsFastPath
+                        if not tDKStructs then goto skip_fast_path end
+                        local nMaj = (sName == "vfs_write") and tDKStructs.IRP_MJ_WRITE
+                                                              or tDKStructs.IRP_MJ_READ
+                        local fHandler = pDev.pDriverObject.tDispatch[nMaj]
+                        if fHandler then
+                            -- TTY fast-path: fire-and-forget writes
+                            if sName == "vfs_write" and sDevName == "\\Device\\TTY0" then
+                                local pIrp = tDKStructs.fNewIrp(nMaj)
+                                pIrp.sDeviceName = sDevName
+                                pIrp.nSenderPid = nPid
+                                pIrp.tParameters.sData = select(2, ...)
+                                pIrp.nFlags = tDKStructs.IRP_FLAG_NO_REPLY
+                                kernel.syscalls.signal_send(0,
+                                    pDev.pDriverObject.nDriverPid,
+                                    "irp_dispatch", pIrp, fHandler)
+                                return true, #(select(2, ...) or "")
+                            end
+
+                            -- Normal device I/O: send IRP, sleep for reply
+                            local pIrp = tDKStructs.fNewIrp(nMaj)
+                            pIrp.sDeviceName = sDevName
+                            pIrp.nSenderPid = nPid
+                            if sName == "vfs_write" then
+                                pIrp.tParameters.sData = select(2, ...)
+                            end
+                            tProc.status = "sleeping"
+                            tProc.wait_reason = "syscall"
+                            kernel.syscalls.signal_send(0,
+                                pDev.pDriverObject.nDriverPid,
+                                "irp_dispatch", pIrp, fHandler)
+                            return coroutine.yield()
+                        end
+                    end
+                end
+            end
+        end
+    end
+    ::skip_fast_path::
 
     -- Check for ring 1 overrides
     local nOverridePid = kernel.tSyscallOverrides[sName]
@@ -2924,6 +2998,22 @@ kernel.tSyscallTable["reg_alloc_device_id"] = {
     allowed_rings = {0, 1, 2}
 }
 
+kernel.tSyscallTable["reg_flush"] = {
+    func = function(nPid)
+        if not g_oRegistry then return 0 end
+        return g_oRegistry.FlushAll()
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
+kernel.tSyscallTable["reg_flush_hive"] = {
+    func = function(nPid, sHive)
+        if not g_oRegistry then return false end
+        return g_oRegistry.FlushHive(sHive)
+    end,
+    allowed_rings = {0, 1, 2}
+}
+
 -- ==========================================
 -- sMLTR SYSCALLS
 -- ==========================================
@@ -3446,6 +3536,18 @@ kernel.tSyscallTable["ke_get_completion"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["kernel_register_device_tree"] = {
+    func = function(nPid, tDevTree, tSymlinks)
+        g_tKernelDeviceTree = tDevTree
+        g_tKernelSymlinks   = tSymlinks
+        kprint("ok", "Kernel device tree registered (" ..
+            (function() local n=0; for _ in pairs(tDevTree) do n=n+1 end; return n end)() ..
+            " devices)")
+        return true
+    end,
+    allowed_rings = {1}
+}
+
 kernel.tSyscallTable["disk_list_drives"] = {
     func = function(nPid)
         local tResult = {}
@@ -3724,7 +3826,7 @@ kernel.syscalls.signal_send = function(nPid, nTargetPid, ...)
         return nil, "Invalid PID"
     end
 
-    local nSenderRing = kernel.tRings[nPid] or 3
+    local nSenderRing = kernel.tRings[nPid] or (nPid == 0 and 0 or 3)
     local nTargetRing = kernel.tRings[nTargetPid] or 3
 
     -- ONLY sanitize Ring 3+ user code sending to lower rings.
@@ -3854,6 +3956,7 @@ kernel.tSyscallTable["computer_shutdown"] = {
         if g_oAxfsVol then
             g_oAxfsVol:flush()
         end
+        if g_oRegistry then g_oRegistry.FlushAll() end
         raw_computer.shutdown()
     end,
     allowed_rings = {0, 1, 2, 2.5}
@@ -3863,6 +3966,7 @@ kernel.tSyscallTable["computer_reboot"] = {
         if g_oAxfsVol then
             g_oAxfsVol:flush()
         end
+        if g_oRegistry then g_oRegistry.FlushAll() end
         raw_computer.shutdown(true)
     end,
     allowed_rings = {0, 1, 2, 2.5}
@@ -3965,7 +4069,7 @@ kprint("ok", "sMLTR (Synapse Message Layer Token Randomisation) active.")
 -- Load Virtual Registry
 g_oRegistry = __load_registry()
 if g_oRegistry then
-    g_oRegistry.InitSystem()
+    g_oRegistry.InitSystem(g_oPrimitiveFs)
     kprint("ok", "Virtual Registry (@VT) initialised.")
 else
     kprint("warn", "Virtual Registry not available.")

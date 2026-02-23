@@ -182,6 +182,37 @@ function tSyscallHandlers.dkms_get_next_index(nCallerPid, sDeviceType)
     return nIndex, tStatus.STATUS_SUCCESS
 end
 
+function tSyscallHandlers.dkms_attach_device(nCallerPid, sFilterName, sTargetName)
+    local pFilter = g_tDeviceTree[sFilterName]
+    local pTarget = g_tDeviceTree[sTargetName]
+    if not pFilter then return tStatus.STATUS_NO_SUCH_DEVICE, nil end
+    if not pTarget then return tStatus.STATUS_NO_SUCH_DEVICE, nil end
+
+    -- Walk to current top of target stack
+    local tDKStructs = require("shared_structs")
+    local pTop = tDKStructs.fGetTopOfStack(pTarget)
+
+    -- Attach filter on top
+    pTop.pAttachedDevice = pFilter
+    pFilter.pLowerDevice = pTop
+
+    syscall("kernel_log", "[DKMS] Device stack: " ..
+        sFilterName .. " attached above " .. pTop.sDeviceName)
+    return tStatus.STATUS_SUCCESS, pTop
+end
+
+function tSyscallHandlers.dkms_detach_device(nCallerPid, sFilterName)
+    local pFilter = g_tDeviceTree[sFilterName]
+    if not pFilter or not pFilter.pLowerDevice then
+        return tStatus.STATUS_NO_SUCH_DEVICE
+    end
+    local pLower = pFilter.pLowerDevice
+    pLower.pAttachedDevice = nil
+    pFilter.pLowerDevice = nil
+    syscall("kernel_log", "[DKMS] Device stack: " .. sFilterName .. " detached")
+    return tStatus.STATUS_SUCCESS
+end
+
 local function inspect_driver(sDriverPath)
     local sCode, sErr = syscall("vfs_read_file", sDriverPath)
     if not sCode then
@@ -308,6 +339,8 @@ function load_driver(sDriverPath, tDriverEnv)
         end
     end
 end
+
+syscall("kernel_register_device_tree", g_tDeviceTree, g_tSymbolicLinks)
 
 -- Main Loop
 while true do

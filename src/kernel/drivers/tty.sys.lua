@@ -11,7 +11,8 @@ g_tDriverInfo = {
     sDriverName = "AxisTTY",
     sDriverType = tDKStructs.DRIVER_TYPE_KMD,
     nLoadPriority = 100,
-    sVersion = "5.1.0"
+    sVersion = "5.1.0",
+    bAsyncIoSupported = true,
 }
 
 local g_pDeviceObject = nil
@@ -685,6 +686,8 @@ end
 -- =============================================
 
 local function processKeyCooked(ext, ch, code)
+    ch = ch or 0
+    code = code or 0
     if code == 201 then
         fScrollUp(ext, math.max(1, math.floor(ext.nHeight / 2)));
         return true
@@ -997,7 +1000,10 @@ local function processKeyRaw(ext, ch, code)
     if not ext.pPendingReadIrp then
         return false
     end
+    ch = ch or 0
+    code = code or 0
     local sResult = nil
+
 
     if code == 28 then
         sResult = "\n" -- Enter

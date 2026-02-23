@@ -101,4 +101,35 @@ function oKMD.DkCreateComponentDevice(pDriverObject, sDeviceTypeName, sAddress)
   return tStatus.STATUS_SUCCESS, pDeviceObject
 end
 
+-- NEW: Attach a filter device on top of a target device
+function oKMD.DkAttachDevice(pFilterDevice, sTargetDeviceName)
+    oKMD.DkPrint("AttachDevice: " .. (pFilterDevice.sDeviceName or "?") ..
+                 " → " .. sTargetDeviceName)
+    local nSt, pLower = CallDkms("dkms_attach_device",
+        pFilterDevice.sDeviceName, sTargetDeviceName)
+    if nSt == tStatus.STATUS_SUCCESS then
+        pFilterDevice.pLowerDevice = pLower
+    end
+    return nSt, pLower
+end
+
+-- NEW: Detach from device stack
+function oKMD.DkDetachDevice(pFilterDevice)
+    if not pFilterDevice.pLowerDevice then return tStatus.STATUS_SUCCESS end
+    return CallDkms("dkms_detach_device", pFilterDevice.sDeviceName)
+end
+
+-- NEW: Pass IRP to lower device in stack
+function oKMD.DkCallDriver(pLowerDevice, pIrp)
+    if not pLowerDevice or not pLowerDevice.pDriverObject then
+        return tStatus.STATUS_NO_SUCH_DEVICE
+    end
+    local fHandler = pLowerDevice.pDriverObject.tDispatch[pIrp.nMajorFunction]
+    if not fHandler then return tStatus.STATUS_NOT_IMPLEMENTED end
+    pIrp.pCurrentDevice = pLowerDevice
+    syscall("signal_send", pLowerDevice.pDriverObject.nDriverPid,
+        "irp_dispatch", pIrp, fHandler)
+    return tStatus.STATUS_PENDING
+end
+
 return oKMD

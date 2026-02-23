@@ -3,7 +3,7 @@ local tStatus = require("errcheck")
 local oKMD = require("kmd_api")
 local tDKStructs = require("shared_structs")
 
-g_tDriverInfo = { sDriverName = "AxisEEPROMStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 500 }
+g_tDriverInfo = { sDriverName = "AxisEEPROMStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 500, bAsyncIoSupported = true, }
 
 function DriverEntry(pDriverObject)
   oKMD.DkPrint("EEPROM Stub Driver loaded. Doing nothing.")

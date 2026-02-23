@@ -592,7 +592,7 @@ local function cmdSync()
   if type(tTest) ~= "table" then
     fail("Package index returned " .. type(tTest) .. " (expected table)")
     warn("First 80 chars: " .. sBody:sub(1, 80))    -- was dim(), now visible
-    warn("Body length: " .. #sBody .. " bytes")       -- ADD this line
+    warn("Body length: " .. #sBody .. " bytes")
     return false
   end
 

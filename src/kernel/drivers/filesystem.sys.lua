@@ -5,7 +5,7 @@ local tStatus = require("errcheck")
 local oKMD = require("kmd_api")
 local tDKStructs = require("shared_structs")
 
-g_tDriverInfo = { sDriverName = "AxisFSStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 500 }
+g_tDriverInfo = { sDriverName = "AxisFSStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 500, bAsyncIoSupported = true, }
 
 function DriverEntry(pDriverObject)
   oKMD.DkPrint("Filesystem Stub Driver loaded. Ready to mount future devices.")

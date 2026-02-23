@@ -11,6 +11,82 @@ local hStdin = oFs.open("/dev/tty", "r")
 local hStdout = oFs.open("/dev/tty", "w")
 local hStderr = hStdout
 
+-- =============================================
+-- GDI ACCELERATION (only when compositing 2+ surfaces)
+-- =============================================
+
+local bUseGdi = false
+local hGdiSurface = nil
+
+local function fDetectGdiAdvantage()
+    -- Check if GDI compositor is running and has multiple surfaces
+    local bOk, nCount = pcall(syscall, "gdi_get_gpu_count")
+    if not bOk or not nCount or nCount == 0 then return false end
+
+    local bOk2, tSurfaces = pcall(syscall, "gdi_get_surface_list")
+    if not bOk2 or not tSurfaces then return false end
+
+    -- GDI only helps when there are 2+ visible surfaces
+    -- (compositing overhead > benefit for single surface)
+    local nVisible = 0
+    if type(tSurfaces) == "table" then
+        for _, s in ipairs(tSurfaces) do
+            if s.bVisible then nVisible = nVisible + 1 end
+        end
+    end
+
+    return nVisible >= 2
+end
+
+-- Check once at shell startup; recheck on SIGWINCH if needed
+bUseGdi = fDetectGdiAdvantage()
+
+if bUseGdi then
+    -- Create a GDI surface for shell output
+    local bSz, tSz = oFs.deviceControl(hStdin, "get_size", {})
+    local nW = (bSz and tSz and tSz.w) or 80
+    local nH = (bSz and tSz and tSz.h) or 25
+    local bOk, hSurf = pcall(syscall, "gdi_create_surface", nW, nH, {bVisible = true})
+    if bOk and hSurf then
+        hGdiSurface = hSurf
+    else
+        bUseGdi = false
+    end
+end
+
+-- Override write function to route through GDI when active
+local fOrigWrite = oFs.write
+if bUseGdi and hGdiSurface then
+    -- GDI write: send text to surface instead of TTY
+    -- This avoids TTY's ANSI parsing overhead when compositing
+    local nGdiCurX, nGdiCurY = 1, 1
+    oFs.write = function(handle, sData)
+        if handle == hStdout or handle == hStderr then
+            -- For simple text output, GDI surface.set is faster
+            -- than TTY's full ANSI state machine
+            pcall(syscall, "gdi_surface_set", hGdiSurface,
+                nGdiCurX, nGdiCurY, sData, 0xFFFFFF, 0x000000)
+            nGdiCurX = nGdiCurX + #sData
+            -- Line wrap
+            local bSz2, tSz2 = pcall(syscall, "gdi_surface_get_size", hGdiSurface)
+            if bSz2 and tSz2 then
+                local nSW = tSz2[1] or 80
+                while nGdiCurX > nSW do
+                    nGdiCurX = nGdiCurX - nSW
+                    nGdiCurY = nGdiCurY + 1
+                end
+            end
+            pcall(syscall, "gdi_composite")
+            return true
+        end
+        return fOrigWrite(handle, sData)
+    end
+end
+
+-- =============================================
+-- END GDI BLOCK
+-- =============================================
+
 if not hStdin then syscall("kernel_panic", "SH: No TTY") end
 
 local ENV = env or {}
@@ -55,10 +131,6 @@ local function getPromptString()
   end
   return string.format("\27[32m%s@%s\27[37m:\27[34m%s\27[37m%s ", ENV.USER, ENV.HOSTNAME, path, char)
 end
-
--- local function getPrompt()
---  return "\n" .. getPromptString()
--- end
 
 -- =============================================
 -- COMMAND RESOLUTION
@@ -676,6 +748,14 @@ while true do
   end
 
   ::main_continue::
+end
+
+-- =============================================
+-- CLEANUP
+-- =============================================
+
+if hGdiSurface then
+    pcall(syscall, "gdi_destroy_surface", hGdiSurface)
 end
 
 oFs.close(hStdin)

@@ -3,7 +3,7 @@ local tStatus = require("errcheck")
 local oKMD = require("kmd_api")
 local tDKStructs = require("shared_structs")
 
-g_tDriverInfo = { sDriverName = "AxisComputerStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 500 }
+g_tDriverInfo = { sDriverName = "AxisComputerStub", sDriverType = tDKStructs.DRIVER_TYPE_KMD, nLoadPriority = 500, bAsyncIoSupported = true, }
 
 function DriverEntry(pDriverObject)
   oKMD.DkPrint("Computer Stub Driver loaded. Exposes... the computer? Sure.")
