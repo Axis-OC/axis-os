@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.8-GDI-HV-beta
+-- AxisOS Xen XKA v0.81-EX-beta
 --
 local kernel = {
     tProcessTable = {},
@@ -973,7 +973,7 @@ do
     g_tFrozenOs = freeze_table(tUnfrozenOs)
 end
 
-kprint("info", "AxisOS Xen XKA v0.8-GDI-HV starting...")
+kprint("info", "AxisOS Xen XKA v0.81-EX starting...")
 kprint("info", "Copyright (C) 2026 AxisOS")
 kprint("none", "")
 

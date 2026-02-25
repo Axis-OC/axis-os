@@ -132,7 +132,7 @@ local function renderLoginScreen(sUsername, sPassword, nFocusField, sMessage, nM
     end
 
     -- Version
-    dmText(nLogoX, nLogoY + #tLogo + 1, "AxisOS v0.8-GDI-HV-beta", C_DIM)
+    dmText(nLogoX, nLogoY + #tLogo + 1, "AxisOS v0.81-EX-beta", C_DIM)
 
     -- Login box
     local nBoxW = 38
@@ -204,7 +204,7 @@ local function renderLoginScreen(sUsername, sPassword, nFocusField, sMessage, nM
     end
 
     -- Footer
-    dmText(2, H, "AxisOS v0.8-GDI-HV-beta on " .. sHostname, C_DIM)
+    dmText(2, H, "AxisOS v0.81-EX-beta on " .. sHostname, C_DIM)
 
     dmPresent()
 end
