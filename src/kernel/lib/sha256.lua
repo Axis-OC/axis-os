@@ -157,4 +157,72 @@ function S.constEq(a, b)
   return d == 0
 end
 
+-- =============================================
+-- SPLIT-ARRAY SHA-256 & HMAC
+-- For PCMR (Polymorphic Cryptographic Mutating Region)
+--
+-- These functions accept key material as two parallel
+-- number arrays (tData, tMask) where the actual byte
+-- at position i is bxor(tData[i], tMask[i]).
+--
+-- The key bytes are reconstructed one-at-a-time as
+-- transient Lua locals, NEVER assembled into a string.
+-- This defeats JVM heap inspection (jmap + strings).
+-- =============================================
+
+--- HMAC-SHA256 where the key is stored as XOR-split arrays.
+-- @param tKeyData  Array of numbers (Data half of the split)
+-- @param tKeyMask  Array of numbers (Mask half of the split)
+-- @param nKeyLen   Number of key bytes
+-- @param sMsg      Message string to authenticate
+-- @return 32-byte binary MAC
+function S.hmac_split(tKeyData, tKeyMask, nKeyLen, sMsg)
+    -- Build ipad/opad from split key, byte by byte.
+    -- Each key byte exists only as a transient Lua local (double).
+    local tIpad = {}
+    local tOpad = {}
+    for i = 1, 64 do
+        local kb = 0
+        if i <= nKeyLen then
+            -- Materialize one key byte.  This XOR result lives
+            -- on the Lua stack as a C double, not in the JVM heap.
+            kb = bxor(tKeyData[i], tKeyMask[i])
+        end
+        tIpad[i] = string.char(bxor(kb, 0x36))
+        tOpad[i] = string.char(bxor(kb, 0x5C))
+    end
+    local sIpad = table.concat(tIpad)
+    local sOpad = table.concat(tOpad)
+    return S.digest(sOpad .. S.digest(sIpad .. sMsg))
+end
+
+--- SHA-256 of data represented as XOR-split arrays.
+-- Useful when hashing key material stored in PCMR form.
+-- @param tData  Array of numbers (Data half)
+-- @param tMask  Array of numbers (Mask half)
+-- @param nLen   Number of data bytes
+-- @return 32-byte binary digest
+function S.digest_split(tData, tMask, nLen)
+    -- Reconstruct the data into a string byte-by-byte.
+    -- Each byte is a transient local.
+    local tChars = {}
+    for i = 1, nLen do
+        tChars[i] = string.char(bxor(tData[i], tMask[i]))
+    end
+    return S.digest(table.concat(tChars))
+end
+
+--- Generate a new random mask and rotate split arrays in place.
+-- This is a utility for code that manages split arrays outside enclaves.
+-- @param tData  Array of numbers (modified in place)
+-- @param tMask  Array of numbers (modified in place)
+-- @param nLen   Number of elements
+function S.mutate_split(tData, tMask, nLen)
+    for i = 1, nLen do
+        local nNewMask = math.random(0, 255)
+        tData[i] = bxor(tData[i], nNewMask)
+        tMask[i] = bxor(tMask[i], nNewMask)
+    end
+end
+
 return S

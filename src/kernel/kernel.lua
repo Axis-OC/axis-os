@@ -4401,6 +4401,133 @@ else
     kprint("warn", "EXSi not available — no enclave support")
 end
 
+-- =============================================
+-- EXSi HANDLE PRNG ENCLAVE
+--
+-- Creates an enclave whose closure holds the PRNG state
+-- for generating handle tokens.  The state (seed, counters)
+-- lives as upvalues — invisible to ALL code including Ring 0.
+-- Even a compromised Ring 0 process can only call the enclave
+-- to get NEW tokens; it cannot dump the internal state to
+-- predict OTHER processes' future handles.
+--
+-- The Object Manager caches batches of 64 tokens for
+-- amortized O(1) performance per handle creation.
+-- =============================================
+
+local g_nHandlePrngEnclave = nil  -- EXSi enclave handle
+
+if g_oExsi and g_oObManager then
+    kprint("info", "[EXSi] Creating handle PRNG enclave...")
+
+    local sHandlePrngSource = [==[
+local nS1 = 1
+local nS2 = 1
+local nCounter = 0
+
+local function nextU32()
+    nCounter = nCounter + 1
+    nS1 = bit32.bxor(nS1, bit32.lshift(nS1, 13))
+    nS1 = bit32.bxor(nS1, bit32.rshift(nS1, 17))
+    nS1 = bit32.bxor(nS1, bit32.lshift(nS1, 5))
+    if nS1 == 0 then nS1 = 1 end
+    nS2 = bit32.bxor(nS2, bit32.lshift(nS2, 7))
+    nS2 = bit32.bxor(nS2, bit32.rshift(nS2, 9))
+    nS2 = bit32.bxor(nS2, bit32.lshift(nS2, 8))
+    if nS2 == 0 then nS2 = 1 end
+    return bit32.bxor(nS1, bit32.bxor(nS2, nCounter))
+end
+
+return function(sMethod, ...)
+    if sMethod == "init" then
+        local sSeed = select(1, ...)
+        if type(sSeed) ~= "string" or #sSeed == 0 then
+            return nil, "seed required"
+        end
+        nS1 = 1; nS2 = 1; nCounter = 0
+        for i = 1, #sSeed do
+            nS1 = bit32.bxor(nS1, sSeed:byte(i) * ((i * 31) % 65536))
+            nextU32()
+        end
+        if nS1 == 0 then nS1 = 1 end
+        if nS2 == 0 then nS2 = 1 end
+        for _ = 1, 64 do nextU32() end
+        return true
+
+    elseif sMethod == "generate_batch" then
+        local nCount = select(1, ...)
+        if type(nCount) ~= "number" or nCount < 1 then nCount = 64 end
+        if nCount > 256 then nCount = 256 end
+        local tTokens = {}
+        for i = 1, nCount do
+            local r1 = nextU32()
+            local r2 = nextU32()
+            local r3 = nextU32()
+            local r4 = nextU32()
+            tTokens[i] = string.format("H-%06x-%06x-%04x-%04x",
+                r1 % 0x1000000, r2 % 0x1000000,
+                r3 % 0x10000, r4 % 0x10000)
+        end
+        return tTokens
+    end
+end
+    ]==]
+
+    -- Collect hardware entropy for the PRNG seed
+    local sHandlePrngSeed = ""
+    pcall(function() sHandlePrngSeed = sHandlePrngSeed .. raw_computer.address() end)
+    pcall(function() sHandlePrngSeed = sHandlePrngSeed .. tostring(raw_computer.uptime()) end)
+    pcall(function() sHandlePrngSeed = sHandlePrngSeed .. tostring(raw_computer.freeMemory()) end)
+    pcall(function()
+        for addr in raw_component.list("eeprom") do
+            sHandlePrngSeed = sHandlePrngSeed .. addr; break
+        end
+    end)
+    pcall(function()
+        for addr in raw_component.list("data") do
+            local dc = raw_component.proxy(addr)
+            if dc and dc.random then
+                sHandlePrngSeed = sHandlePrngSeed .. dc.random(32)
+            end
+            break
+        end
+    end)
+    for i = 1, 4 do
+        sHandlePrngSeed = sHandlePrngSeed .. tostring(math.random(0, 0x7FFFFFFF))
+    end
+
+    local hPrng, sPrngMr = g_oExsi.CreateEnclave(0, sHandlePrngSource)
+    if hPrng then
+        local bSeedOk = g_oExsi.CallEnclave(0, hPrng, "init", sHandlePrngSeed)
+        if bSeedOk then
+            g_nHandlePrngEnclave = hPrng
+
+            -- Wire the enclave to the Object Manager via a closure.
+            -- The closure captures hPrng and g_oExsi as upvalues.
+            -- ObManager never sees the enclave handle directly.
+            local fBatchGen = function(nCount)
+                return g_oExsi.CallEnclave(0, hPrng, "generate_batch", nCount)
+            end
+
+            local bAttachOk, sAttachErr = g_oObManager.ObAttachHandlePrng(fBatchGen)
+            if bAttachOk then
+                kprint("ok", "[EXSi] Handle PRNG enclave ACTIVE (MRENCLAVE=" ..
+                    (sPrngMr or "?"):sub(1, 16) .. "...)")
+                kprint("ok", "  PRNG state is sealed inside enclave upvalues")
+                kprint("ok", "  Batch size: 64 tokens per enclave call")
+            else
+                kprint("warn", "[EXSi] Handle PRNG enclave created but attach failed: " ..
+                    tostring(sAttachErr))
+            end
+        else
+            kprint("warn", "[EXSi] Handle PRNG enclave seed failed")
+            g_oExsi.DestroyEnclave(0, 0, hPrng)
+        end
+    else
+        kprint("warn", "[EXSi] Handle PRNG enclave creation failed: " .. tostring(sPrngMr))
+    end
+end
+
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")
 local tFstab = primitive_load_lua("/etc/fstab.lua")
@@ -5231,6 +5358,17 @@ while true do
 
     if g_oPatchGuard then
         g_oPatchGuard.Tick(nWorkDone > 0)
+        if g_oExsi then
+            local bPcmrOk, oPcmrMod = pcall(function()
+                if kernel.tLoadedModules["pcmr"] then
+                    return kernel.tLoadedModules["pcmr"]
+                end
+                return nil
+            end)
+            if bPcmrOk and oPcmrMod and oPcmrMod.mutateAll then
+                pcall(oPcmrMod.mutateAll)
+            end
+        end
     end
 
     if g_oGdi then g_oGdi.Composite() end

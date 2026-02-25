@@ -69,6 +69,26 @@ local g_nHandleEntropy  = 0
 local g_nObjectIdSeq    = 0
 
 -- =============================================
+-- EXSi HANDLE PRNG INTEGRATION
+-- (Feature: Handle Randomization via Enclave)
+--
+-- When attached, handle token generation uses a PRNG
+-- whose state lives inside an EXSi enclave closure.
+-- The state is unreachable by any process (including Ring 0)
+-- because the debug library is stripped for Ring >= 1.
+--
+-- A batch of TOKEN_BATCH_SIZE tokens is pre-generated
+-- on each enclave call.  This amortizes the pcall/table.pack
+-- overhead of cross-boundary invocation to O(1) per token.
+-- =============================================
+
+local g_fEnclaveGenerateBatch = nil   -- function(nCount) → {token, ...}
+local g_tTokenBatchCache      = {}    -- pre-generated tokens
+local g_nTokenCacheIdx        = 0     -- next index to consume
+local TOKEN_BATCH_SIZE        = 64    -- tokens per enclave call
+local TOKEN_REFILL_THRESHOLD  = 8     -- refill when ≤ this many remain
+
+-- =============================================
 -- BIT HELPERS (Lua 5.2 safe)
 -- =============================================
 
@@ -103,6 +123,27 @@ local function fUptime()
 end
 
 local function fGenerateToken(sPrefix)
+    -- ---- EXSi ENCLAVE PATH (preferred) ----
+    -- Pull from the pre-generated batch cache.
+    -- Refill the cache from the enclave when running low.
+    if g_fEnclaveGenerateBatch then
+        local nRemaining = #g_tTokenBatchCache - g_nTokenCacheIdx
+        if nRemaining <= TOKEN_REFILL_THRESHOLD then
+            local tBatch = g_fEnclaveGenerateBatch(TOKEN_BATCH_SIZE)
+            if tBatch and type(tBatch) == "table" and #tBatch > 0 then
+                g_tTokenBatchCache = tBatch
+                g_nTokenCacheIdx   = 0
+            end
+        end
+
+        if g_nTokenCacheIdx < #g_tTokenBatchCache then
+            g_nTokenCacheIdx = g_nTokenCacheIdx + 1
+            return g_tTokenBatchCache[g_nTokenCacheIdx]
+        end
+        -- Fall through to legacy if enclave returned nothing
+    end
+
+    -- ---- LEGACY PATH (used before EXSi init or as fallback) ----
     g_nHandleEntropy = g_nHandleEntropy + 1
     local t = fUptime()
     return string.format("%s%06x-%05x-%04x-%04x",
@@ -306,10 +347,10 @@ end
 -- HANDLE OPERATIONS
 -- =============================================
 
--- ObCreateHandle(nPid, pObjectHeader, nDesiredAccess, sSynapseToken [, bInheritable])
--- → sHandleToken, nStatus
+--  ObCreateHandle(nPid, pObjectHeader, nDesiredAccess, sSynapseToken [, bInheritable])
+--  → sHandleToken, nStatus
 --
--- Access is checked HERE. Every subsequent use only validates token + sMLTR.
+--  Access is checked HERE. Every subsequent use only validates token + sMLTR.
 function oOb.ObCreateHandle(nPid, pH, nDesiredAccess, sSynapseToken, bInheritable)
     if not pH then return nil, oOb.STATUS_INVALID_HANDLE end
     oOb.ObInitializeProcess(nPid)
@@ -337,7 +378,7 @@ function oOb.ObCreateHandle(nPid, pH, nDesiredAccess, sSynapseToken, bInheritabl
     return sToken, oOb.STATUS_SUCCESS
 end
 
--- ObOpenObjectByName — lookup + ref + create handle
+--  ObOpenObjectByName — lookup + ref + create handle
 function oOb.ObOpenObjectByName(nPid, sPath, nDesiredAccess, sSynapseToken)
     local pH, nSt = oOb.ObLookupObject(sPath)
     if not pH then return nil, nSt end
@@ -352,13 +393,13 @@ function oOb.ObOpenObjectByName(nPid, sPath, nDesiredAccess, sSynapseToken)
     return sToken, oOb.STATUS_SUCCESS
 end
 
--- ObReferenceObjectByHandle — validate token, sMLTR, access → OBJECT_HEADER
+--  ObReferenceObjectByHandle — validate token, sMLTR, access → OBJECT_HEADER
 --
--- vHandle may be:
---     string  → direct token lookup
---     number < 0  → standard-handle constant (STD_INPUT_HANDLE etc.)
+--  vHandle may be:
+--      string  → direct token lookup
+--      number < 0  → standard-handle constant (STD_INPUT_HANDLE etc.)
 --
--- Returns: pObjectHeader, nStatus, tHandleEntry
+--  Returns: pObjectHeader, nStatus, tHandleEntry
 function oOb.ObReferenceObjectByHandle(nPid, vHandle, nDesiredAccess, sSynapseToken)
     local tHT = g_tProcessHandleTables[nPid]
     if not tHT then return nil, oOb.STATUS_INVALID_HANDLE end
@@ -390,7 +431,7 @@ function oOb.ObReferenceObjectByHandle(nPid, vHandle, nDesiredAccess, sSynapseTo
     return tEntry.pObjectHeader, oOb.STATUS_SUCCESS, tEntry
 end
 
--- ObCloseHandle — remove entry, dereference object
+--  ObCloseHandle — remove entry, dereference object
 function oOb.ObCloseHandle(nPid, vHandle)
     local tHT = g_tProcessHandleTables[nPid]
     if not tHT then return false, oOb.STATUS_INVALID_HANDLE end
@@ -587,6 +628,33 @@ function oOb.ObInitSystem()
     mkDir("\\Device")
     mkDir("\\DosDevices")
     mkDir("\\ObjectTypes")
+end
+
+-- =============================================
+-- ATTACH EXSi HANDLE PRNG
+--
+-- Called by the kernel after EXSi is initialized.
+-- fBatchGenerator(nCount) must return a table of nCount
+-- handle token strings.  The kernel provides a closure
+-- that calls the enclave via g_oExsi.CallEnclave().
+-- =============================================
+
+function oOb.ObAttachHandlePrng(fBatchGenerator)
+    if type(fBatchGenerator) ~= "function" then
+        return false, "fBatchGenerator must be a function"
+    end
+    g_fEnclaveGenerateBatch = fBatchGenerator
+
+    -- Pre-fill the cache immediately so the very next
+    -- handle creation uses enclave-generated tokens.
+    local tBatch = fBatchGenerator(TOKEN_BATCH_SIZE)
+    if tBatch and type(tBatch) == "table" and #tBatch > 0 then
+        g_tTokenBatchCache = tBatch
+        g_nTokenCacheIdx   = 0
+        return true
+    end
+    -- If the initial batch failed, legacy path remains active
+    return false, "Initial batch generation failed"
 end
 
 return oOb
