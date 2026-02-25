@@ -69,7 +69,7 @@ function DriverEntry(pDO)
   pDO.tDispatch[tDKStructs.IRP_MJ_CLOSE] = fClose
   pDO.tDispatch[tDKStructs.IRP_MJ_DEVICE_CONTROL] = fCtl
 
-  -- FIX: kmd_api is cached from the first process that loaded it (e.g. TTY).
+  -- kmd_api is cached from the first process that loaded it (e.g. TTY).
   -- Its internal env reference is bound to that process's sandbox, not ours.
   -- Capture env.address HERE (in our own sandbox) and pass it explicitly,
   -- otherwise DkCreateComponentDevice reads the wrong process's address.

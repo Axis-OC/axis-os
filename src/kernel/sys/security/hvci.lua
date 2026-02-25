@@ -3,13 +3,13 @@
 -- AxisOS HVCI v2 — Hypervisor-Enforced Code Integrity
 --
 -- v2 additions:
---  • Capability-based access control (sandbox generation)
---  • Driver load audit trail with timestamps
---  • Runtime periodic integrity rechecks
---  • Memory region protection simulation
---  • Code signing policy tiers (audit/warn/enforce)
---  • Per-driver integrity event counters
---  • Quarantine integration hooks
+--   • Capability-based access control (sandbox generation)
+--   • Driver load audit trail with timestamps
+--   • Runtime periodic integrity rechecks
+--   • Memory region protection simulation
+--   • Code signing policy tiers (audit/warn/enforce)
+--   • Per-driver integrity event counters
+--   • Quarantine integration hooks
 --
 
 local oHvci = {}
@@ -406,7 +406,7 @@ function oHvci.QuarantineDriver(sDriverName)
             "3 faults within 60 seconds", "STR")
     end)
 
-    -- FIX: Flush DRV hive immediately so quarantine survives reboot.
+    -- Flush DRV hive immediately so quarantine survives reboot.
     -- Without this, the registry value only lives in RAM and is lost
     -- on power cycle / hard reset.
     pcall(function()
@@ -451,7 +451,7 @@ function oHvci.ClearQuarantine(sDriverName)
         tState.faultWindow = {}
         tState.faultCount = 0
     end
-    -- FIX: Flush DRV hive so the clear persists across reboots
+    -- Flush DRV hive so the clear persists across reboots
     pcall(function()
         syscall("reg_flush_hive", "DRV")
     end)

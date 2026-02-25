@@ -1,5 +1,5 @@
 -- /lib/vi/lang_lua.lua
--- Lua syntax definition for xvi
+-- Lua syntax definition for xevi — Enhanced v2
 return {
   name = "Lua",
   lineComment  = "--",
@@ -12,15 +12,21 @@ return {
     ["in"]=1, ["goto"]=1, ["and"]=1, ["or"]=1, ["not"]=1,
   },
   builtins = {
-    ["true"]=2, ["false"]=2, ["nil"]=2, ["self"]=2,
+    ["true"]=2, ["false"]=2, ["nil"]=2,
+    ["self"]=3,
     ["print"]=2, ["require"]=2, ["pcall"]=2, ["xpcall"]=2,
     ["type"]=2, ["tostring"]=2, ["tonumber"]=2, ["error"]=2,
     ["pairs"]=2, ["ipairs"]=2, ["next"]=2, ["select"]=2,
     ["assert"]=2, ["unpack"]=2, ["rawset"]=2, ["rawget"]=2,
+    ["rawequal"]=2, ["rawlen"]=2,
     ["setmetatable"]=2, ["getmetatable"]=2,
+    ["load"]=2, ["loadfile"]=2, ["dofile"]=2,
     ["table"]=2, ["string"]=2, ["math"]=2, ["io"]=2, ["os"]=2,
-    ["coroutine"]=2, ["debug"]=2, ["load"]=2, ["loadfile"]=2,
+    ["coroutine"]=2, ["debug"]=2, ["bit32"]=2, ["unicode"]=2,
     ["syscall"]=2, ["computer"]=2, ["component"]=2,
     ["env"]=2, ["raw_computer"]=2, ["raw_component"]=2,
+    ["_G"]=2, ["_ENV"]=2, ["_VERSION"]=2,
   },
+  -- doc comment prefix for tooltip scanner
+  docPrefix = "---",
 }

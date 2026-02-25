@@ -3,9 +3,9 @@
 -- AXFS v3: Performance + Integrity
 --
 -- Over v2:
---  CLOCK sector cache, inode/path/dir-hash caches, inode preload,
---  batch reads, readahead, CoW writes, per-block CRC32 checksums,
---  delayed flush, extent status tracking, health reporting
+--   CLOCK sector cache, inode/path/dir-hash caches, inode preload,
+--   batch reads, readahead, CoW writes, per-block CRC32 checksums,
+--   delayed flush, extent status tracking, health reporting
 --
 local B = require("bpack")
 local AX = {}
@@ -402,7 +402,7 @@ function AX.format(tD, sLabel, nMaxInodes, tOpts)
   tD.writeSector(riSec, B.pad(sd,ss))
   -- Root dir data
   tD.writeSector(L.dataStart, B.pad(pde(1,AX.DIR,"..")..pde(1,AX.DIR,".."),ss))
-  -- Fix: root dir entry "." should point to self
+  -- root dir entry "." should point to self
   local dd = pde(1,AX.DIR,".")..pde(1,AX.DIR,"..")
   tD.writeSector(L.dataStart, B.pad(dd,ss))
   return true
@@ -416,7 +416,7 @@ function AX.mount(tD, tMountOpts)
   tMountOpts = tMountOpts or {}
   local CACHE_MAX = tMountOpts.cacheSize or 128
 
-  -- CLOCK sector cache wrapping raw I/O 
+  --  CLOCK sector cache wrapping raw I/O 
   local cc = newClockCache(CACHE_MAX)
   local fRawRead  = tD.readSector
   local fRawWrite = tD.writeSector
@@ -457,7 +457,7 @@ function AX.mount(tD, tMountOpts)
     return tResult
   end
 
-  -- Read superblock 
+  --  Read superblock 
   local su, e = rsuper(tD.readSector(0))
   if not su then su,e = rsuper(tD.readSector(1)); if not su then return nil,e end end
   local su2 = rsuper(tD.readSector(1))
@@ -468,14 +468,14 @@ function AX.mount(tD, tMountOpts)
   L.bbmpStart=su.bbStart; L.bbmpSec=su.bbSec
   L.ckStart=su.ckStart or 0; L.ckSec=su.ckSec or 0
 
-  -- Read bitmaps 
+  --  Read bitmaps 
   local sIbmp = tD.readSector(L.ibmpSec)
   local tBbmp = {}
   for i=0,L.bbmpSec-1 do
     tBbmp[i] = tD.readSector(L.bbmpStart+i) or B.pad("",tD.sectorSize)
   end
 
-  -- Read checksum table into memory 
+  --  Read checksum table into memory 
   local tCkTable = {}  -- [blockNum] → CRC32 (number)
   local bHasChecksums = L.ckSec > 0 and
     bit32.band(su.flags or 0, AX.FEAT_CHECKSUMS) ~= 0
@@ -494,14 +494,14 @@ function AX.mount(tD, tMountOpts)
     end
   end
 
-  -- Preload inode table sectors into cache 
+  --  Preload inode table sectors into cache 
   local tITSectors = {}
   for i = 0, L.its - 1 do
     tITSectors[i + 1] = L.itableStart + i
   end
   tD.batchRead(tITSectors)
 
-  -- Build volume 
+  --  Build volume 
   local bCow = bit32.band(su.flags or 0, AX.FEAT_COW) ~= 0
   if tMountOpts.cow ~= nil then bCow = tMountOpts.cow end
 
@@ -1194,7 +1194,7 @@ function AX._V:mkdir(p)
   self:wi(ino,t)
   self:wb(bn, B.pad(pde(ino,AX.DIR,".")..pde(di,AX.DIR,".."),self.d.sectorSize))
   self:dadd(di, ino, AX.DIR, base)
-  -- FIX: Re-read parent inode AFTER dadd (dadd already wrote correct
+  -- Re-read parent inode AFTER dadd (dadd already wrote correct
   -- size/mtime/extents to disk; we must not overwrite with stale pt).
   -- _dirtyMeta() inside dadd cleared all caches, so ri() reads from disk.
   local pt2=self:ri(di)

@@ -76,10 +76,10 @@ local _FULL_BLOCK = 129   -- █: top==bottom, both non-bg
 -- Replaces table.remove(t, 1) pattern which is O(n).
 --
 -- Usage:
---  local ts = XE.timeSeries(120)
---  ts:push(42.5)
---  print(ts:len())     -- 1
---  print(ts:get(1))    -- 42.5
+--   local ts = XE.timeSeries(120)
+--   ts:push(42.5)
+--   print(ts:len())     -- 1
+--   print(ts:get(1))    -- 42.5
 -- =============================================
 
 function XE.timeSeries(nMax)
@@ -952,8 +952,9 @@ function XE._M:_flushWithClear()
     -- so the diff below only needs to emit content cells (not 2000 bg cells).
     -- This is the ONLY gpu_fill allowed, and it only fires on bg color transitions.
     if bgChanged then
-        fs.deviceControl(self._hIn, "gpu_fill",
-            {1, 1, W, H, " ", clrFg, clrBg})
+        if self._hGdiSurface then
+            syscall("gdi_surface_clear", self._hGdiSurface, clrFg, clrBg)
+        end
         for y = 1, H do
             local rc, rf, rb = fCh[y], fFg[y], fBg[y]
             for x = 1, W do
@@ -1021,9 +1022,9 @@ function XE._M:_flushWithClear()
     -- ================================================================
     -- STEADY STATE: same bg color as last frame.
     -- Process two sets of rows:
-    --  A) Current dirty rows → diff (delta or clear) vs front
-    --  B) Previously dirty rows that are NOT current dirty
-    --     → their old content must be replaced with clear color
+    --   A) Current dirty rows → diff (delta or clear) vs front
+    --   B) Previously dirty rows that are NOT current dirty
+    --      → their old content must be replaced with clear color
     -- ================================================================
 
     -- Set A: current dirty rows
@@ -1427,8 +1428,8 @@ end
 -- Each page has its own buffers + widget state.
 -- Only the active page has RAM-resident buffers.
 -- Inactive pages are either:
---  a) nil'd (pure RAM savings), or
---  b) backed by a GPU snapshot (instant restore).
+--   a) nil'd (pure RAM savings), or
+--   b) backed by a GPU snapshot (instant restore).
 -- =============================================
 
 function XE._M:createPage(sId)
@@ -1486,7 +1487,7 @@ function XE._M:_loadPageState(sId)
     local pg = self._pages[sId]
     if not pg then return end
 
-    --    self:_allocFrontBuffer()
+    --     self:_allocFrontBuffer()
 
     self._wIds         = pg.wIds        or {}
     self._nW           = pg.nW          or 0
@@ -1927,11 +1928,68 @@ function XE._M:textPad(x, y, w, s, fg, bg)
 end
 
 -- =============================================
+-- TOOLTIP — positioned popup box (native XE)
+-- Renders a bordered info box at (nX, nY).
+-- Auto-flips above if it would overflow the screen.
+-- Zero persistent state: caller re-renders each frame
+-- while tooltip is active.
+-- =============================================
+
+function XE._M:tooltip(nX, nY, tLines, tOpts)
+    if self._suspended or not tLines or #tLines == 0 then return end
+    tOpts = tOpts or {}
+    local nFg       = tOpts.fg       or self:c("fg")
+    local nBg       = tOpts.bg       or 0x1A1A3A
+    local nBorderFg = tOpts.borderFg or 0x4444AA
+    local nTitleFg  = tOpts.titleFg  or self:c("accent")
+    local nAnnotFg  = tOpts.annotFg  or 0x8899AA
+    local nMaxW     = tOpts.maxW     or 44
+
+    -- Measure content
+    local nContentW = 0
+    for _, s in ipairs(tLines) do
+        if #s > nContentW then nContentW = #s end
+    end
+    nContentW = math.min(nContentW, nMaxW - 4)
+    local nBoxW = nContentW + 4
+    local nBoxH = #tLines + 2
+
+    -- Clamp position to screen
+    if nX + nBoxW - 1 > self.W then nX = self.W - nBoxW + 1 end
+    if nY + nBoxH - 1 > self.H then nY = nY - nBoxH - 1 end
+    if nX < 1 then nX = 1 end
+    if nY < 1 then nY = 1 end
+
+    -- Background fill
+    self:fill(nX, nY, nBoxW, nBoxH, " ", nFg, nBg)
+
+    -- Border
+    local sH = "+" .. string.rep("-", nBoxW - 2) .. "+"
+    self:text(nX, nY, sH, nBorderFg, nBg)
+    self:text(nX, nY + nBoxH - 1, sH, nBorderFg, nBg)
+    for ry = nY + 1, nY + nBoxH - 2 do
+        self:text(nX, ry, "|", nBorderFg, nBg)
+        self:text(nX + nBoxW - 1, ry, "|", nBorderFg, nBg)
+    end
+
+    -- Content lines with semantic coloring
+    for i, s in ipairs(tLines) do
+        local sD = s
+        if #sD > nContentW then sD = sD:sub(1, nContentW - 2) .. ".." end
+        local nLFg = nFg
+        if i == 1 then nLFg = nTitleFg end                    -- signature line
+        if sD:match("^@") then nLFg = nAnnotFg end            -- @param / @return
+        if sD:match("^Line ") then nLFg = 0x666688 end        -- location
+        self:text(nX + 2, nY + i, sD, nLFg, nBg)
+    end
+end
+
+-- =============================================
 -- HALF-BLOCK PIXEL CANVAS
 --
 -- Resolution: w × (h*2) pixels in a w × h cell region.
 -- Each screen cell encodes two vertical pixels via ▀:
---  fg = top pixel color, bg = bottom pixel color.
+--   fg = top pixel color, bg = bottom pixel color.
 --
 -- Pixel buffer is SPARSE: pix[py] = nil or {[px]=color}.
 -- Only non-background pixels consume memory.
@@ -2058,9 +2116,9 @@ end
 --
 -- For each screen cell, packs two vertical pixels
 -- into one half-block character:
---  top==bottom==bg  →  space (byte 32)
---  top==bottom!=bg  →  █ (byte 129), fg=color
---  top!=bottom      →  ▀ (byte 128), fg=top, bg=bottom
+--   top==bottom==bg  →  space (byte 32)
+--   top==bottom!=bg  →  █ (byte 129), fg=color
+--   top!=bottom      →  ▀ (byte 128), fg=top, bg=bottom
 --
 -- Cost: 6 ops per cell (2 lookups + 1 compare + 3 writes).
 -- 40×10 canvas = 400 cells = ~2400 ops = <1ms in OC Lua.
@@ -2486,17 +2544,17 @@ end
 -- diff engine handles GPU efficiency automatically.
 --
 -- Performance (80×25 screen):
---  Frame 1 (open):  ~2000 backdrop cells + modal content
---                    → diff emits all as changed → ~30 batch entries
---  Frame 2+ (steady): backdrop unchanged (diff = 0 GPU calls),
---                      only modal content changes emit
---  Close:            app content overwrites backdrop naturally,
---                    diff emits the differences
+--   Frame 1 (open):  ~2000 backdrop cells + modal content
+--                     → diff emits all as changed → ~30 batch entries
+--   Frame 2+ (steady): backdrop unchanged (diff = 0 GPU calls),
+--                       only modal content changes emit
+--   Close:            app content overwrites backdrop naturally,
+--                     diff emits the differences
 --
 -- Backdrop modes:
---  "solid"  — fill with dark color (O(W*H) writes, O(0) after frame 1)
---  "dim"    — snapshot front buffer, darken each cell (O(W*H) + 48KB RAM)
---  "none"   — no backdrop (transparent, app content visible)
+--   "solid"  — fill with dark color (O(W*H) writes, O(0) after frame 1)
+--   "dim"    — snapshot front buffer, darken each cell (O(W*H) + 48KB RAM)
+--   "none"   — no backdrop (transparent, app content visible)
 -- =============================================
 
 local function _dimColor(c, factor)

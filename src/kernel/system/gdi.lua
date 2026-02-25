@@ -2,10 +2,10 @@
 -- Graphics Device Interface v3.3 — Deferred Clear Compositor
 --
 -- v3.3 fixes:
---  - No more blinking: SurfaceSetPosition defers clears to compositor
---  - DestroySurface properly clears screen area
---  - SurfaceSetVisible properly clears hidden surface area
---  - OnTouchEvent clears stale drag state
+--   - No more blinking: SurfaceSetPosition defers clears to compositor
+--   - DestroySurface properly clears screen area
+--   - SurfaceSetVisible properly clears hidden surface area
+--   - OnTouchEvent clears stale drag state
 
 local GDI = {}
 
@@ -203,7 +203,7 @@ end
 function GDI.DestroySurface(h)
     local s = g_tSurfaces[h]
     if s and s.bVisible then
-        -- FIX: Queue the occupied area for deferred clearing
+        -- Queue the occupied area for deferred clearing
         _queueClear(s.nGpuTarget, s.nScreenX, s.nScreenY, s.nW, s.nH)
         _markGpuDirty(s.nGpuTarget)
     end
@@ -287,7 +287,7 @@ function GDI.SurfaceSetVisible(h, b)
     local s = g_tSurfaces[h]; if not s then return nil end
     if s.bVisible ~= b then
         if s.bVisible and not b then
-            -- FIX: Hiding → queue old area for deferred clear
+            -- Hiding → queue old area for deferred clear
             _queueClear(s.nGpuTarget, s.nScreenX, s.nScreenY, s.nW, s.nH)
         end
         s.bVisible = b
@@ -300,7 +300,7 @@ function GDI.SurfaceSetPosition(h, nX, nY)
     local s = g_tSurfaces[h]; if not s then return nil end
     if s.nScreenX == nX and s.nScreenY == nY then return true end
 
-    -- FIX: Queue OLD position for deferred clear (NO direct GPU fill)
+    -- Queue OLD position for deferred clear (NO direct GPU fill)
     if s.bVisible then
         _queueClear(s.nGpuTarget, s.nScreenX, s.nScreenY, s.nW, s.nH)
     end
@@ -339,7 +339,7 @@ end
 -- ═══ FORCE FULL REDRAW ═══
 
 function GDI.ForceFullRedraw()
-    -- FIX: Use pending clears for the entire screen instead of just a flag
+    -- Use pending clears for the entire screen instead of just a flag
     for nGIdx, tGpu in pairs(g_tGpus) do
         if tGpu.screenAddr then
             _queueClear(nGIdx, 1, 1, tGpu.nW, tGpu.nH)
@@ -512,7 +512,7 @@ end
 function GDI.OnTouchEvent(sScreenAddr, nX, nY, nButton, sPlayer)
     nX = math.floor(nX); nY = math.floor(nY)
 
-    -- FIX: Clear stale drag state on any new touch
+    -- Clear stale drag state on any new touch
     if g_tDragState.bActive then
         g_tDragState.bActive = false
         g_tDragState.hSurface = nil

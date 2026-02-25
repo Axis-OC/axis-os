@@ -60,7 +60,7 @@ function oKMD.DkRegisterInterrupt(sEventName)
     return nStatus
 end
 
--- FIX: Accept sAddress as explicit parameter instead of reading env.address
+-- Accept sAddress as explicit parameter instead of reading env.address
 -- via the module's _ENV (which may be bound to a different process due to
 -- global module caching in kernel.custom_require).
 function oKMD.DkCreateComponentDevice(pDriverObject, sDeviceTypeName, sAddress)
@@ -101,7 +101,6 @@ function oKMD.DkCreateComponentDevice(pDriverObject, sDeviceTypeName, sAddress)
   return tStatus.STATUS_SUCCESS, pDeviceObject
 end
 
--- NEW: Attach a filter device on top of a target device
 function oKMD.DkAttachDevice(pFilterDevice, sTargetDeviceName)
     oKMD.DkPrint("AttachDevice: " .. (pFilterDevice.sDeviceName or "?") ..
                  " → " .. sTargetDeviceName)
@@ -113,13 +112,11 @@ function oKMD.DkAttachDevice(pFilterDevice, sTargetDeviceName)
     return nSt, pLower
 end
 
--- NEW: Detach from device stack
 function oKMD.DkDetachDevice(pFilterDevice)
     if not pFilterDevice.pLowerDevice then return tStatus.STATUS_SUCCESS end
     return CallDkms("dkms_detach_device", pFilterDevice.sDeviceName)
 end
 
--- NEW: Pass IRP to lower device in stack
 function oKMD.DkCallDriver(pLowerDevice, pIrp)
     if not pLowerDevice or not pLowerDevice.pDriverObject then
         return tStatus.STATUS_NO_SUCH_DEVICE

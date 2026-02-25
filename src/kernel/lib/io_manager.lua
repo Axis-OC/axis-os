@@ -313,7 +313,7 @@ end
 
 function tHandlers.vfs_mkdir(nSenderPid, sPath)
     if sPath:sub(1, 5) == "/dev/" then return nil, "Cannot mkdir in /dev" end
-    -- FIX: Ensure parent directories exist for mkdir too
+    -- Ensure parent directories exist for mkdir too
     fEnsureParentDirs(sPath)
     local bOk, sR = syscall("raw_component_invoke", g_oRootFs.address, "makeDirectory", sPath)
     return bOk and true or nil, tostring(sR)

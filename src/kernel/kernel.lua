@@ -68,6 +68,31 @@ local g_tSchedStats = {
     nMaxSliceMs = 0
 }
 
+-- =============================================
+-- SYSCALL ASLR (per-boot randomized dispatch names)
+-- =============================================
+local g_tAslrForward  = {}   -- real_name → token  (used by sandbox)
+local g_tAslrReverse  = {}   -- token → real_name  (used by dispatch)
+local g_bAslrGenerated = false
+
+-- =============================================
+-- SWAP SPACE (serialize sleeping Ring 3 state to disk)
+-- =============================================
+local g_sSwapKey        = nil           -- HMAC key for swap file integrity
+local SWAP_DIR          = "/tmp/.kswap"
+local SWAP_MAGIC        = "AXSW"
+local SWAP_IDLE_SEC     = 30            -- swap out after this many seconds sleeping
+local SWAP_MEM_FLOOR    = 32768         -- only swap when free mem is below this
+
+-- =============================================
+-- D-BUS KERNEL MESSAGE BUS
+-- =============================================
+local g_tDbusChannels       = {}   -- [sChannel] = { subscribers = {[nPid]=true} }
+local g_tDbusInboxes        = {}   -- [nPid] = { {channel,data,seq,pub,time}, ... }
+local g_nDbusSeq            = 0
+local DBUS_MAX_INBOX        = 32
+local DBUS_MAX_CHANNELS     = 64
+
 local WATCHDOG_WARN_THRESHOLD = 2.0 -- seconds warn if a single resume exceeds this
 local WATCHDOG_KILL_STRIKES = 3 -- kill after this many warnings
 
@@ -314,7 +339,7 @@ function kprint(sLevel, ...)
     -- Always push to boot log drain (PM picks these up)
     table.insert(kernel.tBootLog, sFullLine)
     
-    -- FIX: Cap the boot log to prevent OOM if PM is blocked on signal_pull 
+    -- Cap the boot log to prevent OOM if PM is blocked on signal_pull 
     -- (e.g. during heavy component/disk activity that bypasses VFS IPC)
     if #kernel.tBootLog > 64 then
         table.remove(kernel.tBootLog, 1)
@@ -1534,11 +1559,51 @@ local function shallowCopy(t)
     return c
 end
 
-function kernel.create_sandbox(nPid, nRing)
-    kprint("debug", "Creating sandbox", {
-        pid = nPid,
-        ring = nRing
-    })
+
+-- =============================================
+-- SYSCALL ASLR — Generate per-boot random mapping
+-- Called lazily on first Ring ≥ 2.5 sandbox creation.
+-- Also called incrementally by syscall_override.
+-- =============================================
+
+local function fAslrTokenFor(sName)
+    local sTok
+    repeat
+        sTok = string.format("_s%04x%04x",
+            math.random(0, 0xFFFF), math.random(0, 0xFFFF))
+    until not g_tAslrReverse[sTok]
+    g_tAslrForward[sName] = sTok
+    g_tAslrReverse[sTok]  = sName
+end
+
+local function fEnsureAslrTable()
+    if g_bAslrGenerated then return end
+    g_bAslrGenerated = true
+    for sName in pairs(kernel.tSyscallTable) do
+        if not g_tAslrForward[sName] then fAslrTokenFor(sName) end
+    end
+    for sName in pairs(kernel.tSyscallOverrides) do
+        if not g_tAslrForward[sName] then fAslrTokenFor(sName) end
+    end
+    local nCount = 0
+    for _ in pairs(g_tAslrForward) do nCount = nCount + 1 end
+    kprint("sec", "Syscall ASLR: " .. nCount ..
+        " tokens generated (per-boot randomisation)")
+end
+
+function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
+    kprint("debug", "Creating sandbox", { pid = nPid, ring = nRing,
+        vfork = tVforkParentEnv and true or false })
+
+    local tProtected   = {}
+    local tUserGlobals = {}
+    local tSandbox     = {}
+
+    -- ── vfork: CoW reads from parent, writes go local ──
+    if tVforkParentEnv then
+        setmetatable(tUserGlobals, { __index = tVforkParentEnv })
+    end
+
     -- =========================================================
     -- THREE-LAYER PROXY SANDBOX
     --
@@ -1566,70 +1631,57 @@ function kernel.create_sandbox(nPid, nRing)
     --                     (computer, unicode, bit32; ring-gated)
     -- =========================================================
 
-    local tProtected = {} -- immutable kernel symbols
-    local tUserGlobals = {} -- user-writable globals
-    local tSandbox = {} -- EMPTY proxy MUST never gain direct keys
 
     local tSafeComputer = {
-        uptime = computer.uptime,
-        freeMemory = computer.freeMemory,
+        uptime      = computer.uptime,
+        freeMemory  = computer.freeMemory,
         totalMemory = computer.totalMemory,
-        address = computer.address,
-        tmpAddress = computer.tmpAddress
+        address     = computer.address,
+        tmpAddress  = computer.tmpAddress,
     }
 
-    -- Capture real functions before any user code can replace them.
-    -- These upvalues are used inside __pc() and can never be reached
-    -- or modified by user code.
-    local fRealYield = coroutine.yield
+    local fRealYield  = coroutine.yield
     local fRealUptime = raw_computer.uptime
-    local fRealResume = coroutine.resume -- [FIX] capture for wrapped coroutine
-    local fRealCreate = coroutine.create -- [FIX]
-    local fRealStatus = coroutine.status -- [FIX]
+    local fRealResume = coroutine.resume
+    local fRealCreate = coroutine.create
+    local fRealStatus = coroutine.status
 
-    -- =============================================
-    -- LAYER 1: Protected kernel symbols
-    -- =============================================
-
-    -- Standard Lua (safe subset NO rawset, rawget, debug)
-    tProtected.assert = assert
-    tProtected.error = error
-    tProtected.next = next
-    tProtected.pcall = pcall
-    tProtected.select = select
-    tProtected.tonumber = tonumber
-    tProtected.tostring = tostring
-    tProtected.type = type
-    tProtected.unpack = unpack
-    tProtected._VERSION = _VERSION
-    tProtected.xpcall = xpcall
+    -- ── Standard safe builtins ──
+    tProtected.assert      = assert
+    tProtected.error       = error
+    tProtected.next        = next
+    tProtected.pcall       = pcall
+    tProtected.select      = select
+    tProtected.tonumber    = tonumber
+    tProtected.tostring    = tostring
+    tProtected.type        = type
+    tProtected.unpack      = unpack
+    tProtected._VERSION    = _VERSION
+    tProtected.xpcall      = xpcall
 
     do
         local fRealNext = next
         tProtected.pairs = function(t)
             if type(t) ~= "table" then
-                error("bad argument #1 to 'pairs' (table expected, got " .. type(t) .. ")", 2)
+                error("bad argument #1 to 'pairs' (table expected, got "
+                    .. type(t) .. ")", 2)
             end
             return fRealNext, t, nil
         end
         tProtected.ipairs = function(t)
             if type(t) ~= "table" then
-                error("bad argument #1 to 'ipairs' (table expected, got " .. type(t) .. ")", 2)
+                error("bad argument #1 to 'ipairs' (table expected, got "
+                    .. type(t) .. ")", 2)
             end
             local i = 0
             return function()
                 i = i + 1
                 local v = rawget(t, i)
-                if v ~= nil then
-                    return i, v
-                end
+                if v ~= nil then return i, v end
             end
         end
     end
 
-    -- Library tables
-    -- [SECURITY FIX] Instead of making a shallowCopy that users can overwrite, 
-    -- we pass the globally frozen libraries that reject modifications.
     tProtected.string = g_tFrozenString
     tProtected.table  = g_tFrozenTable
     tProtected.math   = g_tFrozenMath
@@ -1638,267 +1690,215 @@ function kernel.create_sandbox(nPid, nRing)
     do
         local fRealSetmt = setmetatable
         tProtected.setmetatable = function(tbl, mt)
-            if type(mt) == "table" then
-                rawset(mt, "__gc", nil)
-            end
+            if type(mt) == "table" then rawset(mt, "__gc", nil) end
             return fRealSetmt(tbl, mt)
         end
     end
     tProtected.getmetatable = getmetatable
 
-    -- ---- Kernel interfaces ----
-
-    tProtected.syscall = function(...)
-        return kernel.syscall_dispatch(...)
+    -- ────────────────────────────────────────
+    -- ASLR-aware syscall dispatcher closure
+    -- For Ring ≥ 2.5 all outgoing names are translated
+    -- to per-boot random tokens.  Ring 0-2 pass raw names.
+    -- ────────────────────────────────────────
+    local fSandboxSyscall
+    if nRing >= 2.5 then
+        fEnsureAslrTable()
+        fSandboxSyscall = function(sName, ...)
+            local sTok = g_tAslrForward[sName]
+            if sTok then
+                return kernel.syscall_dispatch(sTok, ...)
+            end
+            -- Unknown name — dispatch will reject for Ring ≥ 2.5
+            return kernel.syscall_dispatch(sName, ...)
+        end
+    else
+        fSandboxSyscall = function(...)
+            return kernel.syscall_dispatch(...)
+        end
     end
+    tProtected.syscall = fSandboxSyscall
 
     tProtected.require = function(sModulePath)
         local mod, sErr = kernel.custom_require(sModulePath, nPid)
-        if not mod then
-            error(sErr, 2)
-        end
+        if not mod then error(sErr, 2) end
         return mod
     end
 
-    -- ---- Preemptive checkpoint: __pc() ----
-
+    -- ── Preemptive checkpoint __pc() ──
     if g_oPreempt and nRing >= 2.5 then
-        local nPcCounter = 0
+        local nPcCounter   = 0
         local nPcLastYield = fRealUptime()
-        local nPcQuantum = g_oPreempt.DEFAULT_QUANTUM
-        local nPcInterval = g_oPreempt.CHECK_INTERVAL
-
-        local nCoDepth = 0 -- 0 = process level, >0 = sub-coroutine
-        local bForceYield = false -- set by __pc when quantum expired in sub-co
+        local nPcQuantum   = g_oPreempt.DEFAULT_QUANTUM
+        local nPcInterval  = g_oPreempt.CHECK_INTERVAL
+        local nCoDepth     = 0
+        local bForceYield  = false
 
         tProtected.__pc = function()
             nPcCounter = nPcCounter + 1
-            if nPcCounter < nPcInterval then
-                return
-            end
+            if nPcCounter < nPcInterval then return end
             nPcCounter = 0
-
-            -- Signal delivery
             if g_oIpc then
-                local tProc = kernel.tProcessTable[nPid]
-                if tProc and tProc.tPendingSignals and #tProc.tPendingSignals > 0 then
+                local tP = kernel.tProcessTable[nPid]
+                if tP and tP.tPendingSignals
+                   and #tP.tPendingSignals > 0 then
                     g_oIpc.DeliverSignals(nPid)
-                    if tProc.status == "dead" then
-                        pcall(fRealYield) -- Safely exit if killed inside C-boundary
-                        return
+                    if tP.status == "dead" then
+                        pcall(fRealYield); return
                     end
                 end
             end
-
             local nNow = fRealUptime()
             if nNow - nPcLastYield >= nPcQuantum then
-                local bYieldOk = pcall(fRealYield)
-                
+                local bOk = pcall(fRealYield)
                 nPcLastYield = fRealUptime()
-
-                if bYieldOk and nCoDepth > 0 then
-                    bForceYield = true
-                end
+                if bOk and nCoDepth > 0 then bForceYield = true end
             end
         end
 
         local tSafeCoroutine = {
-            create = fRealCreate,
-            yield = fRealYield,
-            status = fRealStatus,
-            running = coroutine.running
+            create  = fRealCreate,
+            yield   = fRealYield,
+            status  = fRealStatus,
+            running = coroutine.running,
         }
-
         tSafeCoroutine.resume = function(co, ...)
             nCoDepth = nCoDepth + 1
-            local tResults = {fRealResume(co, ...)}
+            local tR = { fRealResume(co, ...) }
             nCoDepth = nCoDepth - 1
-
             if nCoDepth == 0 and bForceYield then
                 bForceYield = false
                 fRealYield()
                 nPcLastYield = fRealUptime()
             end
-
-            return table.unpack(tResults)
+            return table.unpack(tR)
         end
-
         tSafeCoroutine.wrap = function(f)
             local co = fRealCreate(f)
             return function(...)
                 nCoDepth = nCoDepth + 1
-                local tResults = {fRealResume(co, ...)}
+                local tR = { fRealResume(co, ...) }
                 nCoDepth = nCoDepth - 1
-
                 if nCoDepth == 0 and bForceYield then
-                    bForceYield = false
-                    fRealYield()
+                    bForceYield = false; fRealYield()
                     nPcLastYield = fRealUptime()
                 end
-
-                if not tResults[1] then
-                    error(tResults[2], 0)
-                end
-                return table.unpack(tResults, 2)
+                if not tR[1] then error(tR[2], 0) end
+                return table.unpack(tR, 2)
             end
         end
 
-        -- [SECURITY FIX] Create a localized freeze helper for the generated coroutine table
         local function freeze_local(t)
-            local proxy = {}
-            setmetatable(proxy, {
-                __index = t,
-                __newindex = function() error("SECURITY VIOLATION: Attempt to modify coroutine library", 2) end,
-                __metatable = "protected"
+            local p = {}
+            setmetatable(p, {
+                __index    = t,
+                __newindex = function()
+                    error("SECURITY VIOLATION: coroutine library is read-only", 2)
+                end,
+                __metatable = "protected",
             })
-            return proxy
+            return p
         end
-
-        tProtected.coroutine = freeze_local(tSafeCoroutine) -- [FIX] frozen wrapped version
+        tProtected.coroutine = freeze_local(tSafeCoroutine)
 
         local fKernelLoad = load
-        tProtected.load = function(sChunk, sName, sMode, _tUserEnv)
+        tProtected.load = function(sChunk, sName, sMode, _)
             if type(sChunk) == "function" then
-                local tParts = {}
+                local tP = {}
                 while true do
-                    local sPart = sChunk()
-                    if not sPart or sPart == "" then
-                        break
-                    end
-                    tParts[#tParts + 1] = sPart
+                    local s = sChunk()
+                    if not s or s == "" then break end
+                    tP[#tP + 1] = s
                 end
-                sChunk = table.concat(tParts)
+                sChunk = table.concat(tP)
             end
-            if type(sChunk) ~= "string" then
-                return nil, "string expected"
-            end
-            local sInst, nInj = g_oPreempt.instrument(sChunk, sName or "[dynamic]")
-            if nInj > 0 then
-                sChunk = sInst
-            end
+            if type(sChunk) ~= "string" then return nil, "string expected" end
+            local sI, nI = g_oPreempt.instrument(sChunk, sName or "[dynamic]")
+            if nI > 0 then sChunk = sI end
             return fKernelLoad(sChunk, sName, "t", tSandbox)
         end
     else
-        tProtected.__pc = function()
-        end
-        tProtected.coroutine = coroutine -- [FIX] no preemption = raw coroutine
-        tProtected.load = load
+        tProtected.__pc       = function() end
+        tProtected.coroutine  = coroutine
+        tProtected.load       = load
     end
 
-    -- ---- print / io ----
-
+    -- ── print / io (ASLR-aware) ──
     tProtected.print = function(...)
         local tP = {}
-        for i = 1, select("#", ...) do
-            tP[i] = tostring(select(i, ...))
-        end
+        for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
         local sOut = table.concat(tP, "\t") .. "\n"
         local tE = tUserGlobals.env
-        if tE and tE.NO_COLOR then
-            sOut = fStripAnsi(sOut)
-        end
-        kernel.syscall_dispatch("vfs_write", -11, sOut)
+        if tE and tE.NO_COLOR then sOut = fStripAnsi(sOut) end
+        fSandboxSyscall("vfs_write", -11, sOut)
     end
 
     tProtected.io = {
         write = function(...)
             local tP = {}
-            for i = 1, select("#", ...) do
-                tP[i] = tostring(select(i, ...))
-            end
+            for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
             local sOut = table.concat(tP)
             local tE = tUserGlobals.env
-            if tE and tE.NO_COLOR then
-                sOut = fStripAnsi(sOut)
-            end
-            kernel.syscall_dispatch("vfs_write", -11, sOut)
+            if tE and tE.NO_COLOR then sOut = fStripAnsi(sOut) end
+            fSandboxSyscall("vfs_write", -11, sOut)
         end,
         read = function()
-            local _, _, data = kernel.syscall_dispatch("vfs_read", -10)
+            local _, _, data = fSandboxSyscall("vfs_read", -10)
             return data
-        end
+        end,
     }
 
-    -- =============================================
-    -- LAYER 3: Safe platform globals (ring-gated)
-    -- =============================================
-
+    -- ── Safe platform globals (ring-gated) ──
     local tSafeGlobals = {
         computer = tSafeComputer,
-        unicode = unicode,
-        bit32 = bit32,
+        unicode  = unicode,
+        bit32    = bit32,
         checkArg = checkArg,
         rawequal = rawequal,
-        rawlen = rawlen
+        rawlen   = rawlen,
     }
 
     if nRing == 0 then
-        -- God-mode
-        tProtected.kernel = kernel
+        tProtected.kernel        = kernel
         tProtected.raw_component = raw_component
-        tProtected.raw_computer = raw_computer
-        tProtected.rawset = rawset
-        tProtected.rawget = rawget
-        tProtected.debug = debug
-        tSafeGlobals.component = component
+        tProtected.raw_computer  = raw_computer
+        tProtected.rawset        = rawset
+        tProtected.rawget        = rawget
+        tProtected.debug         = debug
+        tSafeGlobals.component   = component
     elseif nRing <= 2 then
-        -- Drivers / Pipeline Manager need component and raw ops
         tSafeGlobals.component = component
-        local fRealRawset = rawset
-        local fRealGetMetatable = getmetatable
+        local fRR = rawset
+        local fRG = getmetatable
         tSafeGlobals.rawset = function(t, k, v)
-            local mt = fRealGetMetatable(t)
-            if mt == "protected" or mt == "hypervisor_sealed" or mt == "hypervisor_monitored" then
-                error("SECURITY VIOLATION: rawset on frozen library or protected table", 2)
+            local mt = fRG(t)
+            if mt == "protected" or mt == "hypervisor_sealed"
+               or mt == "hypervisor_monitored" then
+                error("SECURITY VIOLATION: rawset on protected table", 2)
             end
-            return fRealRawset(t, k, v)
+            return fRR(t, k, v)
         end
         tSafeGlobals.rawget = rawget
     end
-    -- Ring 2.5, 3: NO rawset, rawget, debug, raw_component, raw_computer
 
-    -- =============================================
-    -- METATABLE the core of the protection
-    -- =============================================
-
-    -- Fast-lookup set of all protected key names
     local tProtectedSet = {}
-    for k in pairs(tProtected) do
-        tProtectedSet[k] = true
-    end
+    for k in pairs(tProtected) do tProtectedSet[k] = true end
     tProtectedSet["_G"] = true
 
     setmetatable(tSandbox, {
         __index = function(_, key)
-            -- Priority 1: protected kernel symbols (ALWAYS win)
             local pv = tProtected[key]
-            if pv ~= nil then
-                return pv
-            end
-            -- Priority 2: _G self-reference
-            if key == "_G" then
-                return tSandbox
-            end
-            -- Priority 3: user-defined globals
+            if pv ~= nil then return pv end
+            if key == "_G" then return tSandbox end
             local uv = tUserGlobals[key]
-            if uv ~= nil then
-                return uv
-            end
-            -- Priority 4: safe platform globals
+            if uv ~= nil then return uv end
             return tSafeGlobals[key]
         end,
-
         __newindex = function(_, key, value)
-            -- Writes to protected names are silently dropped.
-            if tProtectedSet[key] then
-                return
-            end
+            if tProtectedSet[key] then return end
             tUserGlobals[key] = value
         end,
-
-        -- Makes getmetatable(sandbox) return "protected" (not the real mt).
-        -- Makes setmetatable(sandbox, ...) raise an error.
-        __metatable = "protected"
+        __metatable = "protected",
     })
 
     return tSandbox
@@ -2164,61 +2164,6 @@ local function deepSanitize(vValue, nDepth, tCounter)
 end
 
 function kernel.syscall_dispatch(sName, ...)
-    local tProc = kernel.tProcessTable[nPid]
-    if tProc then
-        tProc._nSyscallCount = (tProc._nSyscallCount or 0) + 1
-        local nNow = raw_computer.uptime()
-        if not tProc._nSyscallWindowStart then
-            tProc._nSyscallWindowStart = nNow
-        end
-        if nNow - tProc._nSyscallWindowStart > 1.0 then
-            if tProc._nSyscallCount > 10000 and tProc.ring >= 3 then
-                kprint("sec", "SYSCALL FLOOD: PID " .. nPid ..
-                    " (" .. tProc._nSyscallCount .. "/sec) — killed")
-                tProc.status = "dead"
-                return nil, "Killed: syscall rate limit"
-            end
-            tProc._nSyscallCount = 0
-            tProc._nSyscallWindowStart = nNow
-        end
-    end
-
-    if g_tSyscallProfiler and nPid and nPid >= 2 then
-        local tSP = g_tSyscallProfiler
-        if not tSP.bLocked then
-            -- Learning phase: record syscalls per PID
-            if not tSP.tProfiles[nPid] then tSP.tProfiles[nPid] = {} end
-            tSP.tProfiles[nPid][sName] = true
-
-            -- Check if stabilization period has elapsed
-            if raw_computer.uptime() - tSP.nStartTime > tSP.nStabilizeAfter then
-                tSP.bLocked = true
-                tSP.tBaselines = {}
-                for bpid, bset in pairs(tSP.tProfiles) do
-                    tSP.tBaselines[bpid] = bset
-                end
-                local nProf = 0
-                for _ in pairs(tSP.tBaselines) do nProf = nProf + 1 end
-                kprint("sec", "[PROFILER] Baselines locked for " .. nProf .. " processes")
-            end
-        else
-            -- Enforcement phase: flag new syscalls outside baseline
-            local tBase = tSP.tBaselines[nPid]
-            if tBase and not tBase[sName] then
-                local tAlert = {
-                    pid = nPid, syscall = sName,
-                    time = raw_computer.uptime(),
-                    ring = kernel.tRings[nPid],
-                }
-                tSP.tAlerts[#tSP.tAlerts + 1] = tAlert
-                if #tSP.tAlerts > 50 then table.remove(tSP.tAlerts, 1) end
-                kprint("sec", string.format(
-                    "[PROFILER] ANOMALY: PID %d (Ring %s) used '%s' outside baseline",
-                    nPid, tostring(kernel.tRings[nPid]), sName))
-            end
-        end
-    end
-    
     if type(sName) ~= "string" then
         kprint("sec", "Non-string syscall name rejected", {
             pid = g_nCurrentPid,
@@ -2234,23 +2179,97 @@ function kernel.syscall_dispatch(sName, ...)
         kernel.panic("Untracked coroutine tried to syscall: " .. sName)
     end
 
-    g_nCurrentPid = nPid
+    -- Resolve nRing HERE, before ASLR block and rate-limiting.
+    -- Previously nRing was defined AFTER the ASLR block, causing
+    -- "attempt to compare nil with number" on the first Ring≥2.5 syscall.
     local nRing = kernel.tRings[nPid]
 
-    -- PIPE FAST PATH: intercept vfs_read/vfs_write for kernel pipe handles
-    -- This bypasses PM entirely, preventing PM from blocking on pipe I/O
+    g_nCurrentPid = nPid
+
+    -- ── Rate-limiting (FIX: use nPid which is now defined) ──
+    local tProc = kernel.tProcessTable[nPid]
+    if tProc then
+        tProc._nSyscallCount = (tProc._nSyscallCount or 0) + 1
+        local nNow = raw_computer.uptime()
+        if not tProc._nSyscallWindowStart then
+            tProc._nSyscallWindowStart = nNow
+        end
+        if nNow - tProc._nSyscallWindowStart > 1.0 then
+            if tProc._nSyscallCount > 10000 and nRing >= 3 then
+                kprint("sec", "SYSCALL FLOOD: PID " .. nPid ..
+                    " (" .. tProc._nSyscallCount .. "/sec) — killed")
+                tProc.status = "dead"
+                return nil, "Killed: syscall rate limit"
+            end
+            tProc._nSyscallCount = 0
+            tProc._nSyscallWindowStart = nNow
+        end
+    end
+
+    -- ── Syscall behavior profiler ──
+    if g_tSyscallProfiler and nPid >= 2 then
+        local tSP = g_tSyscallProfiler
+        if not tSP.bLocked then
+            if not tSP.tProfiles[nPid] then tSP.tProfiles[nPid] = {} end
+            tSP.tProfiles[nPid][sName] = true
+            if raw_computer.uptime() - tSP.nStartTime > tSP.nStabilizeAfter then
+                tSP.bLocked = true
+                tSP.tBaselines = {}
+                for bpid, bset in pairs(tSP.tProfiles) do
+                    tSP.tBaselines[bpid] = bset
+                end
+                local nProf = 0
+                for _ in pairs(tSP.tBaselines) do nProf = nProf + 1 end
+                kprint("sec", "[PROFILER] Baselines locked for " .. nProf .. " processes")
+            end
+        else
+            local tBase = tSP.tBaselines[nPid]
+            if tBase and not tBase[sName] then
+                local tAlert = {
+                    pid = nPid, syscall = sName,
+                    time = raw_computer.uptime(),
+                    ring = nRing,
+                }
+                tSP.tAlerts[#tSP.tAlerts + 1] = tAlert
+                if #tSP.tAlerts > 50 then table.remove(tSP.tAlerts, 1) end
+                kprint("sec", string.format(
+                    "[PROFILER] ANOMALY: PID %d (Ring %s) used '%s' outside baseline",
+                    nPid, tostring(nRing), sName))
+            end
+        end
+    end
+
+    -- ═══════════════════════════════════════
+    -- SYSCALL ASLR — resolve per-boot token
+    -- Ring ≥ 2.5 MUST use tokens.
+    -- Ring 0-2 may use raw names.
+    --
+    -- nRing is now guaranteed to be defined
+    -- before this block executes.
+    -- ═══════════════════════════════════════
+    if g_bAslrGenerated then
+        local sReal = g_tAslrReverse[sName]
+        if sReal then
+            sName = sReal  -- token resolved to real name
+        elseif nRing >= 2.5 then
+            -- Not a valid token AND not privileged → reject
+            kprint("sec", string.format(
+                "ASLR BLOCK: PID %d (Ring %s) used invalid token '%s'",
+                nPid, tostring(nRing), tostring(sName):sub(1, 20)))
+            return nil, "Invalid syscall identifier"
+        end
+        -- Ring 0-2: raw names still accepted
+    end
+
+    -- PIPE FAST PATH
     if g_oIpc and (sName == "vfs_read" or sName == "vfs_write") then
-        local vHandle = select(1, ...)
         local bPcallOk, bIsPipe, r1, r2 = pcall(g_oIpc.TryPipeIo, nPid, sName, ...)
         if bPcallOk and bIsPipe then
             return r1, r2
         end
-        if not bPcallOk then
-            kprint("fail", "[IPC] Pipe fast-path error: " .. tostring(bIsPipe))
-        end
     end
 
-    -- Signal delivery point: deliver pending signals on every syscall entry
+    -- Signal delivery point
     if g_oIpc then
         local p = kernel.tProcessTable[nPid]
         if p and p.tPendingSignals and #p.tPendingSignals > 0 then
@@ -2261,20 +2280,13 @@ function kernel.syscall_dispatch(sName, ...)
         end
     end
 
-    -- ======================================================
-    -- FAST-PATH: Direct device I/O dispatch (Feature 4)
-    -- If we have a kernel-level device tree and the syscall
-    -- is a VFS op on a device handle, dispatch the IRP
-    -- directly to the driver without going through PM/DKMS.
-    -- ======================================================
+    -- Fast-path device I/O dispatch
     if g_tKernelDeviceTree and g_oObManager then
-        local bFastPath = false
         if sName == "vfs_write" or sName == "vfs_read" then
             local vHandle = select(1, ...)
-            -- Resolve handle to see if it's a device
-            local tProc = kernel.tProcessTable[nPid]
-            if tProc then
-                local sSyn = tProc.synapseToken or ""
+            local tProcFP = kernel.tProcessTable[nPid]
+            if tProcFP then
+                local sSyn = tProcFP.synapseToken or ""
                 local pObj = g_oObManager.ObReferenceObjectByHandle(nPid, vHandle, 0, sSyn)
                 if pObj and pObj.pBody and pObj.pBody.sCategory == "device" then
                     local sDevName = pObj.pBody.sDeviceName
@@ -2290,7 +2302,6 @@ function kernel.syscall_dispatch(sName, ...)
                                                               or tDKStructs.IRP_MJ_READ
                         local fHandler = pDev.pDriverObject.tDispatch[nMaj]
                         if fHandler then
-                            -- TTY fast-path: fire-and-forget writes
                             if sName == "vfs_write" and sDevName == "\\Device\\TTY0" then
                                 local pIrp = tDKStructs.fNewIrp(nMaj)
                                 pIrp.sDeviceName = sDevName
@@ -2302,16 +2313,15 @@ function kernel.syscall_dispatch(sName, ...)
                                     "irp_dispatch", pIrp, fHandler)
                                 return true, #(select(2, ...) or "")
                             end
-
-                            -- Normal device I/O: send IRP, sleep for reply
                             local pIrp = tDKStructs.fNewIrp(nMaj)
                             pIrp.sDeviceName = sDevName
                             pIrp.nSenderPid = nPid
                             if sName == "vfs_write" then
                                 pIrp.tParameters.sData = select(2, ...)
                             end
-                            tProc.status = "sleeping"
-                            tProc.wait_reason = "syscall"
+                            tProcFP.status = "sleeping"
+                            tProcFP.wait_reason = "syscall"
+                            tProcFP._sleepStart = raw_computer.uptime()
                             kernel.syscalls.signal_send(0,
                                 pDev.pDriverObject.nDriverPid,
                                 "irp_dispatch", pIrp, fHandler)
@@ -2330,20 +2340,15 @@ function kernel.syscall_dispatch(sName, ...)
         local tProcess = kernel.tProcessTable[nPid]
         tProcess.status = "sleeping"
         tProcess.wait_reason = "syscall"
+        tProcess._sleepStart = raw_computer.uptime()
 
         local sSynapseToken = tProcess.synapseToken or "NO_TOKEN"
 
-        -- SANITIZE when Ring >= 2.5 sends to Ring 1 PM
         local tArgs
-        if kernel.tRings[nPid] >= 2.5 then
+        if nRing >= 2.5 then
             tArgs = deepSanitize({...})
         else
             tArgs = {...}
-        end
-
-        if type(sName) ~= "string" then
-            tProcess.status = "ready"
-            return nil, "Syscall name must be a string"
         end
 
         local bIsOk, sErr = pcall(kernel.syscalls.signal_send, 0, nOverridePid, "syscall", {
@@ -2370,18 +2375,12 @@ function kernel.syscall_dispatch(sName, ...)
     local bIsAllowed = false
     for _, nAllowedRing in ipairs(tHandler.allowed_rings) do
         if nRing == nAllowedRing then
-            bIsAllowed = true;
-            break
+            bIsAllowed = true; break
         end
     end
 
     if not bIsAllowed then
         kprint("fail", "Ring violation: PID " .. nPid .. " (Ring " .. nRing .. ") tried to call " .. sName)
-        kprint("sec", "RING VIOLATION", {
-            pid = nPid,
-            ring = nRing,
-            syscall = sName
-        })
         kernel.tProcessTable[nPid].status = "dead"
         return coroutine.yield()
     end
@@ -2467,7 +2466,8 @@ kernel.tSyscallTable["kernel_log"] = {
 
 kernel.tSyscallTable["kernel_get_boot_log"] = {
     func = function(nPid)
-        local sLog = table.concat(kernel.tBootLog, "\n")
+        if #kernel.tBootLog == 0 then return "" end
+        local sLog = table.concat(kernel.tBootLog, "\n") .. "\n"
         kernel.tBootLog = {}
         return sLog
     end,
@@ -2491,7 +2491,11 @@ kernel.tSyscallTable["driver_load"] = {
 
 kernel.tSyscallTable["syscall_override"] = {
     func = function(nPid, sSyscallName)
-        kernel.tSyscallOverrides[sSyscallName] = nPid;
+        kernel.tSyscallOverrides[sSyscallName] = nPid
+        -- Maintain ASLR: add token for new override if table exists
+        if g_bAslrGenerated and not g_tAslrForward[sSyscallName] then
+            fAslrTokenFor(sSyscallName)
+        end
         return true
     end,
     allowed_rings = {1}
@@ -2615,6 +2619,99 @@ kernel.tSyscallTable["process_thread"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["process_vfork"] = {
+    func = function(nParentPid, vCodeOrPath, tChildEnv)
+        local tParent = kernel.tProcessTable[nParentPid]
+        if not tParent then return nil, "No such process" end
+
+        local nRing = tParent.ring
+        -- Create child sandbox with CoW link to parent's environment
+        local tChildSandbox = kernel.create_sandbox(
+            kernel.nNextPid, nRing, tParent.env)
+
+        local nChildPid = kernel.nNextPid
+        kernel.nNextPid = kernel.nNextPid + 1
+
+        -- Merge caller-supplied env into the child's writable layer
+        if tChildEnv then
+            for k, v in pairs(tChildEnv) do
+                tChildSandbox.env = tChildSandbox.env or {}
+            end
+            -- Use rawset on the sandbox; __newindex routes to child's
+            -- tUserGlobals, NOT the parent.
+            if type(tChildEnv) == "table" then
+                -- The sandbox's __newindex writes to child-local table
+                tChildSandbox.env = tChildEnv
+            end
+        end
+
+        local coChild
+        if type(vCodeOrPath) == "function" then
+            coChild = coroutine.create(function()
+                local bOk, sErr = pcall(vCodeOrPath)
+                if not bOk then
+                    kprint("fail", "vfork child " .. nChildPid ..
+                        " crashed: " .. tostring(sErr))
+                end
+                kernel.tProcessTable[nChildPid].status = "dead"
+            end)
+        elseif type(vCodeOrPath) == "string" then
+            local sCode, sCodeErr =
+                kernel.syscalls.vfs_read_file(0, vCodeOrPath)
+            if not sCode then return nil, sCodeErr end
+            if g_oPreempt and nRing >= 2.5 then
+                local sI, nI =
+                    g_oPreempt.instrument(sCode, vCodeOrPath)
+                if nI > 0 then sCode = sI end
+            end
+            local fChunk, sLE =
+                load(sCode, "@" .. vCodeOrPath, "t", tChildSandbox)
+            if not fChunk then return nil, sLE end
+            coChild = coroutine.create(function()
+                local bOk, sErr = pcall(fChunk)
+                if not bOk then
+                    kprint("fail", "vfork child " .. nChildPid ..
+                        " crashed: " .. tostring(sErr))
+                end
+                kernel.tProcessTable[nChildPid].status = "dead"
+            end)
+        else
+            return nil, "vfork: argument must be function or path"
+        end
+
+        local sSyn = fGenerateSynapseToken()
+
+        kernel.tProcessTable[nChildPid] = {
+            co = coChild, status = "ready", ring = nRing,
+            parent = nParentPid, env = tChildSandbox,
+            fds = {}, wait_queue = {}, run_queue = {},
+            uid = tParent.uid, synapseToken = sSyn,
+            threads = {}, is_vfork = true,
+            nCpuTime = 0, nPreemptCount = 0,
+            nLastSlice = 0, nMaxSlice = 0,
+            nWatchdogStrikes = 0,
+        }
+        kernel.tPidMap[coChild]     = nChildPid
+        kernel.tRings[nChildPid]    = nRing
+
+        if g_oObManager then
+            g_oObManager.ObInitializeProcess(nChildPid)
+            g_oObManager.ObInheritHandles(
+                nParentPid, nChildPid, sSyn)
+        end
+        if g_oIpc then
+            g_oIpc.InitProcessSignals(nChildPid)
+        end
+
+        kprint("proc", "vfork", {
+            child = nChildPid, parent = nParentPid,
+            ring = nRing, cow = true,
+        })
+        return nChildPid
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
 kernel.tSyscallTable["process_wait"] = {
     func = function(nPid, nTargetPid)
         if not kernel.tProcessTable[nTargetPid] then
@@ -2729,7 +2826,7 @@ kernel.tSyscallTable["process_list"] = {
                 table.insert(tResult, {
                     pid = nProcPid,
                     parent = tProc.parent or 0,
-                    ring = math.floor(tProc.ring or -1),   -- FIX: ensure Lua 5.3 integer for safe %d formatting
+                    ring = math.floor(tProc.ring or -1),   -- ensure Lua 5.3 integer for safe %d formatting
                     status = tProc.status or "?",
                     uid = tProc.uid or -1,
                     image = sImage
@@ -3633,6 +3730,148 @@ kernel.tSyscallTable["ke_ipc_stats"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+local function fDbusPublish(sChannel, tData, nPubPid)
+    local tCh = g_tDbusChannels[sChannel]
+    if not tCh then return 0 end
+    g_nDbusSeq = g_nDbusSeq + 1
+    local nSent = 0
+    for nSubPid in pairs(tCh.subscribers) do
+        local tSub = kernel.tProcessTable[nSubPid]
+        if tSub and tSub.status ~= "dead" then
+            if not g_tDbusInboxes[nSubPid] then
+                g_tDbusInboxes[nSubPid] = {}
+            end
+            local tQ = g_tDbusInboxes[nSubPid]
+            if #tQ < DBUS_MAX_INBOX then
+                tQ[#tQ + 1] = {
+                    channel   = sChannel,
+                    data      = tData,
+                    seq       = g_nDbusSeq,
+                    publisher = nPubPid or 0,
+                    time      = raw_computer.uptime(),
+                }
+                nSent = nSent + 1
+                -- Wake if blocked on dbus_poll
+                if tSub.status == "sleeping"
+                   and tSub.wait_reason == "dbus_poll" then
+                    tSub.status = "ready"
+                end
+            end
+        end
+    end
+    return nSent
+end
+
+kernel.tSyscallTable["dbus_create_channel"] = {
+    func = function(nPid, sChannel)
+        if type(sChannel) ~= "string" or #sChannel == 0 then
+            return nil, "Channel name required"
+        end
+        if g_tDbusChannels[sChannel] then
+            return true  -- idempotent
+        end
+        local nCh = 0
+        for _ in pairs(g_tDbusChannels) do nCh = nCh + 1 end
+        if nCh >= DBUS_MAX_CHANNELS then
+            return nil, "Channel limit reached"
+        end
+        g_tDbusChannels[sChannel] = { subscribers = {} }
+        return true
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
+kernel.tSyscallTable["dbus_subscribe"] = {
+    func = function(nPid, sChannel)
+        if not g_tDbusChannels[sChannel] then
+            -- Auto-create
+            g_tDbusChannels[sChannel] = { subscribers = {} }
+        end
+        g_tDbusChannels[sChannel].subscribers[nPid] = true
+        return true
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
+kernel.tSyscallTable["dbus_unsubscribe"] = {
+    func = function(nPid, sChannel)
+        local tCh = g_tDbusChannels[sChannel]
+        if tCh then tCh.subscribers[nPid] = nil end
+        return true
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
+kernel.tSyscallTable["dbus_publish"] = {
+    func = function(nPid, sChannel, tData)
+        if type(sChannel) ~= "string" then
+            return nil, "Channel must be string"
+        end
+        -- Sanitise data from Ring ≥ 2.5
+        local tSafe = tData
+        if kernel.tRings[nPid] >= 2.5 and type(tData) == "table" then
+            tSafe = deepSanitize(tData)
+        end
+        return fDbusPublish(sChannel, tSafe, nPid)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
+kernel.tSyscallTable["dbus_poll"] = {
+    func = function(nPid, nTimeoutMs)
+        local tQ = g_tDbusInboxes[nPid]
+        if tQ and #tQ > 0 then
+            return table.remove(tQ, 1)
+        end
+        -- Block until a message arrives or timeout
+        local tProc = kernel.tProcessTable[nPid]
+        tProc.status      = "sleeping"
+        tProc.wait_reason  = "dbus_poll"
+        tProc._sleepStart  = raw_computer.uptime()
+        if nTimeoutMs then
+            -- Use IPC timeout registry if available
+            if g_oIpc then
+                local nDL = raw_computer.uptime() + nTimeoutMs / 1000
+                -- lightweight: just check after yield
+            end
+        end
+        local vResult = coroutine.yield()
+        -- After waking, check inbox again
+        tQ = g_tDbusInboxes[nPid]
+        if tQ and #tQ > 0 then
+            return table.remove(tQ, 1)
+        end
+        return nil  -- timeout or spurious wake
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
+kernel.tSyscallTable["dbus_peek"] = {
+    func = function(nPid)
+        local tQ = g_tDbusInboxes[nPid]
+        return tQ and #tQ or 0
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
+kernel.tSyscallTable["dbus_list_channels"] = {
+    func = function(nPid)
+        local tResult = {}
+        for sName, tCh in pairs(g_tDbusChannels) do
+            local nSubs = 0
+            for _ in pairs(tCh.subscribers) do nSubs = nSubs + 1 end
+            tResult[#tResult + 1] = {
+                name = sName, subscribers = nSubs,
+            }
+        end
+        table.sort(tResult, function(a, b)
+            return a.name < b.name
+        end)
+        return tResult
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3},
+}
+
 -- ==========================================
 -- I/O COMPLETION PORT SYSCALLS
 -- ==========================================
@@ -3814,7 +4053,7 @@ kernel.tSyscallTable["mem_info"] = {
 
                 table.insert(tProcs, {
                     pid     = nProcPid,
-                    ring    = 3,  -- FIX: integer-safe
+                    ring    = 3,  -- integer-safe
                     status  = tProc.status or "?",
                     modules = nModules,
                     handles = nHandles,
@@ -5166,6 +5405,133 @@ if g_oGdi then
         
 end
 
+-- =============================================
+-- SWAP SPACE — Serialise idle Ring 3 process
+-- state to disk and free RAM.  HMAC-signed to
+-- prevent on-disk tampering.
+-- =============================================
+
+do
+    -- Derive per-boot swap HMAC key
+    if g_oSha256Lib then
+        local sS = tostring(raw_computer.uptime())
+            .. tostring(math.random(0, 0x7FFFFFFF))
+            .. tostring(raw_computer.freeMemory())
+        g_sSwapKey = g_oSha256Lib.digest(sS)
+        kprint("ok", "Swap space HMAC key derived (per-boot)")
+    end
+end
+
+-- Simple table serialiser (strings, numbers, booleans only)
+local function fSerializeBasic(t)
+    local tP = {"{"}
+    for k, v in pairs(t) do
+        local sK = type(k) == "string"
+            and ("[" .. string.format("%q", k) .. "]=") or ""
+        local sV
+        if type(v) == "string" then sV = string.format("%q", v)
+        elseif type(v) == "number" then sV = tostring(v)
+        elseif type(v) == "boolean" then sV = tostring(v)
+        else sV = "nil" end
+        tP[#tP + 1] = sK .. sV .. ","
+    end
+    tP[#tP + 1] = "}"
+    return table.concat(tP)
+end
+
+function kernel.fSwapOut(nPid)
+    local tProc = kernel.tProcessTable[nPid]
+    if not tProc then return false end
+    if tProc.ring < 3 then return false end
+    if tProc.status ~= "sleeping" then return false end
+    if tProc._swapped then return false end
+
+    -- Collect module keys (the actual data is freed)
+    local tModKeys = {}
+    if tProc._moduleCache then
+        for sK in pairs(tProc._moduleCache) do
+            tModKeys[#tModKeys + 1] = sK
+        end
+    end
+
+    -- Serialise ONLY the module key list
+    local sPayload = "return " .. fSerializeBasic(tModKeys)
+
+    -- HMAC integrity tag
+    local sHmac = string.rep("\0", 32)
+    if g_oSha256Lib and g_sSwapKey then
+        sHmac = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
+    end
+
+    pcall(function() g_oPrimitiveFs.makeDirectory("/tmp") end)
+    pcall(function() g_oPrimitiveFs.makeDirectory(SWAP_DIR) end)
+
+    local sPath = SWAP_DIR .. "/p" .. nPid .. ".swp"
+    local h = g_oPrimitiveFs.open(sPath, "w")
+    if not h then return false end
+    g_oPrimitiveFs.write(h, SWAP_MAGIC .. sHmac .. sPayload)
+    g_oPrimitiveFs.close(h)
+
+    -- Free per-process module cache → GC reclaims memory
+    tProc._moduleCache = nil
+    tProc._swapped     = true
+    tProc._swapPath    = sPath
+
+    kprint("mem", string.format(
+        "Swap OUT PID %d (%d modules freed)", nPid, #tModKeys))
+    return true
+end
+
+function kernel.fSwapIn(nPid)
+    local tProc = kernel.tProcessTable[nPid]
+    if not tProc or not tProc._swapped then return true end
+
+    local sPath = tProc._swapPath
+    if not sPath then tProc._swapped = false; return true end
+
+    local h = g_oPrimitiveFs.open(sPath, "r")
+    if not h then
+        kprint("warn", "Swap file missing PID " .. nPid)
+        tProc._swapped = false; return true
+    end
+    local tC = {}
+    while true do
+        local s = g_oPrimitiveFs.read(h, math.huge)
+        if not s then break end; tC[#tC + 1] = s
+    end
+    g_oPrimitiveFs.close(h)
+    local sData = table.concat(tC)
+
+    if #sData < 36 or sData:sub(1, 4) ~= SWAP_MAGIC then
+        kprint("sec", "SWAP CORRUPT PID " .. nPid)
+        pcall(g_oPrimitiveFs.remove, sPath)
+        tProc._swapped = false
+        tProc.status = "dead"
+        return false, "Swap file corrupt"
+    end
+
+    local sStored  = sData:sub(5, 36)
+    local sPayload = sData:sub(37)
+
+    if g_oSha256Lib and g_sSwapKey then
+        local sExpect = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
+        if not g_oSha256Lib.constEq(sStored, sExpect) then
+            kprint("sec", "SWAP HMAC MISMATCH PID " .. nPid ..
+                " — TAMPERED, killing process")
+            pcall(g_oPrimitiveFs.remove, sPath)
+            tProc._swapped = false
+            tProc.status = "dead"
+            return false, "Swap integrity failure"
+        end
+    end
+
+    pcall(g_oPrimitiveFs.remove, sPath)
+    tProc._swapped  = false
+    tProc._swapPath = nil
+    -- Module cache is nil; require() will reload on demand
+    kprint("mem", "Swap IN PID " .. nPid)
+    return true
+end
 
 -- =================================================================
 -- MAIN KERNEL EVENT LOOP   Preemptive Round-Robin Scheduler
@@ -5218,13 +5584,30 @@ while true do
             tProcess.resume_args = nil
 
             local bIsOk, sErrOrSignalName
+
+            -- Declare locals BEFORE the goto so the jump
+            -- doesn't cross into their scope (Lua 5.2+ rule).
+            local nSliceTime = 0
+            local nSliceMs = 0
+
+            -- Swap in if previously paged out
+            if tProcess._swapped then
+                local bSwOk, sSwErr = kernel.fSwapIn(nPid)
+                if not bSwOk then
+                    kprint("fail", "Swap-in failed PID " .. nPid ..
+                        ": " .. tostring(sSwErr))
+                    tProcess.status = "dead"
+                    goto continue_sched
+                end
+            end
+
             if tResumeParams then
                 bIsOk, sErrOrSignalName = coroutine.resume(tProcess.co, true, table.unpack(tResumeParams))
             else
                 bIsOk, sErrOrSignalName = coroutine.resume(tProcess.co)
             end
 
-            local nSliceTime = raw_computer.uptime() - nResumeStart
+            nSliceTime = raw_computer.uptime() - nResumeStart   -- was: local nSliceTime = ...
 
             g_nCurrentPid = nKernelPid
 
@@ -5237,7 +5620,7 @@ while true do
 
             -- ---------- global scheduler accounting ----------
             g_tSchedStats.nTotalResumes = g_tSchedStats.nTotalResumes + 1
-            local nSliceMs = nSliceTime * 1000
+            nSliceMs = nSliceTime * 1000                        -- was: local nSliceMs = ...
             if nSliceMs > g_tSchedStats.nMaxSliceMs then
                 g_tSchedStats.nMaxSliceMs = nSliceMs
             end
@@ -5253,6 +5636,11 @@ while true do
                 tProcess.status = "ready"
                 tProcess.nPreemptCount = (tProcess.nPreemptCount or 0) + 1
                 g_tSchedStats.nPreemptions = g_tSchedStats.nPreemptions + 1
+            end
+
+            -- ---------- track sleep start time ----------
+            if tProcess.status == "sleeping" then
+                tProcess._sleepStart = raw_computer.uptime()
             end
 
             -- ---------- natural exit ----------
@@ -5290,11 +5678,18 @@ while true do
                     kernel.panic("CRITICAL SERVICE DIED: Pipeline Manager")
                 end
 
-                if g_oIpc then
-                    g_oIpc.NotifyChildDeath(nPid)
-                end
-
                 if g_oAwc then g_oAwc.CleanupProcess(nPid) end
+
+                -- D-Bus cleanup: remove from all channel subscriptions
+                for _, tDbCh in pairs(g_tDbusChannels) do
+                    tDbCh.subscribers[nPid] = nil
+                end
+                g_tDbusInboxes[nPid] = nil
+
+                -- EXSi cleanup: destroy all enclaves owned by this process
+                if g_oExsi then
+                    g_oExsi.CleanupProcess(nPid)
+                end
 
                 for _, nWaiterPid in ipairs(tProcess.wait_queue or {}) do
                     local tWaiter = kernel.tProcessTable[nWaiterPid]
@@ -5312,10 +5707,13 @@ while true do
                         end
                     end
                 end
+
                 kernel.tPidMap[tProcess.co] = nil
                 kernel.tRings[nPid] = nil
                 kernel.tProcessTable[nPid] = nil
             end
+
+            ::continue_sched::
 
             -- ======================================================
             -- CRITICAL:  Reset the OC "too long without yielding"
@@ -5342,6 +5740,15 @@ while true do
                 if not bIntConsumed then
                     pcall(kernel.syscalls.signal_send, nKernelPid, kernel.nPipelinePid,
                         "os_event", sIntEvt, ip1, ip2, ip3, ip4, ip5)
+                end
+
+                -- ═══ D-BUS: system events from intermediate pulls ═══
+                if sIntEvt == "component_added" then
+                    fDbusPublish("system.component.added",
+                        { address = ip1, type = ip2 }, 0)
+                elseif sIntEvt == "component_removed" then
+                    fDbusPublish("system.component.removed",
+                        { address = ip1, type = ip2 }, 0)
                 end
             end
 
@@ -5373,10 +5780,6 @@ while true do
 
     if g_oGdi then g_oGdi.Composite() end
 
-    if g_oExsi then
-        g_oExsi.CleanupProcess(nPid)
-    end
-
     -- ====== OOM KILLER ======
     local FREE_MEMORY_FLOOR = 2048
     local nFreeMem = computer.freeMemory()
@@ -5395,7 +5798,20 @@ while true do
             if g_oObManager then
                 g_oObManager.ObDestroyProcess(nVictimPid)
             end
-            -- fKernelGC("collect")
+        end
+    end
+
+    -- ═══ SWAP: evict long-sleeping Ring 3 processes ═══
+    if raw_computer.freeMemory() < SWAP_MEM_FLOOR then
+        local nNow = raw_computer.uptime()
+        for nSwPid, tSwProc in pairs(kernel.tProcessTable) do
+            if tSwProc.status == "sleeping"
+               and tSwProc.ring >= 3
+               and not tSwProc._swapped
+               and tSwProc._sleepStart
+               and (nNow - tSwProc._sleepStart) > SWAP_IDLE_SEC then
+                pcall(kernel.fSwapOut, nSwPid)
+            end
         end
     end
 
@@ -5425,6 +5841,15 @@ while true do
             pcall(kernel.syscalls.signal_send, nKernelPid,
                 kernel.nPipelinePid, "os_event",
                 sEventName, p1, p2, p3, p4, p5)
+        end
+
+        -- ═══ D-BUS: publish system events ═══
+        if sEventName == "component_added" then
+            fDbusPublish("system.component.added",
+                { address = p1, type = p2 }, 0)
+        elseif sEventName == "component_removed" then
+            fDbusPublish("system.component.removed",
+                { address = p1, type = p2 }, 0)
         end
     end
 end

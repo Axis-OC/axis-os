@@ -2,9 +2,9 @@
 -- /lib/pipeline_manager.lua
 -- AxisOS Pipeline Manager — Thin Coordinator
 -- v4: Split architecture. VFS I/O delegated to io_manager,
---    permission checks to security_monitor, session bootstrap
---    to session_manager. PM retains boot sequence, log plumbing,
---    signal buffering, and driver-load (long-wait) handling.
+--     permission checks to security_monitor, session bootstrap
+--     to session_manager. PM retains boot sequence, log plumbing,
+--     signal buffering, and driver-load (long-wait) handling.
 --
 
 local syscall = syscall
@@ -303,7 +303,7 @@ local function _drainKernelLog()
     local sNewLog = syscall("kernel_get_boot_log")
     if not sNewLog or #sNewLog == 0 then return end
     if g_nRingFsId then
-        pcall(function() _doInternalWrite(g_nRingFsId, sNewLog .. "\n") end)
+        pcall(function() _doInternalWrite(g_nRingFsId, sNewLog) end)
     end
     _writeToLogFiles(sNewLog)
 end
@@ -411,6 +411,7 @@ end
 local function __scandrvload()
     syscall("kernel_log", "[PM] Loading TTY Driver explicitly...")
     syscall("signal_send", nDkmsPid, "load_driver_path", "/drivers/tty.sys.lua")
+    _drainKernelLog()
     local deadline = computer.uptime() + 0.0
     while computer.uptime() < deadline do syscall("process_yield") end
 
@@ -680,6 +681,7 @@ local function process_autoload()
             syscall("kernel_log", "[PM] FAIL: '" .. tEntry.name ..
                 "' — status " .. tostring(nStatus))
         end
+        _drainKernelLog()
         ::next_driver::
     end
     syscall("kernel_log", string.format(

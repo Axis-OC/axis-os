@@ -1,23 +1,16 @@
 --
 -- /lib/vi/highlight.lua
--- xvi Syntax Highlight Engine
---
--- Language files: /lib/vi/lang_<ext>.lua
--- Format:
---  return {
---    name         = "Lua",
---    lineComment  = "--",
---    blockComment = {"--[[", "]]"},    -- or nil
---    operators    = "+-*/%=<>~#.;,",
---    keywords     = { ["if"]=1, ["end"]=1, ... },
---    builtins     = { ["print"]=2, ["nil"]=2, ... },
---  }
--- Category 1 = keyword (blue), 2 = builtin (cyan)
+-- xevi Syntax Highlight Engine v2
+-- Contextual semantic tokens: function names, field/method access,
+-- doc comments, labels, string escapes.  Zero extra allocation per line.
 --
 
 local H = {}
 
--- Palette
+-- =============================================
+-- PALETTE
+-- =============================================
+
 H.C_DEFAULT  = 0xFFFFFF
 H.C_KEYWORD  = 0x5599FF
 H.C_BUILTIN  = 0x55DDDD
@@ -25,13 +18,23 @@ H.C_STRING   = 0xDD9955
 H.C_NUMBER   = 0x99DD77
 H.C_COMMENT  = 0x777777
 H.C_OPERATOR = 0xAAAAAA
+H.C_FUNCNAME = 0xDDDD55  -- function definition & method call names
+H.C_FIELD    = 0xCCBBAA  -- table.field access
+H.C_ESCAPE   = 0xCC7744  -- \n \t etc inside strings
+H.C_LABEL    = 0xCC88DD  -- ::label::
+H.C_SELF     = 0x55BBBB  -- self keyword
+H.C_DOCCOMM  = 0x6699AA  -- --- doc comments
 
 local tCatColor = {
   [1] = H.C_KEYWORD,
   [2] = H.C_BUILTIN,
+  [3] = H.C_SELF,
 }
 
--- Universal (no lang file needed)
+-- =============================================
+-- UNIVERSAL (no lang file needed)
+-- =============================================
+
 H.UNIVERSAL = {
   name = "Text",
   lineComment  = nil,
@@ -48,8 +51,9 @@ function H.detect(sPath)
   local sExt = sPath:match("%.([^%.]+)$")
   if not sExt then return H.UNIVERSAL end
   sExt = sExt:lower()
-  -- cfg files are usually Lua tables
   if sExt == "cfg" then sExt = "lua" end
+  -- Map .log and .vbl to the log language definition
+  if sExt == "log" or sExt == "vbl" or sExt == "dump" then sExt = "log" end
   if tLangCache[sExt] then return tLangCache[sExt] end
   local bOk, tLang = pcall(require, "vi/lang_" .. sExt)
   if bOk and type(tLang) == "table" then
@@ -61,9 +65,7 @@ function H.detect(sPath)
 end
 
 -- =============================================
--- BLOCK COMMENT STATE
--- Returns tState[n] = true if line n starts
--- inside a block comment.
+-- BLOCK COMMENT STATE  (unchanged)
 -- =============================================
 
 function H.computeState(tLines, tLang)
@@ -72,21 +74,17 @@ function H.computeState(tLines, tLang)
     for i = 1, #tLines do tState[i] = false end
     return tState
   end
-
   local sBS = tLang.blockComment[1]
   local sBE = tLang.blockComment[2]
   local sLC = tLang.lineComment
   local bIn = false
-
   for i = 1, #tLines do
     tState[i] = bIn
-    local s = tLines[i]
-    local p = 1
+    local s = tLines[i]; local p = 1
     while p <= #s do
       if bIn then
         local e = s:find(sBE, p, true)
-        if e then bIn = false; p = e + #sBE
-        else break end
+        if e then bIn = false; p = e + #sBE else break end
       else
         if sBS and p + #sBS - 1 <= #s and s:sub(p, p + #sBS - 1) == sBS then
           bIn = true; p = p + #sBS
@@ -99,9 +97,7 @@ function H.computeState(tLines, tLang)
             elseif s:sub(p, p) == q then p = p + 1; break
             else p = p + 1 end
           end
-        else
-          p = p + 1
-        end
+        else p = p + 1 end
       end
     end
   end
@@ -116,16 +112,13 @@ local function isId(b)
   return (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
       or (b >= 48 and b <= 57) or b == 95
 end
-
 local function isDig(b) return b >= 48 and b <= 57 end
-
 local function isHex(b)
   return isDig(b) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102)
 end
 
 -- =============================================
--- PER-CHARACTER COLORIZE
--- Returns array: tColors[charIndex] = fg_color
+-- PER-CHARACTER COLORIZE  (enhanced v2)
 -- =============================================
 
 function H.colorize(sLine, tLang, bInBlock)
@@ -135,6 +128,11 @@ function H.colorize(sLine, tLang, bInBlock)
   local tC = {}
   for i = 1, nLen do tC[i] = H.C_DEFAULT end
 
+  -- Use custom colorizer if the lang provides one (for log files)
+  if tLang and tLang.colorize then
+    return tLang.colorize(sLine, H)
+  end
+
   local sBS = tLang.blockComment and tLang.blockComment[1]
   local sBE = tLang.blockComment and tLang.blockComment[2]
   local sLC = tLang.lineComment
@@ -143,11 +141,13 @@ function H.colorize(sLine, tLang, bInBlock)
   local sOp = tLang.operators or ""
   local p = 1
 
+  local nCtx = 0
+  local nDotCtx = 0
+
   local function paint(nFrom, nTo, nColor)
     for i = nFrom, math.min(nTo, nLen) do tC[i] = nColor end
   end
 
-  -- Start inside block comment?
   if bInBlock then
     if sBE then
       local e = sLine:find(sBE, 1, true)
@@ -168,29 +168,23 @@ function H.colorize(sLine, tLang, bInBlock)
     local c = sLine:sub(p, p)
     local b = c:byte()
 
-    -- Block comment start
     if sBS and p + #sBS - 1 <= nLen and sLine:sub(p, p + #sBS - 1) == sBS then
       local nStart = p
       if sBE then
         local e = sLine:find(sBE, p + #sBS, true)
-        if e then
-          paint(nStart, e + #sBE - 1, H.C_COMMENT)
-          p = e + #sBE
-        else
-          paint(nStart, nLen, H.C_COMMENT)
-          p = nLen + 1
-        end
-      else
-        paint(nStart, nLen, H.C_COMMENT)
-        p = nLen + 1
-      end
+        if e then paint(nStart, e + #sBE - 1, H.C_COMMENT); p = e + #sBE
+        else paint(nStart, nLen, H.C_COMMENT); p = nLen + 1 end
+      else paint(nStart, nLen, H.C_COMMENT); p = nLen + 1 end
+      nCtx = 0; nDotCtx = 0
 
-    -- Line comment
     elseif sLC and p + #sLC - 1 <= nLen and sLine:sub(p, p + #sLC - 1) == sLC then
-      paint(p, nLen, H.C_COMMENT)
+      local nComColor = H.C_COMMENT
+      if sLC == "--" and p + 2 <= nLen and sLine:sub(p, p + 2) == "---" then
+        nComColor = H.C_DOCCOMM
+      end
+      paint(p, nLen, nComColor)
       p = nLen + 1
 
-    -- Strings
     elseif c == '"' or c == "'" then
       local nStart = p
       local q = c; p = p + 1
@@ -200,11 +194,18 @@ function H.colorize(sLine, tLang, bInBlock)
         else p = p + 1 end
       end
       paint(nStart, p - 1, H.C_STRING)
+      local ep = nStart + 1
+      while ep < p - 1 do
+        if sLine:sub(ep, ep) == '\\' and ep + 1 < p then
+          tC[ep] = H.C_ESCAPE
+          tC[ep + 1] = H.C_ESCAPE
+          ep = ep + 2
+        else ep = ep + 1 end
+      end
+      nCtx = 0; nDotCtx = 0
 
-    -- Long strings [[ ]], [=[ ]=]
     elseif c == '[' and p < nLen then
-      local nEq = 0
-      local nProbe = p + 1
+      local nEq = 0; local nProbe = p + 1
       while nProbe <= nLen and sLine:sub(nProbe, nProbe) == '=' do
         nEq = nEq + 1; nProbe = nProbe + 1
       end
@@ -212,18 +213,24 @@ function H.colorize(sLine, tLang, bInBlock)
         local nStart = p
         local sClose = ']' .. string.rep('=', nEq) .. ']'
         local e = sLine:find(sClose, nProbe + 1, true)
-        if e then
-          paint(nStart, e + #sClose - 1, H.C_STRING)
-          p = e + #sClose
-        else
-          paint(nStart, nLen, H.C_STRING)
-          p = nLen + 1
-        end
+        if e then paint(nStart, e + #sClose - 1, H.C_STRING); p = e + #sClose
+        else paint(nStart, nLen, H.C_STRING); p = nLen + 1 end
+        nCtx = 0; nDotCtx = 0
       else
         tC[p] = H.C_OPERATOR; p = p + 1
+        nCtx = 0; nDotCtx = 0
       end
 
-    -- Numbers
+    elseif c == ':' and p + 1 <= nLen and sLine:sub(p + 1, p + 1) == ':' then
+      local nStart = p; p = p + 2
+      while p <= nLen and isId(sLine:byte(p)) do p = p + 1 end
+      if p + 1 <= nLen and sLine:sub(p, p + 1) == '::' then
+        paint(nStart, p + 1, H.C_LABEL); p = p + 2
+      else
+        paint(nStart, p - 1, H.C_LABEL)
+      end
+      nCtx = 0; nDotCtx = 0
+
     elseif isDig(b) or (c == '.' and p < nLen and isDig(sLine:byte(p + 1))) then
       local nStart = p
       if c == '0' and p < nLen and (sLine:sub(p+1,p+1) == 'x' or sLine:sub(p+1,p+1) == 'X') then
@@ -238,19 +245,50 @@ function H.colorize(sLine, tLang, bInBlock)
         end
       end
       paint(nStart, p - 1, H.C_NUMBER)
+      nCtx = 0; nDotCtx = 0
 
-    -- Identifiers
     elseif isId(b) and not isDig(b) then
       local nStart = p
       while p <= nLen and isId(sLine:byte(p)) do p = p + 1 end
       local sWord = sLine:sub(nStart, p - 1)
-      local nCat = tKW[sWord] or tBI[sWord]
-      if nCat then paint(nStart, p - 1, tCatColor[nCat] or H.C_KEYWORD) end
 
-    -- Operators
+      if nCtx == 1 then
+        paint(nStart, p - 1, H.C_FUNCNAME)
+      elseif nDotCtx == 2 then
+        paint(nStart, p - 1, H.C_FUNCNAME)
+        nDotCtx = 0
+      elseif nDotCtx == 1 then
+        paint(nStart, p - 1, H.C_FIELD)
+        nDotCtx = 0
+      else
+        local nCat = tKW[sWord] or tBI[sWord]
+        if nCat then
+          paint(nStart, p - 1, tCatColor[nCat] or H.C_KEYWORD)
+        end
+        if tKW[sWord] == 1 and sWord == "function" then
+          nCtx = 1
+        else
+          nCtx = 0
+        end
+        nDotCtx = 0
+      end
+
     elseif sOp:find(c, 1, true) then
-      tC[p] = H.C_OPERATOR; p = p + 1
-
+      tC[p] = H.C_OPERATOR
+      if c == '.' then
+        if nCtx == 0 then nDotCtx = 1 end
+      elseif c == ':' then
+        if nCtx == 0 then nDotCtx = 2 end
+      elseif c == '(' then
+        nCtx = 0; nDotCtx = 0
+      elseif c == ')' or c == ',' or c == ';' or c == '='
+          or c == '{' or c == '}' or c == '[' or c == ']' then
+        nCtx = 0; nDotCtx = 0
+      else
+        if nCtx == 1 then nCtx = 0 end
+        nDotCtx = 0
+      end
+      p = p + 1
     else
       p = p + 1
     end
@@ -260,10 +298,7 @@ function H.colorize(sLine, tLang, bInBlock)
 end
 
 -- =============================================
--- VISIBLE SEGMENTS
--- Takes a full line, returns {text, fg, bg}
--- segments for the visible [nLeft..nLeft+nW-1] range.
--- Groups same-color runs.
+-- VISIBLE SEGMENTS  (unchanged API)
 -- =============================================
 
 function H.segments(sLine, nLeft, nW, tLang, bInBlock)

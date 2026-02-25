@@ -569,11 +569,17 @@ local function executeSimpleCommand(tArgs, sOutFile, bAppend)
         syscall("ob_set_standard_handle", myPid, -11, sOrigStdout)
     end
 
-    if pid then
+  if pid then
         syscall("process_wait", pid)
+        -- Reset TTY state in case child crashed in raw/nonblock/alt mode
+        pcall(oFs.deviceControl, hStdin, "set_mode", {"cooked"})
+        pcall(oFs.deviceControl, hStdin, "set_nonblock", {false})
+        pcall(oFs.deviceControl, hStdin, "leave_alt_screen", {})
     else
         oFs.write(hStderr, "sh: " .. tostring(err) .. "\n")
     end
+    
+    
 
     if hRedirectFile then
         oFs.close(hRedirectFile)
@@ -692,6 +698,11 @@ local function executePipeline(tSegments)
     if sPrevTempPath then
         oFs.remove(sPrevTempPath)
     end
+
+    -- Reset TTY state in case any pipeline stage crashed
+    pcall(oFs.deviceControl, hStdin, "set_mode", {"cooked"})
+    pcall(oFs.deviceControl, hStdin, "set_nonblock", {false})
+    pcall(oFs.deviceControl, hStdin, "leave_alt_screen", {})
 
     return true
 end
