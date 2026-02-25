@@ -3,14 +3,14 @@
 -- AxisOS EFI Partition Manager — Third-Layer Boot Encryption
 --
 -- Handles:
---   • HMAC-keystream XOR encryption/decryption
---   • Key derivation from SecureBoot private key + machine binding
---   • EFI header/key-block pack/unpack
---   • Machine binding computation
---   • Content integrity verification
+--  • HMAC-keystream XOR encryption/decryption
+--  • Key derivation from SecureBoot private key + machine binding
+--  • EFI header/key-block pack/unpack
+--  • Machine binding computation
+--  • Content integrity verification
 --
 -- The EFI partition encrypts itself with a key derived from:
---   decryption_key = HMAC-SHA256(secureboot_key, machine_binding)
+--  decryption_key = HMAC-SHA256(secureboot_key, machine_binding)
 -- This means the partition can ONLY be decrypted on the correct
 -- machine with the correct SecureBoot key.
 --

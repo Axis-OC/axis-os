@@ -3,15 +3,15 @@
 -- AxisOS Kernel Message Buffer
 --
 -- Usage:
---   dmesg                    Show all messages
---   dmesg -n <count>         Last N messages
---   dmesg -l <level>         Filter by level
---   dmesg -f                 Follow (live tail)
---   dmesg -c                 Clear buffer (Ring 0-1 only)
---   dmesg -s                 Show statistics
---   dmesg -T                 Human-readable timestamps
---   dmesg --levels           List available log levels
---   dmesg -w                 Wrap long lines (default: truncate)
+--  dmesg                    Show all messages
+--  dmesg -n <count>         Last N messages
+--  dmesg -l <level>         Filter by level
+--  dmesg -f                 Follow (live tail)
+--  dmesg -c                 Clear buffer (Ring 0-1 only)
+--  dmesg -s                 Show statistics
+--  dmesg -T                 Human-readable timestamps
+--  dmesg --levels           List available log levels
+--  dmesg -w                 Wrap long lines (default: truncate)
 --
 
 local tArgs = env.ARGS or {}

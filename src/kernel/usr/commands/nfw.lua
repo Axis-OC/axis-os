@@ -4,15 +4,15 @@
 -- (name inspired by ufw — "netfilter wrapper")
 --
 -- Usage:
---   nfw status               Show firewall status
---   nfw rules                List active rules
---   nfw hosts                List hosts file entries
---   nfw audit [count]        Show recent audit log
---   nfw stats                Per-process connection stats
---   nfw reload               Reload rules from disk
---   nfw enable / disable     Toggle firewall
---   nfw limit <n>            Set per-UID connection limit
---   nfw test <url>           Test if a URL would be allowed
+--  nfw status               Show firewall status
+--  nfw rules                List active rules
+--  nfw hosts                List hosts file entries
+--  nfw audit [count]        Show recent audit log
+--  nfw stats                Per-process connection stats
+--  nfw reload               Reload rules from disk
+--  nfw enable / disable     Toggle firewall
+--  nfw limit <n>            Set per-UID connection limit
+--  nfw test <url>           Test if a URL would be allowed
 --
 
 local fs  = require("filesystem")

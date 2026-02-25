@@ -4,14 +4,14 @@
 --
 -- Language files: /lib/vi/lang_<ext>.lua
 -- Format:
---   return {
---     name         = "Lua",
---     lineComment  = "--",
---     blockComment = {"--[[", "]]"},    -- or nil
---     operators    = "+-*/%=<>~#.;,",
---     keywords     = { ["if"]=1, ["end"]=1, ... },
---     builtins     = { ["print"]=2, ["nil"]=2, ... },
---   }
+--  return {
+--    name         = "Lua",
+--    lineComment  = "--",
+--    blockComment = {"--[[", "]]"},    -- or nil
+--    operators    = "+-*/%=<>~#.;,",
+--    keywords     = { ["if"]=1, ["end"]=1, ... },
+--    builtins     = { ["print"]=2, ["nil"]=2, ... },
+--  }
 -- Category 1 = keyword (blue), 2 = builtin (cyan)
 --
 

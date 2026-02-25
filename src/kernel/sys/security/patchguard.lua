@@ -3,11 +3,11 @@
 -- AxisOS Kernel Integrity Monitor (PatchGuard) v3
 --
 -- v3 additions over v2:
---   • Pure-Lua /lib/sha256 hashing (no data card dependency)
---   • XOR-encrypted snapshot hashes (per-boot random key)
---   • Check function rotation (3 equivalent variants, random pick)
---   • Syscall behavior profiling (baseline → anomaly detection)
---   • Mtime-scan ALL files every tick for instantaneous detection
+--  • Pure-Lua /lib/sha256 hashing (no data card dependency)
+--  • XOR-encrypted snapshot hashes (per-boot random key)
+--  • Check function rotation (3 equivalent variants, random pick)
+--  • Syscall behavior profiling (baseline → anomaly detection)
+--  • Mtime-scan ALL files every tick for instantaneous detection
 --
 
 local PG = {}

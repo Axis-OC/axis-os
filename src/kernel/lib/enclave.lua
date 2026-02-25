@@ -6,45 +6,45 @@
 -- No separate driver needed — syscalls are more efficient than IRP dispatch.
 --
 -- Usage:
---   local enc = require("enclave")
+--  local enc = require("enclave")
 --
---   -- Create an enclave from source code
---   local h, mrHash = enc.create([=[
---       local secret = nil
---       return function(method, ...)
---           if method == "store" then
---               secret = select(1, ...)
---               return true
---           elseif method == "retrieve" then
---               return secret ~= nil and "has_secret" or "empty"
---           elseif method == "seal" then
---               return seal(secret or "")
---           elseif method == "unseal" then
---               secret = unseal(select(1, ...))
---               return secret ~= nil
---           end
---       end
---   ]=])
+--  -- Create an enclave from source code
+--  local h, mrHash = enc.create([=[
+--      local secret = nil
+--      return function(method, ...)
+--          if method == "store" then
+--              secret = select(1, ...)
+--              return true
+--          elseif method == "retrieve" then
+--              return secret ~= nil and "has_secret" or "empty"
+--          elseif method == "seal" then
+--              return seal(secret or "")
+--          elseif method == "unseal" then
+--              secret = unseal(select(1, ...))
+--              return secret ~= nil
+--          end
+--      end
+--  ]=])
 --
---   -- Call enclave methods
---   enc.call(h, "store", "my_private_key_data")
---   print(enc.call(h, "retrieve"))  -- "has_secret"
+--  -- Call enclave methods
+--  enc.call(h, "store", "my_private_key_data")
+--  print(enc.call(h, "retrieve"))  -- "has_secret"
 --
---   -- Attestation: verify enclave identity
---   local proof = enc.attest(h)
---   print(proof.sMrEnclave)  -- SHA-256 hex of source code
+--  -- Attestation: verify enclave identity
+--  local proof = enc.attest(h)
+--  print(proof.sMrEnclave)  -- SHA-256 hex of source code
 --
---   -- Seal data to disk (only this enclave on this machine can unseal)
---   local blob = enc.call(h, "seal")
---   -- ... write blob to file ...
---   -- ... later, recreate same enclave, unseal: ...
---   enc.call(h, "unseal", blob)
+--  -- Seal data to disk (only this enclave on this machine can unseal)
+--  local blob = enc.call(h, "seal")
+--  -- ... write blob to file ...
+--  -- ... later, recreate same enclave, unseal: ...
+--  enc.call(h, "unseal", blob)
 --
---   -- List all enclaves
---   local list = enc.list()
+--  -- List all enclaves
+--  local list = enc.list()
 --
---   -- Cleanup
---   enc.destroy(h)
+--  -- Cleanup
+--  enc.destroy(h)
 --
 
 local oEnc = {}

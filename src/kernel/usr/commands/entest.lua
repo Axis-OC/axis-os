@@ -502,7 +502,7 @@ if hSeal then enc.destroy(hSeal); info("Destroyed seal enclave") end
 local tFinal = enc.stats()
 if tFinal then
     info("")
-    info("─── Final EXSi Statistics ───")
+    info("─ Final EXSi Statistics ─")
     info("Total created:    " .. tostring(tFinal.nCreated))
     info("Total destroyed:  " .. tostring(tFinal.nDestroyed))
     info("Total calls:      " .. tostring(tFinal.nCalls))

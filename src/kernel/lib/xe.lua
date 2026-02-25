@@ -76,10 +76,10 @@ local _FULL_BLOCK = 129   -- █: top==bottom, both non-bg
 -- Replaces table.remove(t, 1) pattern which is O(n).
 --
 -- Usage:
---   local ts = XE.timeSeries(120)
---   ts:push(42.5)
---   print(ts:len())     -- 1
---   print(ts:get(1))    -- 42.5
+--  local ts = XE.timeSeries(120)
+--  ts:push(42.5)
+--  print(ts:len())     -- 1
+--  print(ts:get(1))    -- 42.5
 -- =============================================
 
 function XE.timeSeries(nMax)
@@ -1021,9 +1021,9 @@ function XE._M:_flushWithClear()
     -- ================================================================
     -- STEADY STATE: same bg color as last frame.
     -- Process two sets of rows:
-    --   A) Current dirty rows → diff (delta or clear) vs front
-    --   B) Previously dirty rows that are NOT current dirty
-    --      → their old content must be replaced with clear color
+    --  A) Current dirty rows → diff (delta or clear) vs front
+    --  B) Previously dirty rows that are NOT current dirty
+    --     → their old content must be replaced with clear color
     -- ================================================================
 
     -- Set A: current dirty rows
@@ -1427,8 +1427,8 @@ end
 -- Each page has its own buffers + widget state.
 -- Only the active page has RAM-resident buffers.
 -- Inactive pages are either:
---   a) nil'd (pure RAM savings), or
---   b) backed by a GPU snapshot (instant restore).
+--  a) nil'd (pure RAM savings), or
+--  b) backed by a GPU snapshot (instant restore).
 -- =============================================
 
 function XE._M:createPage(sId)
@@ -1486,7 +1486,7 @@ function XE._M:_loadPageState(sId)
     local pg = self._pages[sId]
     if not pg then return end
 
-    --     self:_allocFrontBuffer()
+    --    self:_allocFrontBuffer()
 
     self._wIds         = pg.wIds        or {}
     self._nW           = pg.nW          or 0
@@ -1931,7 +1931,7 @@ end
 --
 -- Resolution: w × (h*2) pixels in a w × h cell region.
 -- Each screen cell encodes two vertical pixels via ▀:
---   fg = top pixel color, bg = bottom pixel color.
+--  fg = top pixel color, bg = bottom pixel color.
 --
 -- Pixel buffer is SPARSE: pix[py] = nil or {[px]=color}.
 -- Only non-background pixels consume memory.
@@ -2058,9 +2058,9 @@ end
 --
 -- For each screen cell, packs two vertical pixels
 -- into one half-block character:
---   top==bottom==bg  →  space (byte 32)
---   top==bottom!=bg  →  █ (byte 129), fg=color
---   top!=bottom      →  ▀ (byte 128), fg=top, bg=bottom
+--  top==bottom==bg  →  space (byte 32)
+--  top==bottom!=bg  →  █ (byte 129), fg=color
+--  top!=bottom      →  ▀ (byte 128), fg=top, bg=bottom
 --
 -- Cost: 6 ops per cell (2 lookups + 1 compare + 3 writes).
 -- 40×10 canvas = 400 cells = ~2400 ops = <1ms in OC Lua.
@@ -2486,17 +2486,17 @@ end
 -- diff engine handles GPU efficiency automatically.
 --
 -- Performance (80×25 screen):
---   Frame 1 (open):  ~2000 backdrop cells + modal content
---                     → diff emits all as changed → ~30 batch entries
---   Frame 2+ (steady): backdrop unchanged (diff = 0 GPU calls),
---                       only modal content changes emit
---   Close:            app content overwrites backdrop naturally,
---                     diff emits the differences
+--  Frame 1 (open):  ~2000 backdrop cells + modal content
+--                    → diff emits all as changed → ~30 batch entries
+--  Frame 2+ (steady): backdrop unchanged (diff = 0 GPU calls),
+--                      only modal content changes emit
+--  Close:            app content overwrites backdrop naturally,
+--                    diff emits the differences
 --
 -- Backdrop modes:
---   "solid"  — fill with dark color (O(W*H) writes, O(0) after frame 1)
---   "dim"    — snapshot front buffer, darken each cell (O(W*H) + 48KB RAM)
---   "none"   — no backdrop (transparent, app content visible)
+--  "solid"  — fill with dark color (O(W*H) writes, O(0) after frame 1)
+--  "dim"    — snapshot front buffer, darken each cell (O(W*H) + 48KB RAM)
+--  "none"   — no backdrop (transparent, app content visible)
 -- =============================================
 
 local function _dimColor(c, factor)

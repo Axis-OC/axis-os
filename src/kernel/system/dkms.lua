@@ -78,6 +78,9 @@ local function fRecordDriverFault(sDriverName, sError)
                 syscall("reg_create_key", sP)
                 syscall("reg_set_value", sP, "Quarantined", "true", "STR")
             end)
+            pcall(function()
+                syscall("reg_flush_hive", "DRV")
+            end)
             syscall("kernel_log",
                 "[DKMS] QUARANTINED: " .. sDriverName)
             return true

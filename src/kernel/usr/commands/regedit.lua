@@ -4,15 +4,15 @@
 -- Alt-screen, batch-rendered, memory-lean.
 --
 -- Controls:
---   Up/Down      Navigate
---   Right/Enter  Expand node / enter values
---   Left         Collapse / go to parent / back to tree
---   Tab          Switch panel (Tree <-> Values)
---   /            Search (type term, Enter applies, Esc cancels)
---   R / F5       Refresh (clears search)
---   Q / Ctrl+C   Quit
---   PgUp/PgDn   Page scroll
---   Home/End     Jump top/bottom
+--  Up/Down      Navigate
+--  Right/Enter  Expand node / enter values
+--  Left         Collapse / go to parent / back to tree
+--  Tab          Switch panel (Tree <-> Values)
+--  /            Search (type term, Enter applies, Esc cancels)
+--  R / F5       Refresh (clears search)
+--  Q / Ctrl+C   Quit
+--  PgUp/PgDn   Page scroll
+--  Home/End     Jump top/bottom
 --
 
 local fs = require("filesystem")

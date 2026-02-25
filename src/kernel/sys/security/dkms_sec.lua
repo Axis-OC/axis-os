@@ -10,9 +10,9 @@ local oHvci = nil
 
 -- Signature block format embedded in driver files:
 -- Last lines of the file contain:
---   --@SIGNATURE:base64_encoded_ecdsa_signature
---   --@SIGNER:fingerprint_of_signing_key
---   --@HASH:sha256_of_code_without_signature_block
+--  --@SIGNATURE:base64_encoded_ecdsa_signature
+--  --@SIGNER:fingerprint_of_signing_key
+--  --@HASH:sha256_of_code_without_signature_block
 
 local g_oCrypto = nil
 local g_tApprovedKeys = {}
@@ -23,7 +23,7 @@ function oSec.Initialize(tConfig)
     if g_bInitialized then return true end
 
     local nStart = os.clock()
-    syscall("kernel_log", "[SEC] ── Security Subsystem Init ──")
+    syscall("kernel_log", "[SEC]  Security Subsystem Init ")
 
     -- =============================================
     -- STEP 1: Crypto provider
@@ -96,7 +96,7 @@ function oSec.Initialize(tConfig)
     syscall("kernel_log", "[SEC] [3/3] " .. nKeys .. " approved key(s)")
 
     local nMs = math.floor((os.clock() - nStart) * 1000)
-    syscall("kernel_log", "[SEC] ── Ready in " .. nMs .. "ms ──")
+    syscall("kernel_log", "[SEC]  Ready in " .. nMs .. "ms ")
 
     g_bInitialized = true
 

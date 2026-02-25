@@ -2,13 +2,6 @@
 -- /usr/commands/qtest.lua
 -- Quarantine Protection Test
 --
--- Loads the deliberately faulty QuarantineTester driver, triggers
--- dispatch faults to activate HVCI quarantine, then verifies the
--- driver is blocked from further operation.
---
--- Usage:  qtest           (must be root)
---
-
 local fs = require("filesystem")
 
 local C = {
@@ -25,7 +18,7 @@ print(C.D .. "  A faulty driver will be loaded and exercised." .. C.R)
 print(C.D .. "  After 3 dispatch faults in <60s, quarantine triggers." .. C.R)
 print("")
 
--- ── Step 1: Verify driver file exists ──
+-- Step 1: Verify driver file exists 
 
 print(C.Y .. "[1/5]" .. C.R .. " Checking driver file...")
 local hCheck = fs.open("/drivers/quarantine_test.sys.lua", "r")
@@ -38,7 +31,7 @@ else
     return
 end
 
--- ── Step 2: Load the faulty driver ──
+-- Step 2: Load the faulty driver 
 
 print("")
 print(C.Y .. "[2/5]" .. C.R .. " Loading QuarantineTester driver...")
@@ -59,7 +52,7 @@ else
     return
 end
 
--- ── Step 3: Trigger faults by opening the device repeatedly ──
+-- Step 3: Trigger faults by opening the device repeatedly 
 
 print("")
 print(C.Y .. "[3/5]" .. C.R .. " Triggering dispatch faults...")
@@ -72,7 +65,7 @@ for i = 1, 5 do
 
     -- Each open attempt sends a CREATE IRP to DKMS.
     -- DKMS tries: pDriverObject.tDispatch[IRP_MJ_CREATE]
-    --           = false[0x00] → crash → fault recorded
+    --          = false[0x00] → crash → fault recorded
     local hDev = fs.open("/dev/qtest", "r")
 
     -- Give DKMS time to process the fault
@@ -100,7 +93,7 @@ for i = 1, 5 do
     syscall("process_yield")
 end
 
--- ── Step 4: Verify quarantine state in registry ──
+-- Step 4: Verify quarantine state in registry 
 
 print("")
 print(C.Y .. "[4/5]" .. C.R .. " Checking registry quarantine state...")
@@ -122,7 +115,7 @@ else
     print(C.E .. "  Quarantined = " .. tostring(vQuarantined) .. C.R)
 end
 
--- ── Step 5: Confirm post-quarantine IRP blocking ──
+-- Step 5: Confirm post-quarantine IRP blocking 
 
 print("")
 print(C.Y .. "[5/5]" .. C.R .. " Verifying post-quarantine access is blocked...")
@@ -141,7 +134,7 @@ else
     end
 end
 
--- ── Summary ──
+-- Summary 
 
 print("")
 print(C.C .. "═══════════════════════════════════════════════" .. C.R)

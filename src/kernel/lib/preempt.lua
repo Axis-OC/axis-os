@@ -5,16 +5,16 @@
 -- branch boundaries.
 --
 -- Injection points (after keyword + whitespace):
---   do   →  every for/while/do-block iteration
---   then →  every if/elseif branch entry
---   repeat → every repeat-until iteration
---   else →  every else branch entry  (but NOT "elseif")
+--  do   →  every for/while/do-block iteration
+--  then →  every if/elseif branch entry
+--  repeat → every repeat-until iteration
+--  else →  every else branch entry  (but NOT "elseif")
 --
 -- The scanner correctly skips:
---   • single-quoted and double-quoted string literals
---   • long strings  [[ ]], [=[ ]=], etc.
---   • short comments  --
---   • long comments   --[[ ]], --[=[ ]=], etc.
+--  • single-quoted and double-quoted string literals
+--  • long strings  [[ ]], [=[ ]=], etc.
+--  • short comments  --
+--  • long comments   --[[ ]], --[=[ ]=], etc.
 --
 -- Identifiers containing keywords (do_something, redo, etc.) are
 -- protected by word-boundary checks on both sides.

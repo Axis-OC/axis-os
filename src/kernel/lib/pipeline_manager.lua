@@ -2,9 +2,9 @@
 -- /lib/pipeline_manager.lua
 -- AxisOS Pipeline Manager — Thin Coordinator
 -- v4: Split architecture. VFS I/O delegated to io_manager,
---     permission checks to security_monitor, session bootstrap
---     to session_manager. PM retains boot sequence, log plumbing,
---     signal buffering, and driver-load (long-wait) handling.
+--    permission checks to security_monitor, session bootstrap
+--    to session_manager. PM retains boot sequence, log plumbing,
+--    signal buffering, and driver-load (long-wait) handling.
 --
 
 local syscall = syscall

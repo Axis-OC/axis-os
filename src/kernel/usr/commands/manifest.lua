@@ -6,9 +6,9 @@
 -- manifest's own hash, and the kernel verifies it at boot.
 --
 -- Usage:
---   manifest --generate     Create and sign manifest
---   manifest --verify       Verify current system against manifest
---   manifest --show         Display manifest contents
+--  manifest --generate     Create and sign manifest
+--  manifest --verify       Verify current system against manifest
+--  manifest --show         Display manifest contents
 --
 
 local fs = require("filesystem")

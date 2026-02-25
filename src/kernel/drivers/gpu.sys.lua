@@ -4,20 +4,20 @@
 --
 -- Vulkan-inspired resource management for OpenComputers text-mode GPUs.
 -- Provides: multi-adapter enumeration, swapchains, sync fences,
---           command buffers, pipeline state cache, buffer pools,
---           async I/O via IOCP, and fast-path TTY integration.
+--          command buffers, pipeline state cache, buffer pools,
+--          async I/O via IOCP, and fast-path TTY integration.
 --
 -- Extensions exposed:
---   GX_AX_multi_adapter    Multi-GPU enumeration and device creation
---   GX_AX_swapchain        Double-buffered swap chains with present
---   GX_AX_sync_fence       Operation synchronization fences (waitable)
---   GX_AX_cmd_buffer       Deferred command recording + batch submit
---   GX_AX_render_pass      Optimized state-sorted render pass
---   GX_AX_buffer_pool      Off-screen buffer management (Tier 3)
---   GX_AX_pipeline_state   Cached color/resolution state
---   GX_AX_async_submit     IOCP-based async operation submission
---   GX_AX_fast_tty         Fast-path TTY integration (no IRP overhead)
---   GX_AX_copy_engine      GPU-accelerated region copy/scroll
+--  GX_AX_multi_adapter    Multi-GPU enumeration and device creation
+--  GX_AX_swapchain        Double-buffered swap chains with present
+--  GX_AX_sync_fence       Operation synchronization fences (waitable)
+--  GX_AX_cmd_buffer       Deferred command recording + batch submit
+--  GX_AX_render_pass      Optimized state-sorted render pass
+--  GX_AX_buffer_pool      Off-screen buffer management (Tier 3)
+--  GX_AX_pipeline_state   Cached color/resolution state
+--  GX_AX_async_submit     IOCP-based async operation submission
+--  GX_AX_fast_tty         Fast-path TTY integration (no IRP overhead)
+--  GX_AX_copy_engine      GPU-accelerated region copy/scroll
 --
 
 local tStatus = require("errcheck")

@@ -3,12 +3,12 @@
 -- AxisOS Registry CLI — query, set, delete, tree
 --
 -- Usage:
---   reg query <path>             List subkeys and values
---   reg get <path> <name>        Get a specific value
---   reg set <path> <name> <val>  Set a value (Ring 2+ only)
---   reg tree [path]              Print full tree
---   reg info <path>              Key metadata
---   reg find <search>            Search key names
+--  reg query <path>             List subkeys and values
+--  reg get <path> <name>        Get a specific value
+--  reg set <path> <name> <val>  Set a value (Ring 2+ only)
+--  reg tree [path]              Print full tree
+--  reg info <path>              Key metadata
+--  reg find <search>            Search key names
 --
 
 local tArgs = env.ARGS or {}

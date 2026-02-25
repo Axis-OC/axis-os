@@ -6,11 +6,11 @@
 -- Users never touch device files or IPC directly.
 --
 -- Usage:
---   local rbmk = require("hbm.rbmk")
---   local reactor = rbmk.open()
---   reactor:az5()
---   for col in reactor:eachFuel() do print(col.enrichment) end
---   reactor:close()
+--  local rbmk = require("hbm.rbmk")
+--  local reactor = rbmk.open()
+--  reactor:az5()
+--  for col in reactor:eachFuel() do print(col.enrichment) end
+--  reactor:close()
 --
 --[[
 rbmk.open([addr])         → Reactor      Connect to console

@@ -371,17 +371,17 @@ function oIoM.HandleSyscall(tData)
     elseif sName == "vfs_close" then
         return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
     elseif sName == "vfs_list" then
-        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, tArgs[1])
     elseif sName == "vfs_delete" then
-        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, tArgs[1])
     elseif sName == "vfs_mkdir" then
-        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, tArgs[1])
     elseif sName == "vfs_chmod" then
-        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2])
+        return fSafeHandler(sName, fH, nCaller, tArgs[1], tArgs[2])
     elseif sName == "vfs_device_control" then
         return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2], tArgs[3])
     elseif sName == "driver_load" then
-        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, tArgs[1])
     end
     return nil, "Unhandled"
 end

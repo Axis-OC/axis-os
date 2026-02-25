@@ -79,7 +79,7 @@
   [INFO] Destroyed vault enclave
   [INFO] Destroyed seal enclave
   [INFO] 
-  [INFO] ─── Final EXSi Statistics ───
+  [INFO] ─ Final EXSi Statistics ─
   [INFO] Total created:    16
   [INFO] Total destroyed:  16
   [INFO] Total calls:      48

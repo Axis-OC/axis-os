@@ -2,10 +2,10 @@
 -- Graphics Device Interface v3.3 — Deferred Clear Compositor
 --
 -- v3.3 fixes:
---   - No more blinking: SurfaceSetPosition defers clears to compositor
---   - DestroySurface properly clears screen area
---   - SurfaceSetVisible properly clears hidden surface area
---   - OnTouchEvent clears stale drag state
+--  - No more blinking: SurfaceSetPosition defers clears to compositor
+--  - DestroySurface properly clears screen area
+--  - SurfaceSetVisible properly clears hidden surface area
+--  - OnTouchEvent clears stale drag state
 
 local GDI = {}
 
@@ -30,7 +30,6 @@ local g_nNextCmdHandle  = 1
 
 local g_bForceRedrawPending = false
 
--- NEW: Deferred clear rectangles — processed inside Composite()
 local g_tPendingClears  = {}
 
 local g_tDragState = {
@@ -169,7 +168,7 @@ function GDI.BindGpu(nIdx, sScreenAddr)
         g_tScreenBuf[nIdx][y].bDirty = false
     end
     _gpuInvalidatePipeline(nIdx)
-    _gpuFill(nIdx, 1, 1, tGpu.nW, tGpu.nH, " ", 0xFFFFFF, 0x000000)
+    -- _gpuFill(nIdx, 1, 1, tGpu.nW, tGpu.nH, " ", 0xFFFFFF, 0x000000)
     if g_tScreens[sScreenAddr] then g_tScreens[sScreenAddr].gpuIdx = nIdx end
     g_fLog(string.format("[GDI] GPU %d -> %s (%dx%d)", nIdx, sScreenAddr:sub(1, 8), tGpu.nW, tGpu.nH))
     return true

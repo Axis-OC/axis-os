@@ -3,9 +3,9 @@
 -- AxisOS EXSi — Enclaved Kernel eXecution Isolation
 --
 -- SGX-like enclave protection for Lua:
---   • Memory isolation via closures (locals unreachable without debug)
---   • Cryptographic attestation (MRENCLAVE = SHA-256 of source code)
---   • Data sealing (encrypt with key derived from enclave hash + hardware)
+--  • Memory isolation via closures (locals unreachable without debug)
+--  • Cryptographic attestation (MRENCLAVE = SHA-256 of source code)
+--  • Data sealing (encrypt with key derived from enclave hash + hardware)
 --
 -- Enclaves are functions that store secrets in local variables.
 -- The kernel can call an enclave but cannot read its internal state.
@@ -82,9 +82,9 @@ end
 -- sealingKey = HMAC-SHA256(hardwareKey, MRENCLAVE)
 --
 -- This ensures:
---   • Different enclaves get different sealing keys
---   • Same enclave on different machines gets different keys
---   • Only the SAME enclave on the SAME machine can unseal
+--  • Different enclaves get different sealing keys
+--  • Same enclave on different machines gets different keys
+--  • Only the SAME enclave on the SAME machine can unseal
 -- =============================================
 
 local function fDeriveSealingKey(sMrEnclave)
@@ -145,7 +145,7 @@ end
 -- only inside these closures' upvalue slots.
 --
 -- Sealed blob format:
---   [32B MRENCLAVE] [32B HMAC-SHA256 tag] [encrypted data]
+--  [32B MRENCLAVE] [32B HMAC-SHA256 tag] [encrypted data]
 --
 -- The tag is computed over the PLAINTEXT, so after
 -- decryption we can verify integrity.
@@ -222,37 +222,37 @@ end
 --
 -- sCode must be Lua source that returns a function:
 --
---   local sMySecret = nil
---   local tMyState  = {}
+--  local sMySecret = nil
+--  local tMyState  = {}
 --
---   return function(sMethod, ...)
---       if sMethod == "store_secret" then
---           sMySecret = select(1, ...)
---           return true
---       elseif sMethod == "use_secret" then
---           return "result computed with " .. sMySecret
---       elseif sMethod == "seal_state" then
---           return seal(sMySecret)
---       elseif sMethod == "unseal_state" then
---           sMySecret = unseal(select(1, ...))
---           return true
---       end
---   end
+--  return function(sMethod, ...)
+--      if sMethod == "store_secret" then
+--          sMySecret = select(1, ...)
+--          return true
+--      elseif sMethod == "use_secret" then
+--          return "result computed with " .. sMySecret
+--      elseif sMethod == "seal_state" then
+--          return seal(sMySecret)
+--      elseif sMethod == "unseal_state" then
+--          sMySecret = unseal(select(1, ...))
+--          return true
+--      end
+--  end
 --
 -- The returned function is the enclave entry point.
 -- sMySecret and tMyState live as upvalues — invisible
 -- to Ring 0 (debug library is disabled for Ring >= 1).
 --
 -- The enclave environment provides:
---   string, math, table, bit32 (safe subsets)
---   type, tostring, tonumber, pairs, ipairs, etc.
---   seal(data) → sealed blob
---   unseal(blob) → data
---   MRENCLAVE — hex string of own hash (read-only)
+--  string, math, table, bit32 (safe subsets)
+--  type, tostring, tonumber, pairs, ipairs, etc.
+--  seal(data) → sealed blob
+--  unseal(blob) → data
+--  MRENCLAVE — hex string of own hash (read-only)
 --
 -- NOT provided (isolation):
---   debug, rawset, rawget, load, require, dofile
---   io, os, component, computer, syscall, coroutine
+--  debug, rawset, rawget, load, require, dofile
+--  io, os, component, computer, syscall, coroutine
 --
 -- Returns: nHandle, sMrEnclaveHex, or nil + error
 -- =============================================

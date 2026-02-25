@@ -6,8 +6,8 @@
 -- Self-describing, checksummed, linked-list partitions.
 -- Extended fields in bytes 96-255 of each partition block
 -- are marked with "AXPX" magic and carry:
---   visibility, encryption state, boot chain role,
---   content hash, machine binding, encrypted key material.
+--  visibility, encryption state, boot chain role,
+--  content hash, machine binding, encrypted key material.
 --
 -- Standard Amiga RDB parsers ignore bytes 96+, so these
 -- extensions are transparent to non-AxisOS tools.

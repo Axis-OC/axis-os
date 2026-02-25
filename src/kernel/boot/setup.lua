@@ -5,10 +5,10 @@
 -- No 4KB limit — this runs from the filesystem.
 --
 -- Features:
---   - Boot entry selection & editing
---   - Driver autoload configuration
---   - EEPROM parameter management
---   - SecureBoot enable/disable/provision
+--  - Boot entry selection & editing
+--  - Driver autoload configuration
+--  - EEPROM parameter management
+--  - SecureBoot enable/disable/provision
 --
 
 local a = component

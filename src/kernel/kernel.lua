@@ -1261,7 +1261,8 @@ local function __load_registry()
         setmetatable = setmetatable,
         pcall = pcall,
         ipairs = ipairs,
-        raw_computer = raw_computer
+        raw_computer = raw_computer,
+        load = load,
     }
     local fChunk, sLoadErr = load(sCode, "@registry", "t", tRegEnv)
     if not fChunk then
@@ -4279,6 +4280,40 @@ if g_oRegistry then
     kprint("ok", "Virtual Registry (@VT) initialised.")
 else
     kprint("warn", "Virtual Registry not available.")
+end
+
+if g_oRegistry then
+    local bClearFlag = false
+    pcall(function()
+        local hFlag = g_oPrimitiveFs.open("/etc/.clear_quarantine", "r")
+        if hFlag then
+            g_oPrimitiveFs.close(hFlag)
+            bClearFlag = true
+        end
+    end)
+    if bClearFlag then
+        kprint("sec", "Clear-quarantine flag detected (BIOS Setup)...")
+        local tDrvKeys = g_oRegistry.EnumKeys("@VT\\DRV")
+        local nCleared = 0
+        for _, sKey in ipairs(tDrvKeys) do
+            local sPath = "@VT\\DRV\\" .. sKey
+            local v = g_oRegistry.GetValue(sPath, "Quarantined")
+            if v == "true" or v == true then
+                g_oRegistry.SetValue(sPath, "Quarantined", "false", "STR")
+                g_oRegistry.DeleteValue(sPath, "QuarantineTime")
+                g_oRegistry.DeleteValue(sPath, "QuarantineReason")
+                nCleared = nCleared + 1
+                kprint("sec", "  Cleared quarantine for: " .. sKey)
+            end
+        end
+        g_oRegistry.FlushHive("DRV")
+        pcall(function() g_oPrimitiveFs.remove("/etc/.clear_quarantine") end)
+        if nCleared > 0 then
+            kprint("ok", "Cleared " .. nCleared .. " driver quarantine(s).")
+        else
+            kprint("info", "No quarantined drivers found. Flag removed.")
+        end
+    end
 end
 
 -- Load Preemptive Scheduler module

@@ -2,10 +2,10 @@
 -- Sign a driver file with your ECDSA private key
 --
 -- Usage:
---   sign <driver_path>                 Sign with default key
---   sign -g                            Generate new key pair
---   sign -r                            Register public key with cloud PKI
---   sign -k <keyfile> <driver_path>    Sign with specific key
+--  sign <driver_path>                 Sign with default key
+--  sign -g                            Generate new key pair
+--  sign -r                            Register public key with cloud PKI
+--  sign -k <keyfile> <driver_path>    Sign with specific key
 --
 
 local fs = require("filesystem")

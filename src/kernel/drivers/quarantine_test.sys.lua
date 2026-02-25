@@ -14,7 +14,7 @@ local tStatus    = require("errcheck")
 local oKMD       = require("kmd_api")
 local tDKStructs = require("shared_structs")
 
--- ── Driver info (must pass dkms_sec validation) ──
+-- Driver info (must pass dkms_sec validation) 
 
 g_tDriverInfo = {
     sDriverName       = "QuarantineTester",
@@ -26,7 +26,7 @@ g_tDriverInfo = {
 
 local g_pDeviceObject = nil
 
--- ── IRP handlers (exist to pass init validation; never actually called) ──
+-- IRP handlers (exist to pass init validation; never actually called) 
 
 local function fCreate(pDev, pIrp)
     oKMD.DkCompleteRequest(pIrp, tStatus.STATUS_SUCCESS)
@@ -40,7 +40,7 @@ local function fDevCtl(pDev, pIrp)
     oKMD.DkCompleteRequest(pIrp, tStatus.STATUS_SUCCESS)
 end
 
--- ── Driver entry ──
+-- Driver entry 
 
 function DriverEntry(pDriverObject)
     oKMD.DkPrint("QuarantineTester: initializing...")
@@ -72,7 +72,7 @@ function DriverUnload(pDriverObject)
     return tStatus.STATUS_SUCCESS
 end
 
--- ── Main loop ──
+-- Main loop 
 
 while true do
     local bOk, nSender, sSig, p1, p2 = syscall("signal_pull")
@@ -91,8 +91,8 @@ while true do
             -- Replace the dispatch table with `false`.
             -- When DKMS dispatches the next IRP, it runs:
             --
-            --   fHandler = pDriverObject.tDispatch[nMaj]
-            --             = false[0x00]
+            --  fHandler = pDriverObject.tDispatch[nMaj]
+            --            = false[0x00]
             --
             -- This throws "attempt to index a boolean value",
             -- caught by DKMS's pcall → fRecordDriverFault().

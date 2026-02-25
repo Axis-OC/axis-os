@@ -15,7 +15,7 @@ print(C.C .. "  GDI v2 Demo — GPU-Accelerated Output " .. C.R)
 print(C.C .. "═══════════════════════════════════════" .. C.R)
 print("")
 
--- ─── Query GPU configuration ───
+-- ─ Query GPU configuration ─
 
 local nGpuCount = syscall("gdi_get_gpu_count")
 print(C.Y .. "GPUs detected: " .. C.R .. tostring(nGpuCount))
@@ -38,7 +38,7 @@ print(C.M .. "GPU Driver Fast-Path: " .. C.R
     .. (bFastPath and (C.G .. "ACTIVE") or (C.Y .. "DIRECT MODE")) .. C.R)
 print("")
 
--- ─── Create surfaces on GPU 1 ───
+-- ─ Create surfaces on GPU 1 ─
 
 local tInfo1 = syscall("gdi_get_gpu_info", 1)
 if not tInfo1 then
@@ -75,7 +75,7 @@ local hBottom = syscall("gdi_create_surface", W, 1, {
     sLabel   = "BottomBar",
 })
 
--- ─── Draw to surfaces ───
+-- ─ Draw to surfaces ─
 
 -- Status bar: white on blue
 syscall("gdi_surface_fill", hBar, 1, 1, W, 1, " ", 0xFFFFFF, 0x0000AA)
@@ -110,7 +110,7 @@ drawLine("    • StatusBar  (Z=10, row 1)", 0xAAAAAA)
 drawLine("    • MainContent (Z=5, rows 2-" .. (H-1) .. ")", 0xAAAAAA)
 drawLine("    • BottomBar   (Z=10, row " .. H .. ")", 0xAAAAAA)
 
--- ─── Multi-GPU broadcast demo ───
+-- ─ Multi-GPU broadcast demo ─
 
 if nGpuCount > 1 then
     nY = nY + 1
@@ -133,7 +133,7 @@ else
     drawLine("(Single GPU — multi-GPU broadcast requires 2+ GPUs)", 0x555555)
 end
 
--- ─── Swapchain demo ───
+-- ─ Swapchain demo ─
 
 nY = nY + 1
 drawLine("Swapchain:", 0x55FFFF)
@@ -160,7 +160,7 @@ syscall("gdi_surface_set", hBottom, 2, 1,
     " Press any key to exit ",
     0x000000, 0xFFFF00)
 
--- ─── Composite and wait ───
+-- ─ Composite and wait ─
 
 syscall("gdi_composite")
 
@@ -171,7 +171,7 @@ fs.read(hTtyIn)
 fs.deviceControl(hTtyIn, "set_mode", {"cooked"})
 fs.close(hTtyIn)
 
--- ─── Cleanup ───
+-- ─ Cleanup ─
 
 syscall("gdi_destroy_surface", hBar)
 syscall("gdi_destroy_surface", hMain)

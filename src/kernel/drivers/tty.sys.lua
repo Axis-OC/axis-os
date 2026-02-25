@@ -1424,8 +1424,8 @@ function DriverEntry(pObj)
     oKMD.DkRegisterInterrupt("key_down")
     oKMD.DkRegisterInterrupt("scroll")
     oKMD.DkRegisterInterrupt("clipboard")
-    oKMD.DkRegisterInterrupt("touch") -- ADD
-    oKMD.DkRegisterInterrupt("drag") -- ADD
+    oKMD.DkRegisterInterrupt("touch")
+    oKMD.DkRegisterInterrupt("drag")
     return 0
 end
 

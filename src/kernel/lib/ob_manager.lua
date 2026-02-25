@@ -306,10 +306,10 @@ end
 -- HANDLE OPERATIONS
 -- =============================================
 
---  ObCreateHandle(nPid, pObjectHeader, nDesiredAccess, sSynapseToken [, bInheritable])
---  → sHandleToken, nStatus
+-- ObCreateHandle(nPid, pObjectHeader, nDesiredAccess, sSynapseToken [, bInheritable])
+-- → sHandleToken, nStatus
 --
---  Access is checked HERE. Every subsequent use only validates token + sMLTR.
+-- Access is checked HERE. Every subsequent use only validates token + sMLTR.
 function oOb.ObCreateHandle(nPid, pH, nDesiredAccess, sSynapseToken, bInheritable)
     if not pH then return nil, oOb.STATUS_INVALID_HANDLE end
     oOb.ObInitializeProcess(nPid)
@@ -337,7 +337,7 @@ function oOb.ObCreateHandle(nPid, pH, nDesiredAccess, sSynapseToken, bInheritabl
     return sToken, oOb.STATUS_SUCCESS
 end
 
---  ObOpenObjectByName — lookup + ref + create handle
+-- ObOpenObjectByName — lookup + ref + create handle
 function oOb.ObOpenObjectByName(nPid, sPath, nDesiredAccess, sSynapseToken)
     local pH, nSt = oOb.ObLookupObject(sPath)
     if not pH then return nil, nSt end
@@ -352,13 +352,13 @@ function oOb.ObOpenObjectByName(nPid, sPath, nDesiredAccess, sSynapseToken)
     return sToken, oOb.STATUS_SUCCESS
 end
 
---  ObReferenceObjectByHandle — validate token, sMLTR, access → OBJECT_HEADER
+-- ObReferenceObjectByHandle — validate token, sMLTR, access → OBJECT_HEADER
 --
---  vHandle may be:
---      string  → direct token lookup
---      number < 0  → standard-handle constant (STD_INPUT_HANDLE etc.)
+-- vHandle may be:
+--     string  → direct token lookup
+--     number < 0  → standard-handle constant (STD_INPUT_HANDLE etc.)
 --
---  Returns: pObjectHeader, nStatus, tHandleEntry
+-- Returns: pObjectHeader, nStatus, tHandleEntry
 function oOb.ObReferenceObjectByHandle(nPid, vHandle, nDesiredAccess, sSynapseToken)
     local tHT = g_tProcessHandleTables[nPid]
     if not tHT then return nil, oOb.STATUS_INVALID_HANDLE end
@@ -390,7 +390,7 @@ function oOb.ObReferenceObjectByHandle(nPid, vHandle, nDesiredAccess, sSynapseTo
     return tEntry.pObjectHeader, oOb.STATUS_SUCCESS, tEntry
 end
 
---  ObCloseHandle — remove entry, dereference object
+-- ObCloseHandle — remove entry, dereference object
 function oOb.ObCloseHandle(nPid, vHandle)
     local tHT = g_tProcessHandleTables[nPid]
     if not tHT then return false, oOb.STATUS_INVALID_HANDLE end

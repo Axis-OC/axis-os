@@ -4,8 +4,8 @@
 -- v2: --efi-prebuild creates encrypted EFI + AXFS partitions.
 --
 -- Usage:
---   axfs-switch <device>                     AXFS only
---   axfs-switch <device> --efi-prebuild      EFI + AXFS (SecureBoot ready)
+--  axfs-switch <device>                     AXFS only
+--  axfs-switch <device> --efi-prebuild      EFI + AXFS (SecureBoot ready)
 --
 
 local fs  = require("filesystem")
