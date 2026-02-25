@@ -1,157 +1,167 @@
 === VBL SESSION START ===
-[  17.8000] [ INFO ] PID=3   Creating process 6 ('/drivers/filesystem.sys.lua') at Ring 2
-[  17.8000] [ PROC ] PID=3   spawn image=/drivers/filesystem.sys.lua parent=3 pid=6 ring=2
-[  17.8500] [DEBUG ] PID=3   Loaded source bytes=1058 pid=6
-[  17.8500] [DEBUG ] PID=3   Creating sandbox pid=6 ring=2
-[  17.8500] [DEBUG ] PID=3   Process ready pid=6 token=SYN-97f2-131...
-[  17.8500] [ DEV  ] PID=3     PID 6 synapse token: SYN-97f2-1313-2f...
-[  17.8500] [ INFO ] PID=6   [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
-[  17.8500] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 6)
-[  17.8500] [ INFO ] PID=3   [DKMS] Loading: /drivers/eeprom.sys.lua
-[  17.8500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  17.8500] [ INFO ] PID=3   Creating process 7 ('/drivers/eeprom.sys.lua') at Ring 2
-[  17.8500] [ PROC ] PID=3   spawn image=/drivers/eeprom.sys.lua parent=3 pid=7 ring=2
-[  17.9000] [DEBUG ] PID=3   Loaded source bytes=870 pid=7
-[  17.9000] [DEBUG ] PID=3   Creating sandbox pid=7 ring=2
-[  17.9000] [DEBUG ] PID=3   Process ready pid=7 token=SYN-1d13-bb2...
-[  17.9000] [ DEV  ] PID=3     PID 7 synapse token: SYN-1d13-bb2b-fd...
-[  17.9000] [ INFO ] PID=7   [DK] EEPROM Stub Driver loaded. Doing nothing.
-[  17.9000] [ INFO ] PID=3   [DKMS] Loaded 'AxisEEPROMStub' (PID 7)
-[  17.9000] [ INFO ] PID=3   [DKMS] Loading: /drivers/filesystem.sys.lua
-[  17.9000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  17.9000] [ INFO ] PID=3   Creating process 8 ('/drivers/filesystem.sys.lua') at Ring 2
-[  17.9000] [ PROC ] PID=3   spawn image=/drivers/filesystem.sys.lua parent=3 pid=8 ring=2
-[  17.9500] [DEBUG ] PID=3   Loaded source bytes=1058 pid=8
-[  17.9500] [DEBUG ] PID=3   Creating sandbox pid=8 ring=2
-[  17.9500] [DEBUG ] PID=3   Process ready pid=8 token=SYN-3699-234...
-[  17.9500] [ DEV  ] PID=3     PID 8 synapse token: SYN-3699-2344-4f...
-[  17.9500] [ INFO ] PID=8   [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
-[  17.9500] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 8)
-[  17.9500] [ INFO ] PID=3   [DKMS] Loading: /drivers/internet.sys.lua
-[  18.1000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  18.1000] [ INFO ] PID=3   Creating process 9 ('/drivers/internet.sys.lua') at Ring 2
-[  18.1000] [ PROC ] PID=3   spawn image=/drivers/internet.sys.lua parent=3 pid=9 ring=2
-[  18.2000] [DEBUG ] PID=3   Loaded source bytes=27079 pid=9
-[  18.2000] [DEBUG ] PID=3   Creating sandbox pid=9 ring=2
-[  18.2000] [DEBUG ] PID=3   Process ready pid=9 token=SYN-9293-a56...
-[  18.2000] [ DEV  ] PID=3     PID 9 synapse token: SYN-9293-a561-94...
-[  18.2000] [ INFO ] PID=9   [DK] AxisNet v2.1: Initializing...
-[  18.2000] [ INFO ] PID=9   [DK] DkCreateDevice: \Device\Net0
-[  18.2000] [ INFO ] PID=3   [DKMS] Device '\Device\Net0' created.
-[  18.2000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_002
-[  18.2000] [ INFO ] PID=9   [DK] AxisNet: Card found. HTTP=true TCP=true
-[  18.2000] [ INFO ] PID=9   [DK] AxisNet: Time source check: fNow()=18.2
-[  18.2000] [ INFO ] PID=9   [DK] SymLink: /dev/net -> \Device\Net0
-[  18.2000] [ INFO ] PID=3   [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
-[  18.2000] [ INFO ] PID=9   [DK] AxisNet v2.1: Online at /dev/net
-[  18.2000] [ INFO ] PID=3   [DKMS] Loaded 'AxisNet' (PID 9)
-[  18.2000] [ INFO ] PID=2   [PM] Loading RingFS driver...
-[  18.2000] [ INFO ] PID=3   [DKMS] Loading: /drivers/ringfs.sys.lua
-[  18.2500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  18.2500] [ INFO ] PID=3   Creating process 10 ('/drivers/ringfs.sys.lua') at Ring 2
-[  18.2500] [ PROC ] PID=3   spawn image=/drivers/ringfs.sys.lua parent=3 pid=10 ring=2
-[  18.3000] [DEBUG ] PID=3   Loaded source bytes=4600 pid=10
-[  18.3000] [DEBUG ] PID=3   Creating sandbox pid=10 ring=2
-[  18.3000] [DEBUG ] PID=3   Process ready pid=10 token=SYN-a887-0ec...
-[  18.3000] [ DEV  ] PID=3     PID 10 synapse token: SYN-a887-0ec9-25...
-[  18.3000] [ INFO ] PID=10  [DK] RingFS: Spinning up the memory donut.
-[  18.3000] [ INFO ] PID=10  [DK] DkCreateDevice: \Device\ringlog
-[  18.3000] [ INFO ] PID=3   [DKMS] Device '\Device\ringlog' created.
-[  18.3000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_003
-[  18.3000] [ INFO ] PID=10  [DK] SymLink: /dev/ringlog -> \Device\ringlog
-[  18.3000] [ INFO ] PID=3   [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
-[  18.3000] [ INFO ] PID=3   [DKMS] Loaded 'AxisRingFS' (PID 10)
-[  18.3000] [ INFO ] PID=2   [PM] Initializing log system on /dev/ringlog
-[  18.5000] [ INFO ] PID=2   [PM] Ringfs handle opened (persistent).[  18.5500] [ INFO ] PID=2   [PM] Log system initialized.
-[  18.5500] [ INFO ] PID=2   [PM] Processing driver autoload...
-[  18.5500] [ INFO ] PID=2   [PM] Loaded /boot/sys/drivers.cfg (2 entries)
-[  18.5500] [ INFO ] PID=2   [PM] Drivers: 2 enabled, 0 disabled
-[  18.6000] [ INFO ] PID=2   [PM] FAIL: 'RBMK' — file not found: /sys/drivers/hbm_rbmk.syss.lua
-[  18.6000] [ INFO ] PID=2   [PM] [2/2] Loading 'blkdev' (pri=200) /drivers/blkdev.sys.lua
-[  18.6000] [ INFO ] PID=2   [PM] Loading driver: /drivers/blkdev.sys.lua
-[  18.6500] [ INFO ] PID=3   [DKMS] Auto-discovery for type: drive
-[  18.6500] [ INFO ] PID=3   [DKMS] Loading: /drivers/blkdev.sys.lua
-[  18.7000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  18.7000] [ INFO ] PID=3   Creating process 11 ('/drivers/blkdev.sys.lua') at Ring 2
-[  18.7000] [ PROC ] PID=3   spawn image=/drivers/blkdev.sys.lua parent=3 pid=11 ring=2
-[  18.7000] [DEBUG ] PID=3   Loaded source bytes=4144 pid=11
-[  18.7000] [DEBUG ] PID=3   Creating sandbox pid=11 ring=2
-[  18.7000] [DEBUG ] PID=3   Process ready pid=11 token=SYN-19ff-7b7...
-[  18.7000] [ DEV  ] PID=3     PID 11 synapse token: SYN-19ff-7b72-4e...
-[  18.7000] [ INFO ] PID=11  [DK] AxisBlockDev: Init
-[  18.7000] [ INFO ] PID=11  [DK] Auto-creating CMD Device: /dev/drive_256973_0
-[  18.7000] [ INFO ] PID=11  [DK] DkCreateDevice: \Device\drive_256973
-[  18.7500] [ INFO ] PID=3   [DKMS] Device '\Device\drive_256973' created.
-[  18.7500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\PHYS_004
-[  18.7500] [ INFO ] PID=11  [DK] SymLink: /dev/drive_256973_0 -> \Device\drive_256973
-[  18.7500] [ INFO ] PID=3   [DKMS] Symlink '/dev/drive_256973_0' -> '\Device\drive_256973' created.
-[  18.7500] [ INFO ] PID=11  [DK] AxisBlockDev: 4096KB, 512-byte sectors
-[  18.7500] [ INFO ] PID=3   [DKMS] Loaded 'AxisBlockDev' (PID 11)
-[  18.7500] [ INFO ] PID=2   [PM] OK: Auto-loaded 1 instances of AxisBlockDev
-[  18.7500] [ INFO ] PID=2   [PM] Autoload complete: 1 loaded, 1 failed, 0 disabled
-[  18.8000] [ INFO ] PID=2   [PM] Waiting for system stabilization...
-[  19.8000] [ INFO ] PID=2   [IO_MGR] I/O Manager started (PID 2)
-[  19.8000] [ INFO ] PID=2   [SEC_MON] Security Monitor initialized
-[  19.8000] [ INFO ] PID=2   [SESS] Session Manager initialized
-[  19.8000] [ INFO ] PID=2   [PM] Silence on deck. Handing off to userspace.
-[  19.8000] [ INFO ] PID=2   [PM] Spawning /bin/init.lua...
-[  19.8000] [ INFO ] PID=2   Creating process 12 ('/bin/init.lua') at Ring 3
-[  19.8000] [ PROC ] PID=2   spawn image=/bin/init.lua parent=2 pid=12 ring=3
-[  19.8500] [DEBUG ] PID=2   Loaded source bytes=5096 pid=12
-[  19.8500] [SCHED ] PID=2   Instrumented checkpoints=33 image=/bin/init.lua pid=12
-[  19.8500] [ DEV  ] PID=2   Preempt: /bin/init.lua → 33 yield checkpoints injected
-[  19.8500] [DEBUG ] PID=2   Creating sandbox pid=12 ring=3
-[  19.8500] [DEBUG ] PID=2   Process ready pid=12 token=SYN-08e4-06c...
-[  19.8500] [ DEV  ] PID=2     PID 12 synapse token: SYN-08e4-06c3-04...
-[  19.8500] [ INFO ] PID=2   [PM] Init spawned as PID 12[  19.9500] [ SEC  ] PID=1   PatchGuard auto-arming (post-boot, tick 300)...
-[  19.9500] [ SEC  ] PID=1   [PG] Taking snapshot...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier1: syscall table, overrides, self, rings...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier2: frozen libs, OB namespace...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier3: SecureBoot, EEPROM...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier3-files: reusing 22 cached hashes (fast re-arm)
-[  19.9500] [ SEC  ] PID=1   [PG] Snapshot: 175 syscalls, 17 overrides, 3 libs, 22 files, PM=PID 2, SB=inactive
-[  19.9500] [ SEC  ] PID=1   [PG] PatchGuard v2 ARMED — full integrity monitoring active
-[  19.9500] [ SEC  ] PID=1   PatchGuard ARMED — all integrity monitoring active[  20.0000] [ INFO ] PID=12  [INIT] Display Manager mode enabled — launching DM
-[  20.0000] [ INFO ] PID=12  Creating process 13 ('/system/dm.lua') at Ring 3
-[  20.0000] [ PROC ] PID=12  spawn image=/system/dm.lua parent=12 pid=13 ring=3
-[  20.0500] [DEBUG ] PID=12  Loaded source bytes=11999 pid=13
-[  20.0500] [SCHED ] PID=12  Instrumented checkpoints=52 image=/system/dm.lua pid=13
-[  20.0500] [ DEV  ] PID=12  Preempt: /system/dm.lua → 52 yield checkpoints injected
-[  20.0500] [DEBUG ] PID=12  Creating sandbox pid=13 ring=3
-[  20.0500] [DEBUG ] PID=12  Process ready pid=13 token=SYN-bb76-992...
-[  20.0500] [ DEV  ] PID=12    PID 13 synapse token: SYN-bb76-9926-43...[  22.3500] [ INFO ] PID=13  Creating process 14 ('/system/desktop.lua') at Ring 3
-[  22.3500] [ PROC ] PID=13  spawn image=/system/desktop.lua parent=13 pid=14 ring=3
-[  22.4000] [DEBUG ] PID=13  Loaded source bytes=9653 pid=14
-[  22.4000] [SCHED ] PID=13  Instrumented checkpoints=71 image=/system/desktop.lua pid=14
-[  22.4000] [ DEV  ] PID=13  Preempt: /system/desktop.lua → 71 yield checkpoints injected
-[  22.4000] [DEBUG ] PID=13  Creating sandbox pid=14 ring=3
-[  22.4000] [DEBUG ] PID=13  Process ready pid=14 token=SYN-db85-885...
-[  22.4000] [ DEV  ] PID=13    PID 14 synapse token: SYN-db85-8854-4f...[  23.6000] [ INFO ] PID=14  Creating process 15 ('/system/apps/terminal.lua') at Ring 3
-[  23.6000] [ PROC ] PID=14  spawn image=/system/apps/terminal.lua parent=14 pid=15 ring=3
-[  23.6000] [DEBUG ] PID=14  Loaded source bytes=6471 pid=15
-[  23.6000] [SCHED ] PID=14  Instrumented checkpoints=70 image=/system/apps/terminal.lua pid=15
-[  23.6000] [ DEV  ] PID=14  Preempt: /system/apps/terminal.lua → 70 yield checkpoints injected
-[  23.6000] [DEBUG ] PID=14  Creating sandbox pid=15 ring=3
-[  23.6000] [DEBUG ] PID=14  Process ready pid=15 token=SYN-f87d-d94...
-[  23.6000] [ DEV  ] PID=14    PID 15 synapse token: SYN-f87d-d94d-57...[  41.4000] [ INFO ] PID=15  Creating process 16 ('/usr/commands/xe_pages.lua') at Ring 3
-[  41.4000] [ PROC ] PID=15  spawn image=/usr/commands/xe_pages.lua parent=15 pid=16 ring=3
-[  41.4000] [DEBUG ] PID=15  Loaded source bytes=4369 pid=16
-[  41.4000] [SCHED ] PID=15  Instrumented checkpoints=14 image=/usr/commands/xe_pages.lua pid=16
-[  41.4000] [ DEV  ] PID=15  Preempt: /usr/commands/xe_pages.lua → 14 yield checkpoints injected
-[  41.4000] [DEBUG ] PID=15  Creating sandbox pid=16 ring=3
-[  41.4000] [DEBUG ] PID=15  Process ready pid=16 token=SYN-0134-774...
-[  41.4000] [ DEV  ] PID=15    PID 16 synapse token: SYN-0134-7749-21...[  43.3000] [ INFO ] PID=16  Process 16 exited normally.[  62.0500] [ INFO ] PID=15  Process 15 exited normally.[  63.1000] [ INFO ] PID=14  Creating process 17 ('/system/apps/terminal.lua') at Ring 3
-[  63.1000] [ PROC ] PID=14  spawn image=/system/apps/terminal.lua parent=14 pid=17 ring=3
-[  63.1000] [DEBUG ] PID=14  Loaded source bytes=6471 pid=17
-[  63.1000] [SCHED ] PID=14  Instrumented checkpoints=70 image=/system/apps/terminal.lua pid=17
-[  63.1000] [ DEV  ] PID=14  Preempt: /system/apps/terminal.lua → 70 yield checkpoints injected
-[  63.1000] [DEBUG ] PID=14  Creating sandbox pid=17 ring=3
-[  63.1000] [DEBUG ] PID=14  Process ready pid=17 token=SYN-d7fa-629...
-[  63.1000] [ DEV  ] PID=14    PID 17 synapse token: SYN-d7fa-6295-eb...[  64.3000] [ INFO ] PID=17  Process 17 exited normally.[  75.9000] [ INFO ] PID=14  Creating process 18 ('/system/apps/terminal.lua') at Ring 3
-[  75.9000] [ PROC ] PID=14  spawn image=/system/apps/terminal.lua parent=14 pid=18 ring=3
-[  75.9000] [DEBUG ] PID=14  Loaded source bytes=6471 pid=18
-[  75.9000] [SCHED ] PID=14  Instrumented checkpoints=70 image=/system/apps/terminal.lua pid=18
-[  75.9000] [ DEV  ] PID=14  Preempt: /system/apps/terminal.lua → 70 yield checkpoints injected
-[  75.9000] [DEBUG ] PID=14  Creating sandbox pid=18 ring=3
-[  75.9000] [DEBUG ] PID=14  Process ready pid=18 token=SYN-f8c7-c5d...
-[  75.9000] [ DEV  ] PID=14    PID 18 synapse token: SYN-f8c7-c5d7-d0...
+[   8.1500] [DEBUG ] PID=3   Loaded source bytes=1058 pid=6
+[   8.1500] [DEBUG ] PID=3   Creating sandbox pid=6 ring=2
+[   8.1500] [DEBUG ] PID=3   Process ready pid=6 token=SYN-9da2-2ac...
+[   8.1500] [ DEV  ] PID=3     PID 6 synapse token: SYN-9da2-2acc-cb...
+[   8.1500] [ INFO ] PID=6   [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
+[   8.1500] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 6)
+[   8.1500] [ INFO ] PID=3   [DKMS] Loading: /drivers/internet.sys.lua
+[   8.3000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.3500] [ INFO ] PID=3   [HVCI] Driver 'AxisNet' sandboxed with 2 capabilities: INTERNET_CARD, RAW_COMPONENT_LIST
+[   8.3500] [ INFO ] PID=3   Creating process 7 ('/drivers/internet.sys.lua') at Ring 2
+[   8.3500] [ PROC ] PID=3   spawn image=/drivers/internet.sys.lua parent=3 pid=7 ring=2
+[   8.4500] [DEBUG ] PID=3   Loaded source bytes=27138 pid=7
+[   8.4500] [DEBUG ] PID=3   Creating sandbox pid=7 ring=2
+[   8.4500] [DEBUG ] PID=3   Process ready pid=7 token=SYN-7009-09b...
+[   8.4500] [ DEV  ] PID=3     PID 7 synapse token: SYN-7009-09b9-7e...
+[   8.4500] [ INFO ] PID=7   [DK] AxisNet v2.1: Initializing...
+[   8.4500] [ INFO ] PID=7   [DK] DkCreateDevice: \Device\Net0
+[   8.4500] [ INFO ] PID=3   [DKMS] Device '\Device\Net0' created.
+[   8.4500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_002
+[   8.4500] [ INFO ] PID=7   [DK] AxisNet: Card found. HTTP=true TCP=true
+[   8.4500] [ INFO ] PID=7   [DK] AxisNet: Time source check: fNow()=8.45
+[   8.4500] [ INFO ] PID=7   [DK] SymLink: /dev/net -> \Device\Net0
+[   8.4500] [ INFO ] PID=3   [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
+[   8.4500] [ INFO ] PID=7   [DK] AxisNet v2.1: Online at /dev/net
+[   8.4500] [ INFO ] PID=3   [DKMS] Loaded 'AxisNet' (PID 7)
+[   8.4500] [ INFO ] PID=3   [DKMS] Loading: /drivers/eeprom.sys.lua
+[   8.5000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.5000] [ INFO ] PID=3   Creating process 8 ('/drivers/eeprom.sys.lua') at Ring 2
+[   8.5000] [ PROC ] PID=3   spawn image=/drivers/eeprom.sys.lua parent=3 pid=8 ring=2
+[   8.5000] [DEBUG ] PID=3   Loaded source bytes=870 pid=8
+[   8.5000] [DEBUG ] PID=3   Creating sandbox pid=8 ring=2
+[   8.5000] [DEBUG ] PID=3   Process ready pid=8 token=SYN-2764-c49...
+[   8.5000] [ DEV  ] PID=3     PID 8 synapse token: SYN-2764-c49c-1c...
+[   8.5000] [ INFO ] PID=8   [DK] EEPROM Stub Driver loaded. Doing nothing.
+[   8.5000] [ INFO ] PID=3   [DKMS] Loaded 'AxisEEPROMStub' (PID 8)
+[   8.5000] [ INFO ] PID=3   [DKMS] Loading: /drivers/computer.sys.lua
+[   8.5500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.5500] [ INFO ] PID=3   Creating process 9 ('/drivers/computer.sys.lua') at Ring 2
+[   8.5500] [ PROC ] PID=3   spawn image=/drivers/computer.sys.lua parent=3 pid=9 ring=2
+[   8.5500] [DEBUG ] PID=3   Loaded source bytes=892 pid=9
+[   8.5500] [DEBUG ] PID=3   Creating sandbox pid=9 ring=2
+[   8.5500] [DEBUG ] PID=3   Process ready pid=9 token=SYN-84f8-0a0...
+[   8.5500] [ DEV  ] PID=3     PID 9 synapse token: SYN-84f8-0a07-1a...
+[   8.5500] [ INFO ] PID=9   [DK] Computer Stub Driver loaded. Exposes... the computer? Sure.
+[   8.5500] [ INFO ] PID=3   [DKMS] Loaded 'AxisComputerStub' (PID 9)
+[   8.5500] [ INFO ] PID=3   [DKMS] Loading: /drivers/drive.sys.lua
+[   8.6000] [ INFO ] PID=2   [PM] Loading RingFS driver...
+[   8.6000] [ INFO ] PID=3   [DKMS] Loading: /drivers/ringfs.sys.lua
+[   8.6500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.6500] [ INFO ] PID=3   Creating process 10 ('/drivers/ringfs.sys.lua') at Ring 2
+[   8.6500] [ PROC ] PID=3   spawn image=/drivers/ringfs.sys.lua parent=3 pid=10 ring=2
+[   8.6500] [DEBUG ] PID=3   Loaded source bytes=4600 pid=10
+[   8.6500] [DEBUG ] PID=3   Creating sandbox pid=10 ring=2
+[   8.6500] [DEBUG ] PID=3   Process ready pid=10 token=SYN-443e-dca...
+[   8.6500] [ DEV  ] PID=3     PID 10 synapse token: SYN-443e-dca7-6d...
+[   8.6500] [ INFO ] PID=10  [DK] RingFS: Spinning up the memory donut.
+[   8.6500] [ INFO ] PID=10  [DK] DkCreateDevice: \Device\ringlog
+[   8.6500] [ INFO ] PID=3   [DKMS] Device '\Device\ringlog' created.
+[   8.7000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_003
+[   8.7000] [ INFO ] PID=10  [DK] SymLink: /dev/ringlog -> \Device\ringlog
+[   8.7000] [ INFO ] PID=3   [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
+[   8.7000] [ INFO ] PID=3   [DKMS] Loaded 'AxisRingFS' (PID 10)
+[   8.7000] [ INFO ] PID=2   [PM] Initializing log system on /dev/ringlog
+[   8.9000] [ INFO ] PID=2   [PM] Ringfs handle opened (persistent).[   8.9500] [ INFO ] PID=2   [PM] Log system initialized.
+[   8.9500] [ INFO ] PID=2   [PM] Processing driver autoload...
+[   8.9500] [ INFO ] PID=2   [PM] Loaded /boot/sys/drivers.cfg (2 entries)
+[   8.9500] [ INFO ] PID=2   [PM] Drivers: 2 enabled, 0 disabled
+[   9.0000] [ INFO ] PID=2   [PM] FAIL: 'RBMK' — file not found: /sys/drivers/hbm_rbmk.syss.lua
+[   9.0000] [ INFO ] PID=2   [PM] [2/2] Loading 'blkdev' (pri=200) /drivers/blkdev.sys.lua
+[   9.0000] [ INFO ] PID=2   [PM] Loading driver: /drivers/blkdev.sys.lua
+[   9.0500] [ INFO ] PID=3   [DKMS] Auto-discovery for type: drive
+[   9.0500] [ INFO ] PID=3   [DKMS] Loading: /drivers/blkdev.sys.lua
+[   9.1000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   9.1000] [ INFO ] PID=3   [HVCI] Driver 'AxisBlockDev' sandboxed with 1 capabilities: DISK_ACCESS
+[   9.1000] [ INFO ] PID=3   Creating process 11 ('/drivers/blkdev.sys.lua') at Ring 2
+[   9.1000] [ PROC ] PID=3   spawn image=/drivers/blkdev.sys.lua parent=3 pid=11 ring=2
+[   9.1000] [DEBUG ] PID=3   Loaded source bytes=4179 pid=11
+[   9.1000] [DEBUG ] PID=3   Creating sandbox pid=11 ring=2
+[   9.1000] [DEBUG ] PID=3   Process ready pid=11 token=SYN-1270-290...
+[   9.1000] [ DEV  ] PID=3     PID 11 synapse token: SYN-1270-290e-a3...
+[   9.1000] [ INFO ] PID=11  [DK] AxisBlockDev: Init
+[   9.1000] [ INFO ] PID=11  [DK] Auto-creating CMD Device: /dev/drive_256973_0
+[   9.1500] [ INFO ] PID=11  [DK] DkCreateDevice: \Device\drive_256973
+[   9.1500] [ INFO ] PID=3   [DKMS] Device '\Device\drive_256973' created.
+[   9.1500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\PHYS_004
+[   9.1500] [ INFO ] PID=11  [DK] SymLink: /dev/drive_256973_0 -> \Device\drive_256973
+[   9.1500] [ INFO ] PID=3   [DKMS] Symlink '/dev/drive_256973_0' -> '\Device\drive_256973' created.
+[   9.1500] [ INFO ] PID=11  [DK] AxisBlockDev: 4096KB, 512-byte sectors
+[   9.1500] [ INFO ] PID=3   [DKMS] Loaded 'AxisBlockDev' (PID 11)
+[   9.1500] [ INFO ] PID=2   [PM] OK: Auto-loaded 1 instances of AxisBlockDev
+[   9.1500] [ INFO ] PID=2   [PM] Autoload complete: 1 loaded, 1 failed, 0 disabled
+[   9.2000] [ INFO ] PID=2   [PM] Waiting for system stabilization...
+[  10.2000] [ INFO ] PID=2   [IO_MGR] I/O Manager started (PID 2)
+[  10.2000] [ INFO ] PID=2   [SEC_MON] Security Monitor initialized
+[  10.2000] [ INFO ] PID=2   [SESS] Session Manager initialized
+[  10.2000] [ INFO ] PID=2   [PM] Silence on deck. Handing off to userspace.
+[  10.2000] [ INFO ] PID=2   [PM] Spawning /bin/init.lua...
+[  10.2000] [ INFO ] PID=2   Creating process 12 ('/bin/init.lua') at Ring 3
+[  10.2000] [ PROC ] PID=2   spawn image=/bin/init.lua parent=2 pid=12 ring=3
+[  10.2500] [DEBUG ] PID=2   Loaded source bytes=5104 pid=12
+[  10.2500] [SCHED ] PID=2   Instrumented checkpoints=33 image=/bin/init.lua pid=12
+[  10.2500] [ DEV  ] PID=2   Preempt: /bin/init.lua → 33 yield checkpoints injected
+[  10.2500] [DEBUG ] PID=2   Creating sandbox pid=12 ring=3
+[  10.2500] [DEBUG ] PID=2   Process ready pid=12 token=SYN-b28c-507...
+[  10.2500] [ DEV  ] PID=2     PID 12 synapse token: SYN-b28c-507a-42...
+[  10.2500] [ INFO ] PID=2   [PM] Init spawned as PID 12[  10.3500] [ SEC  ] PID=1   PatchGuard auto-arming (post-boot, tick 300)...
+[  10.3500] [ SEC  ] PID=1   [PG] Taking snapshot...
+[  10.3500] [ SEC  ] PID=1   [PG] Tier1: syscall table, overrides, self, rings...
+[  10.3500] [ SEC  ] PID=1   [PG] Tier2: frozen libs, OB namespace...
+[  10.3500] [ SEC  ] PID=1   [PG] Tier3: SecureBoot, EEPROM...
+[  10.4000] [ SEC  ] PID=1   [PG] Tier3-files: reusing 22 cached hashes (fast re-arm)
+[  10.4000] [ SEC  ] PID=1   [PG] Snapshot: 182 syscalls, 17 overrides, 22 files, PM=PID 2, SB=inactive
+[  10.4000] [ SEC  ] PID=1   [PG] PatchGuard v3 ARMED — rotating checks, encrypted hashes, mtime scanning
+[  10.4000] [ SEC  ] PID=1   PatchGuard ARMED — all integrity monitoring active[  11.3500] [ INFO ] PID=12  Creating process 13 ('/bin/sh.lua') at Ring 3
+[  11.3500] [ PROC ] PID=12  spawn image=/bin/sh.lua parent=12 pid=13 ring=3
+[  11.4000] [DEBUG ] PID=12  Loaded source bytes=21225 pid=13
+[  11.4000] [SCHED ] PID=12  Instrumented checkpoints=208 image=/bin/sh.lua pid=13
+[  11.4000] [ DEV  ] PID=12  Preempt: /bin/sh.lua → 208 yield checkpoints injected
+[  11.4000] [DEBUG ] PID=12  Creating sandbox pid=13 ring=3
+[  11.4000] [DEBUG ] PID=12  Process ready pid=13 token=SYN-b9d3-b19...
+[  11.4000] [ DEV  ] PID=12    PID 13 synapse token: SYN-b9d3-b19d-c3...[  12.3500] [ INFO ] PID=13  Creating process 14 ('/usr/commands/qtest.lua') at Ring 3
+[  12.3500] [ PROC ] PID=13  spawn image=/usr/commands/qtest.lua parent=13 pid=14 ring=3
+[  12.4000] [DEBUG ] PID=13  Loaded source bytes=6218 pid=14
+[  12.4000] [SCHED ] PID=13  Instrumented checkpoints=24 image=/usr/commands/qtest.lua pid=14
+[  12.4000] [ DEV  ] PID=13  Preempt: /usr/commands/qtest.lua → 24 yield checkpoints injected
+[  12.4000] [DEBUG ] PID=13  Creating sandbox pid=14 ring=3
+[  12.4000] [DEBUG ] PID=13  Process ready pid=14 token=SYN-a1b2-c0c...
+[  12.4000] [ DEV  ] PID=13    PID 14 synapse token: SYN-a1b2-c0cb-bd...[  12.4000] [ INFO ] PID=14  Process 14 exited normally.[  31.2000] [ INFO ] PID=13  Creating process 15 ('/usr/commands/qtest.lua') at Ring 3
+[  31.2000] [ PROC ] PID=13  spawn image=/usr/commands/qtest.lua parent=13 pid=15 ring=3
+[  31.2500] [DEBUG ] PID=13  Loaded source bytes=6218 pid=15
+[  31.2500] [SCHED ] PID=13  Instrumented checkpoints=24 image=/usr/commands/qtest.lua pid=15
+[  31.2500] [ DEV  ] PID=13  Preempt: /usr/commands/qtest.lua → 24 yield checkpoints injected
+[  31.2500] [DEBUG ] PID=13  Creating sandbox pid=15 ring=3
+[  31.2500] [DEBUG ] PID=13  Process ready pid=15 token=SYN-8d07-3be...
+[  31.2500] [ DEV  ] PID=13    PID 15 synapse token: SYN-8d07-3be0-70...[  31.2500] [ INFO ] PID=2   [PM] User (PID 15) requested load of: /drivers/quarantine_test.sys.lua
+[  31.3000] [ INFO ] PID=3   [DKMS] Loading: /drivers/quarantine_test.sys.lua
+[  31.3000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[  31.3000] [ INFO ] PID=3   Creating process 16 ('/drivers/quarantine_test.sys.lua') at Ring 2
+[  31.3000] [ PROC ] PID=3   spawn image=/drivers/quarantine_test.sys.lua parent=3 pid=16 ring=2
+[  31.3500] [DEBUG ] PID=3   Loaded source bytes=4099 pid=16
+[  31.3500] [DEBUG ] PID=3   Creating sandbox pid=16 ring=2
+[  31.3500] [DEBUG ] PID=3   Process ready pid=16 token=SYN-6e13-dd8...
+[  31.3500] [ DEV  ] PID=3     PID 16 synapse token: SYN-6e13-dd87-4f...
+[  31.3500] [ INFO ] PID=16  [DK] QuarantineTester: initializing...
+[  31.3500] [ INFO ] PID=16  [DK] DkCreateDevice: /dev/qtest
+[  31.3500] [ INFO ] PID=3   [DKMS] Device '/dev/qtest' created.
+[  31.3500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_005
+[  31.3500] [ INFO ] PID=16  [DK] SymLink: /dev/qtest -> /dev/qtest
+[  31.3500] [ INFO ] PID=3   [DKMS] Symlink '/dev/qtest' -> '/dev/qtest' created.
+[  31.3500] [ INFO ] PID=16  [DK] QuarantineTester: /dev/qtest created — driver ready
+[  31.3500] [ INFO ] PID=16  [DK] QuarantineTester: dispatch table corrupted — fault injection active
+[  31.3500] [ INFO ] PID=3   [DKMS] Loaded 'QuarantineTester' (PID 16)
+[  31.3500] [ INFO ] PID=2   [PM] Loaded 'QuarantineTester' (PID 16)[  31.4000] [ INFO ] PID=3   [DKMS] IRP dispatch CRASHED: /system/driverdispatch.lua:32: attempt to index a boolean value (field 'tDispatch')[  31.4500] [ INFO ] PID=3   [DKMS] IRP dispatch CRASHED: /system/driverdispatch.lua:32: attempt to index a boolean value (field 'tDispatch')[  31.5000] [ INFO ] PID=3   [DKMS] IRP dispatch CRASHED: /system/driverdispatch.lua:32: attempt to index a boolean value (field 'tDispatch')
+[  31.5000] [ INFO ] PID=3   [HVCI] ╔══ DRIVER QUARANTINED ══╗
+[  31.5000] [ INFO ] PID=3   [HVCI] ║  QuarantineTester  ║
+[  31.5000] [ INFO ] PID=3   [HVCI] ║  3 faults in 60s       ║
+[  31.5000] [ INFO ] PID=3   [HVCI] ║  Clear via BIOS Setup  ║
+[  31.5000] [ INFO ] PID=3   [HVCI] ╚════════════════════════╝
+[  31.5000] [ INFO ] PID=3   [DKMS] !!! DRIVER QUARANTINED: QuarantineTester — 3 faults in 60s. IRPs will no longer be dispatched.[  31.5500] [ INFO ] PID=3   [DKMS] IRP blocked: QuarantineTester is quarantined[  31.6000] [ INFO ] PID=15  Process 15 exited normally.[  43.6000] [ INFO ] PID=13  Creating process 17 ('/usr/commands/regedit.lua') at Ring 3
+[  43.6000] [ PROC ] PID=13  spawn image=/usr/commands/regedit.lua parent=13 pid=17 ring=3
+[  43.6500] [DEBUG ] PID=13  Loaded source bytes=11684 pid=17
+[  43.6500] [SCHED ] PID=13  Instrumented checkpoints=101 image=/usr/commands/regedit.lua pid=17
+[  43.6500] [ DEV  ] PID=13  Preempt: /usr/commands/regedit.lua → 101 yield checkpoints injected
+[  43.6500] [DEBUG ] PID=13  Creating sandbox pid=17 ring=3
+[  43.6500] [DEBUG ] PID=13  Process ready pid=17 token=SYN-9c9c-877...
+[  43.6500] [ DEV  ] PID=13    PID 17 synapse token: SYN-9c9c-877f-0d...

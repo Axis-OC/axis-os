@@ -1,7 +1,6 @@
 --
 -- /lib/errcheck.lua
--- the big book of everything that can go wrong.
--- v2: added sMLTR and Object Handle error codes.
+-- v3: Added quarantine, ring escalation, and HVCI error codes.
 --
 
 local g_tErrorCodes = {
@@ -23,12 +22,33 @@ local g_tErrorCodes = {
   STATUS_DEVICE_ALREADY_EXISTS = 406,
   STATUS_INVALID_DRIVER_TYPE = 407,
   STATUS_DRIVER_UNLOAD_FAILED = 408,
+  STATUS_DEVICE_NOT_READY = 409,
+
+  -- Quarantine errors (420+)
+  STATUS_DRIVER_QUARANTINED = 420,
+  STATUS_DRIVER_FAULT_LIMIT = 421,
+  STATUS_QUARANTINE_ENFORCED = 422,
   
   -- Access and Security errors
   STATUS_ACCESS_DENIED = 500,
   STATUS_PRIVILEGE_NOT_HELD = 501,
   STATUS_SYNAPSE_TOKEN_MISMATCH = 502,
   STATUS_SYNAPSE_TOKEN_EXPIRED = 503,
+
+  -- Ring escalation errors (520+)
+  STATUS_RING_ESCALATION_DETECTED = 520,
+  STATUS_RING_ESCALATION_NIL_METHOD = 521,
+  STATUS_RING_ESCALATION_TYPE_MISMATCH = 522,
+  STATUS_RING_ESCALATION_METAMETHOD = 523,
+  STATUS_RING_ESCALATION_SANDBOX_BREACH = 524,
+
+  -- HVCI errors (540+)
+  STATUS_HVCI_BLOCKED = 540,
+  STATUS_HVCI_CAPABILITY_DENIED = 541,
+  STATUS_HVCI_HASH_MISMATCH = 542,
+  STATUS_HVCI_RUNTIME_VIOLATION = 543,
+  STATUS_HVCI_UNSIGNED_CODE = 544,
+  STATUS_HVCI_POLICY_VIOLATION = 545,
 
   -- VFS/IO errors
   STATUS_INVALID_HANDLE = 600,
@@ -45,30 +65,45 @@ local g_tErrorCodes = {
 
 local g_tErrorStrings = {
   [0] = "STATUS_SUCCESS: The operation completed successfully.",
-  [1] = "STATUS_PENDING: The operation is in progress and will complete later.",
+  [1] = "STATUS_PENDING: The operation is in progress.",
   [300] = "STATUS_UNSUCCESSFUL: The operation failed.",
-  [301] = "STATUS_NOT_IMPLEMENTED: The requested feature is not implemented.",
-  [400] = "STATUS_INVALID_DRIVER_OBJECT: The driver object structure is malformed.",
-  [401] = "STATUS_INVALID_DRIVER_ENTRY: The driver does not export a valid DriverEntry or UMDriverEntry function.",
-  [402] = "STATUS_INVALID_DRIVER_INFO: The driver's g_tDriverInfo table is missing or malformed.",
-  [403] = "STATUS_DRIVER_VALIDATION_FAILED: The driver file failed static validation.",
-  [404] = "STATUS_DRIVER_INIT_FAILED: The driver's Entry function returned an error status.",
-  [405] = "STATUS_NO_SUCH_DEVICE: The specified device does not exist.",
-  [406] = "STATUS_DEVICE_ALREADY_EXISTS: An attempt was made to create a device that already exists.",
-  [407] = "STATUS_INVALID_DRIVER_TYPE: The driver type specified in g_tDriverInfo is not valid.",
-  [408] = "STATUS_DRIVER_UNLOAD_FAILED: The driver's Unload function returned an error.",
-  [500] = "STATUS_ACCESS_DENIED: You do not have permission to perform this action.",
-  [501] = "STATUS_PRIVILEGE_NOT_HELD: The operation requires a higher ring level.",
-  [502] = "STATUS_SYNAPSE_TOKEN_MISMATCH: The sMLTR synapse token does not match the expected value.",
-  [503] = "STATUS_SYNAPSE_TOKEN_EXPIRED: The synapse token has been rotated and is no longer valid.",
-  [600] = "STATUS_INVALID_HANDLE: The provided file handle is not valid.",
-  [601] = "STATUS_INVALID_PARAMETER: A parameter provided to a function was not valid.",
-  [602] = "STATUS_END_OF_FILE: Reached the end of the file.",
-  [603] = "STATUS_NO_SUCH_FILE: The file or directory does not exist.",
-  [604] = "STATUS_DEVICE_BUSY: The device is currently busy with another request.",
-  [700] = "STATUS_HANDLE_NOT_FOUND: The object handle could not be resolved in the process handle table.",
-  [701] = "STATUS_HANDLE_TABLE_FULL: The process handle table is at capacity.",
-  [702] = "STATUS_HANDLE_ALIAS_INVALID: The numeric alias does not map to a valid handle token.",
+  [301] = "STATUS_NOT_IMPLEMENTED: Not implemented.",
+  [400] = "STATUS_INVALID_DRIVER_OBJECT: Driver object is malformed.",
+  [401] = "STATUS_INVALID_DRIVER_ENTRY: No valid DriverEntry.",
+  [402] = "STATUS_INVALID_DRIVER_INFO: g_tDriverInfo missing or malformed.",
+  [403] = "STATUS_DRIVER_VALIDATION_FAILED: Driver validation failed.",
+  [404] = "STATUS_DRIVER_INIT_FAILED: DriverEntry returned error.",
+  [405] = "STATUS_NO_SUCH_DEVICE: Device does not exist.",
+  [406] = "STATUS_DEVICE_ALREADY_EXISTS: Device already exists.",
+  [407] = "STATUS_INVALID_DRIVER_TYPE: Invalid driver type.",
+  [408] = "STATUS_DRIVER_UNLOAD_FAILED: Unload failed.",
+  [409] = "STATUS_DEVICE_NOT_READY: Device not ready.",
+  [420] = "STATUS_DRIVER_QUARANTINED: Driver is quarantined due to repeated faults.",
+  [421] = "STATUS_DRIVER_FAULT_LIMIT: Driver exceeded fault limit (3 errors in 60s).",
+  [422] = "STATUS_QUARANTINE_ENFORCED: Quarantined driver blocked from loading. Clear via BIOS Setup.",
+  [500] = "STATUS_ACCESS_DENIED: Permission denied.",
+  [501] = "STATUS_PRIVILEGE_NOT_HELD: Higher ring required.",
+  [502] = "STATUS_SYNAPSE_TOKEN_MISMATCH: sMLTR token mismatch.",
+  [503] = "STATUS_SYNAPSE_TOKEN_EXPIRED: Token expired.",
+  [520] = "STATUS_RING_ESCALATION_DETECTED: Ring privilege escalation attempt detected.",
+  [521] = "STATUS_RING_ESCALATION_NIL_METHOD: Nil method call — possible metamethod exploitation.",
+  [522] = "STATUS_RING_ESCALATION_TYPE_MISMATCH: Type mismatch in cross-ring IPC — possible injection.",
+  [523] = "STATUS_RING_ESCALATION_METAMETHOD: Metamethod triggered in privileged context.",
+  [524] = "STATUS_RING_ESCALATION_SANDBOX_BREACH: Sandbox boundary breach detected.",
+  [540] = "STATUS_HVCI_BLOCKED: HVCI blocked driver load.",
+  [541] = "STATUS_HVCI_CAPABILITY_DENIED: Driver lacks required capability.",
+  [542] = "STATUS_HVCI_HASH_MISMATCH: Runtime code integrity hash mismatch.",
+  [543] = "STATUS_HVCI_RUNTIME_VIOLATION: Runtime integrity violation detected.",
+  [544] = "STATUS_HVCI_UNSIGNED_CODE: Unsigned code execution blocked by HVCI.",
+  [545] = "STATUS_HVCI_POLICY_VIOLATION: HVCI policy violation.",
+  [600] = "STATUS_INVALID_HANDLE: Invalid file handle.",
+  [601] = "STATUS_INVALID_PARAMETER: Invalid parameter.",
+  [602] = "STATUS_END_OF_FILE: End of file.",
+  [603] = "STATUS_NO_SUCH_FILE: File not found.",
+  [604] = "STATUS_DEVICE_BUSY: Device busy.",
+  [700] = "STATUS_HANDLE_NOT_FOUND: Handle not found.",
+  [701] = "STATUS_HANDLE_TABLE_FULL: Handle table full.",
+  [702] = "STATUS_HANDLE_ALIAS_INVALID: Invalid handle alias.",
 }
 
 local oErrCheck = {}
@@ -77,7 +112,7 @@ for sName, nCode in pairs(g_tErrorCodes) do
 end
 
 function oErrCheck.fGetErrorString(nStatusCode)
-  return g_tErrorStrings[nStatusCode] or "Unknown or unspecified error code: " .. tostring(nStatusCode)
+  return g_tErrorStrings[nStatusCode] or "Unknown error: " .. tostring(nStatusCode)
 end
 
 return oErrCheck

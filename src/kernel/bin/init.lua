@@ -121,9 +121,9 @@ if not bDmEnabled then
                " / ___ \\ >  <| \\__ \\ |_| |___) |\n",
                "/_/   \\_/_/\\_\\_|___/\\___/|____/ \n")
 
-      io.write("AxisOS v0.7-HV-beta\n")
+      io.write("AxisOS v0.8-GDI-HV-beta\n")
       io.write("\n________________________________________________\n\n")
-      io.write("XEN XKA v0.7-HV-beta on " .. sHostname .. "\n\n")
+      io.write("XEN XKA v0.8-GDI-HV-beta on " .. sHostname .. "\n\n")
       
       io.write(sHostname .. " login: ")
       

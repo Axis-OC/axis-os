@@ -23,6 +23,10 @@ local g_tPendingIrps = {}
 local g_tSignalQueue = {}
 
 local g_tDeviceTypeCounters = {}
+
+local g_tDriverFaults = {}  -- [sDriverName] = {timestamps}
+local g_tQuarantined  = {}  -- [sDriverName] = true
+
 -- ====================================
 
 -- Syscall Overrides
@@ -34,6 +38,53 @@ syscall("syscall_override", "dkms_complete_irp")
 syscall("syscall_override", "dkms_register_interrupt")
 
 syscall("syscall_override", "dkms_get_next_index")
+
+
+local function fRecordDriverFault(sDriverName, sError)
+    -- Use HVCI for tracking if available
+    local oHvci = nil
+    pcall(function() oHvci = require("hvci") end)
+    
+    if oHvci and oHvci.RecordDriverFault then
+        local bShouldQuarantine = oHvci.RecordDriverFault(sDriverName, sError)
+        if bShouldQuarantine then
+            g_tQuarantined[sDriverName] = true
+            oHvci.QuarantineDriver(sDriverName)
+            -- Notify PatchGuard
+            syscall("kernel_log",
+                "[DKMS] !!! DRIVER QUARANTINED: " .. sDriverName ..
+                " — 3 faults in 60s. IRPs will no longer be dispatched.")
+            return true
+        end
+    else
+        -- Fallback without HVCI
+        if not g_tDriverFaults[sDriverName] then
+            g_tDriverFaults[sDriverName] = {}
+        end
+        local nNow = os.clock()
+        local tF = g_tDriverFaults[sDriverName]
+        tF[#tF + 1] = nNow
+        -- Prune old
+        local tRecent = {}
+        for _, t in ipairs(tF) do
+            if nNow - t <= 60 then tRecent[#tRecent + 1] = t end
+        end
+        g_tDriverFaults[sDriverName] = tRecent
+        if #tRecent >= 3 then
+            g_tQuarantined[sDriverName] = true
+            -- Mark in registry
+            pcall(function()
+                local sP = "@VT\\DRV\\" .. sDriverName
+                syscall("reg_create_key", sP)
+                syscall("reg_set_value", sP, "Quarantined", "true", "STR")
+            end)
+            syscall("kernel_log",
+                "[DKMS] QUARANTINED: " .. sDriverName)
+            return true
+        end
+    end
+    return false
+end
 
 local tSyscallHandlers = {}
 
@@ -269,7 +320,26 @@ function load_driver(sDriverPath, tDriverEnv)
         return nStatus
     end
 
-    -- ISOLATION LOGIC HERE
+    if g_tQuarantined[tDriverInfo.sDriverName] then
+        syscall("kernel_log",
+            "[DKMS] BLOCKED: " .. tDriverInfo.sDriverName ..
+            " is quarantined. Clear via BIOS Setup.")
+        return tStatus.STATUS_DRIVER_QUARANTINED or 420
+    end
+    -- Also check registry (persists across reboots)
+    local bRegQ = false
+    pcall(function()
+        local v = syscall("reg_get_value",
+            "@VT\\DRV\\" .. tDriverInfo.sDriverName, "Quarantined")
+        bRegQ = (v == true or v == "true")
+    end)
+    if bRegQ then
+        syscall("kernel_log",
+            "[DKMS] BLOCKED: " .. tDriverInfo.sDriverName ..
+            " quarantined in registry. Clear via BIOS Setup.")
+        return tStatus.STATUS_QUARANTINE_ENFORCED or 422
+    end
+
     -- if it's a component driver, verify we actually have a component address.
     if tDriverInfo.sDriverType == tDKStructs.DRIVER_TYPE_CMD then
         if not tDriverEnv or not tDriverEnv.address then
@@ -376,17 +446,41 @@ while true do
     elseif sSignalName == "vfs_io_request" then
         local pIrp = p1
         if pIrp and type(pIrp) == "table" then
-            g_tPendingIrps[pIrp.nSenderPid] = pIrp
-            local nDispatchStatus = oDispatcher.DispatchIrp(pIrp, g_tDeviceTree, g_tSymbolicLinks)
-
-            if pIrp.nMajorFunction == 0x00 then -- IRP_MJ_CREATE
-                local pDevice = g_tDeviceTree[pIrp.sDeviceName]
-                if pDevice and pDevice.pDriverObject then
-                    pIrp.tIoStatus.vInformation = pDevice.pDriverObject.nDriverPid
+            -- Check quarantine before dispatching
+            local pDevice = g_tDeviceTree[pIrp.sDeviceName]
+            if pDevice and pDevice.pDriverObject then
+                local sDriverName = pDevice.pDriverObject.tDriverInfo
+                    and pDevice.pDriverObject.tDriverInfo.sDriverName or "?"
+                if g_tQuarantined[sDriverName] then
+                    syscall("kernel_log",
+                        "[DKMS] IRP blocked: " .. sDriverName .. " is quarantined")
+                    tSyscallHandlers.dkms_complete_irp(0, pIrp,
+                        tStatus.STATUS_DRIVER_QUARANTINED or 420)
+                    goto continue
                 end
             end
 
-            if nDispatchStatus ~= tStatus.STATUS_PENDING then
+            g_tPendingIrps[pIrp.nSenderPid] = pIrp
+            
+            -- SAFE DISPATCH: wrap in pcall to catch driver errors
+            local bDispatchOk, nDispatchStatus = pcall(
+                oDispatcher.DispatchIrp, pIrp, g_tDeviceTree, g_tSymbolicLinks)
+            
+            if not bDispatchOk then
+                -- Driver crashed during dispatch
+                local sErr = tostring(nDispatchStatus)
+                syscall("kernel_log",
+                    "[DKMS] IRP dispatch CRASHED: " .. sErr)
+                
+                if pDevice and pDevice.pDriverObject then
+                    local sDN = pDevice.pDriverObject.tDriverInfo
+                        and pDevice.pDriverObject.tDriverInfo.sDriverName or "?"
+                    fRecordDriverFault(sDN, sErr)
+                end
+                
+                tSyscallHandlers.dkms_complete_irp(0, pIrp,
+                    tStatus.STATUS_UNSUCCESSFUL)
+            elseif nDispatchStatus ~= tStatus.STATUS_PENDING then
                 tSyscallHandlers.dkms_complete_irp(0, pIrp, nDispatchStatus)
             end
         end

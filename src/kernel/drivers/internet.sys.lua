@@ -14,6 +14,7 @@ g_tDriverInfo = {
   nLoadPriority = 250,
   sVersion = "2.1.0",
   bAsyncIoSupported = true,
+  capabilities = {"INTERNET_CARD", "RAW_COMPONENT_LIST"},
 }
 
 local g_pDeviceObject = nil

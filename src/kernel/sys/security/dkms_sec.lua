@@ -273,6 +273,33 @@ function oSec.fValidateDriverInfo(tDriverInfo)
         return tStatus.STATUS_DRIVER_VALIDATION_FAILED,
             "Async I/O required: set bAsyncIoSupported=true in g_tDriverInfo"
     end
+
+    local nCapStatus, sCapErr = oSec.fValidateCapabilities(tDriverInfo, nil)
+    if nCapStatus ~= tStatus.STATUS_SUCCESS then
+        return nCapStatus, sCapErr
+    end
+
+    return tStatus.STATUS_SUCCESS
+end
+
+function oSec.fValidateCapabilities(tDriverInfo, sDriverPath)
+    if not oHvci then return tStatus.STATUS_SUCCESS end
+    
+    -- Check quarantine BEFORE any other validation
+    if oHvci.IsQuarantined(tDriverInfo.sDriverName) then
+        syscall("kernel_log", "[SEC] QUARANTINE: " .. tDriverInfo.sDriverName ..
+            " is quarantined — refusing load. Clear via BIOS Setup.")
+        return tStatus.STATUS_DRIVER_QUARANTINED or 420,
+            "Driver quarantined. Clear via BIOS Setup (DEL at boot)."
+    end
+
+    -- Capability sandbox generation (HVCI v2)
+    local tRestrictions, sCapErr = oHvci.GenerateCapabilitySandbox(tDriverInfo, sDriverPath)
+    if sCapErr and not tRestrictions then
+        -- Only block if HVCI returned an explicit error (ENFORCE mode)
+        return tStatus.STATUS_DRIVER_VALIDATION_FAILED or 403, sCapErr
+    end
+
     return tStatus.STATUS_SUCCESS
 end
 

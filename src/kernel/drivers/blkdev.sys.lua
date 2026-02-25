@@ -13,6 +13,7 @@ g_tDriverInfo = {
   sVersion = "1.0.0",
   sSupportedComponent = "drive",
   bAsyncIoSupported = true,
+  capabilities = {"DISK_ACCESS"},
 }
 
 local g_pDev = nil

@@ -154,7 +154,15 @@ function P.createProxy(vol, sLabel)
   function proxy.volumeInfo() return vol:info() end
   function proxy.setCow(b) return vol:setCow(b) end
 
-  return proxy
+  -- SECURITY: Freeze proxy table to prevent runtime method hijacking
+  local protected_proxy = {}
+  setmetatable(protected_proxy, {
+      __index = proxy,
+      __newindex = function() error("SECURITY VIOLATION: AXFS proxy is read-only") end,
+      __metatable = "protected"
+  })
+
+  return protected_proxy
 end
 
 return P

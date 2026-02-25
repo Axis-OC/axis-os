@@ -30,6 +30,9 @@ return {
   ["/sys/security/dkms_sec.lua"]  = { uid = 0, gid = 0, mode = 644 },
   ["/sys/security/hvci.lua"]      = { uid = 0, gid = 0, mode = 644 },
 
+  ["/lib/exsi.lua"]                  = { uid = 0, gid = 0, mode = 644 },
+  ["/lib/enclave.lua"]               = { uid = 0, gid = 0, mode = 644 },
+
   ["/etc/passwd.lua"]             = { uid = 0, gid = 0, mode = 600 },
   ["/etc/perms.lua"]              = { uid = 0, gid = 0, mode = 600 },
   ["/etc/pki.cfg"]                = { uid = 0, gid = 0, mode = 600 },

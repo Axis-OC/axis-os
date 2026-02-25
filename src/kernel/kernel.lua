@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.7-HV-beta
+-- AxisOS Xen XKA v0.8-GDI-HV-beta
 --
 local kernel = {
     tProcessTable = {},
@@ -58,6 +58,7 @@ local g_oPatchGuard = nil   -- Kernel integrity monitor
 local g_oHypervisor = nil   -- Metatable protection primitives
 local g_tKernelDeviceTree = nil     -- ref to DKMS's g_tDeviceTree
 local g_tKernelSymlinks   = nil     -- ref to DKMS's g_tSymbolicLinks
+local g_oExsi = nil         -- EXSi enclave manager
 
 local g_tSchedStats = {
     nTotalResumes = 0,
@@ -918,44 +919,61 @@ __logger_init()
 
 local g_tFrozenString, g_tFrozenTable, g_tFrozenMath, g_tFrozenOs
 
+-- [SECURITY FIX] Helper to make a table strictly read-only
+local function freeze_table(t)
+    local proxy = {}
+    setmetatable(proxy, {
+        __index = t,
+        __newindex = function() error("SECURITY VIOLATION: Attempt to modify protected system table", 2) end,
+        __metatable = "protected"
+    })
+    return proxy
+end
+
 do
     -- String (minus dump, with bounded rep)
     local fRealRep = string.rep
-    g_tFrozenString = {}
+    local tUnfrozenString = {}
     for k, v in pairs(string) do
-        g_tFrozenString[k] = v
+        tUnfrozenString[k] = v
     end
-    g_tFrozenString.dump = nil
-    g_tFrozenString.rep = function(s, n, sep)
+    tUnfrozenString.dump = nil
+    tUnfrozenString.rep = function(s, n, sep)
         local nEst = #s * n + (sep and #sep * (n - 1) or 0)
         if nEst > 1048576 then
             error("string.rep: result too large", 2)
         end
         return fRealRep(s, n, sep)
     end
+    
+    -- [SECURITY FIX] Freeze the global libraries
+    g_tFrozenString = freeze_table(tUnfrozenString)
 
     -- Table
-    g_tFrozenTable = {}
+    local tUnfrozenTable = {}
     for k, v in pairs(table) do
-        g_tFrozenTable[k] = v
+        tUnfrozenTable[k] = v
     end
+    g_tFrozenTable = freeze_table(tUnfrozenTable)
 
     -- Math
-    g_tFrozenMath = {}
+    local tUnfrozenMath = {}
     for k, v in pairs(math) do
-        g_tFrozenMath[k] = v
+        tUnfrozenMath[k] = v
     end
+    g_tFrozenMath = freeze_table(tUnfrozenMath)
 
     -- Os (safe subset)
-    g_tFrozenOs = {}
+    local tUnfrozenOs = {}
     for k, v in pairs(os) do
         if k ~= "exit" and k ~= "execute" and k ~= "remove" and k ~= "rename" then
-            g_tFrozenOs[k] = v
+            tUnfrozenOs[k] = v
         end
     end
+    g_tFrozenOs = freeze_table(tUnfrozenOs)
 end
 
-kprint("info", "AxisOS Xen XKA v0.7-HV starting...")
+kprint("info", "AxisOS Xen XKA v0.8-GDI-HV starting...")
 kprint("info", "Copyright (C) 2026 AxisOS")
 kprint("none", "")
 
@@ -1375,6 +1393,64 @@ local function __load_patchguard()
     return nil
 end
 
+
+local function __load_sha256()
+    local sCode, sErr = primitive_load("/lib/sha256.lua")
+    if not sCode then
+        kprint("warn", "SHA-256 module not found at /lib/sha256.lua: " .. tostring(sErr))
+        return nil
+    end
+    local tEnv = {
+        string = string, math = math, table = table,
+        bit32 = bit32, tostring = tostring, tonumber = tonumber,
+        type = type,
+    }
+    local fChunk, sLoadErr = load(sCode, "@sha256", "t", tEnv)
+    if not fChunk then
+        kprint("fail", "Failed to parse sha256: " .. tostring(sLoadErr))
+        return nil
+    end
+    local bOk, oResult = pcall(fChunk)
+    if bOk and type(oResult) == "table" then return oResult end
+    kprint("fail", "Failed to init sha256: " .. tostring(oResult))
+    return nil
+end
+
+local g_oSha256Lib = __load_sha256()
+if g_oSha256Lib then
+    kprint("ok", "Pure-Lua SHA-256 loaded (/lib/sha256.lua)")
+else
+    kprint("warn", "SHA-256 module unavailable — PatchGuard will use data card")
+end
+
+local function __load_exsi()
+    local sCode, sErr = primitive_load("/lib/exsi.lua")
+    if not sCode then
+        kprint("warn", "EXSi not found at /lib/exsi.lua: " .. tostring(sErr))
+        return nil
+    end
+    local tEnv = {
+        string = string, math = math, table = table,
+        pairs = pairs, ipairs = ipairs, type = type,
+        tostring = tostring, tonumber = tonumber,
+        next = next, pcall = pcall, xpcall = xpcall,
+        error = error, select = select,
+        setmetatable = setmetatable,
+        rawequal = rawequal, assert = assert,
+        bit32 = bit32,
+        load = load,
+    }
+    local fChunk, sLoadErr = load(sCode, "@exsi", "t", tEnv)
+    if not fChunk then
+        kprint("fail", "Failed to parse EXSi: " .. tostring(sLoadErr))
+        return nil
+    end
+    local bOk, oResult = pcall(fChunk)
+    if bOk and type(oResult) == "table" then return oResult end
+    kprint("fail", "Failed to init EXSi: " .. tostring(oResult))
+    return nil
+end
+
 pcall(function()
     local sCode = primitive_load("/system/lib/dk/shared_structs.lua")
     if sCode then
@@ -1469,8 +1545,8 @@ function kernel.create_sandbox(nPid, nRing)
     -- read goes through __index, every global write through
     -- __newindex.  This is possible because:
     --
-    --   a) rawset / rawget are NOT exposed to Ring ≥ 2.5
-    --   b) debug library is NOT exposed to Ring ≥ 1
+    --   a) rawset / rawget are NOT exposed to Ring >= 2.5
+    --   b) debug library is NOT exposed to Ring >= 1
     --   c) __metatable = "protected" blocks getmetatable() and
     --      setmetatable() on the sandbox itself
     --
@@ -1551,36 +1627,12 @@ function kernel.create_sandbox(nPid, nRing)
     end
 
     -- Library tables
-    -- [FIX] REMOVED: tProtected.coroutine = coroutine
-    -- coroutine is now set inside the preempt conditional block below,
-    -- either as a depth-tracking wrapper (preemptive) or raw (cooperative).
-    do
-        local tSafeString = shallowCopy(string)
-        tSafeString.dump = nil
-        -- Cap string.rep to prevent single-call memory bombs
-        local fRealRep = string.rep
-        tSafeString.rep = function(s, n, sep)
-            local nEst = #s * n + (sep and #sep * (n - 1) or 0)
-            if nEst > 1048576 then
-                error("string.rep: result too large", 2)
-            end
-            return fRealRep(s, n, sep)
-        end
-        tProtected.string = tSafeString
-    end
-    tProtected.table = shallowCopy(table)
-    tProtected.math = shallowCopy(math)
-
-    -- Safe os (no exit/execute/remove/rename)
-    do
-        local tSafeOs = {}
-        for k, v in pairs(os) do
-            if k ~= "exit" and k ~= "execute" and k ~= "remove" and k ~= "rename" then
-                tSafeOs[k] = v
-            end
-        end
-        tProtected.os = tSafeOs
-    end
+    -- [SECURITY FIX] Instead of making a shallowCopy that users can overwrite, 
+    -- we pass the globally frozen libraries that reject modifications.
+    tProtected.string = g_tFrozenString
+    tProtected.table  = g_tFrozenTable
+    tProtected.math   = g_tFrozenMath
+    tProtected.os     = g_tFrozenOs
 
     do
         local fRealSetmt = setmetatable
@@ -1615,21 +1667,6 @@ function kernel.create_sandbox(nPid, nRing)
         local nPcQuantum = g_oPreempt.DEFAULT_QUANTUM
         local nPcInterval = g_oPreempt.CHECK_INTERVAL
 
-        -- Thanks to @RedstoneParkour for pointing at this:
-        -- "huh @Eurythmic i believe your preemptive multitasking impl can be bypassed with recursive tail call hell and the ternary operator cond and a or b"
-        --
-        -- [FIX] Sub-coroutine depth tracking.
-        -- When user code creates coroutines via coroutine.create/wrap and
-        -- resumes them, __pc() inside that sub-coroutine can only yield
-        -- the sub-coroutine not the process.  Without depth tracking,
-        -- an attacker can nest coroutine.resume inside a loop and
-        -- amplify the checkpoint interval (inner runs N iters, outer
-        -- runs N iters → N² iterations before the process yields).
-        --
-        -- Exactly what changed: the wrapped resume tracks nesting depth.
-        -- When __pc() fires inside a sub-coroutine it yields the sub-coroutine AND
-        -- sets bForceYield.  When the wrapper returns to depth 0 it
-        -- yields the process coroutine, giving the scheduler control.
         local nCoDepth = 0 -- 0 = process level, >0 = sub-coroutine
         local bForceYield = false -- set by __pc when quantum expired in sub-co
 
@@ -1646,7 +1683,7 @@ function kernel.create_sandbox(nPid, nRing)
                 if tProc and tProc.tPendingSignals and #tProc.tPendingSignals > 0 then
                     g_oIpc.DeliverSignals(nPid)
                     if tProc.status == "dead" then
-                        fRealYield()
+                        pcall(fRealYield) -- Safely exit if killed inside C-boundary
                         return
                     end
                 end
@@ -1654,22 +1691,16 @@ function kernel.create_sandbox(nPid, nRing)
 
             local nNow = fRealUptime()
             if nNow - nPcLastYield >= nPcQuantum then
-                if nCoDepth > 0 then
-                    -- [FIX] We are inside a user sub-coroutine.
-                    -- fRealYield() will only yield the sub-coroutine
-                    -- back to the wrapper's resume call.  Set the flag
-                    -- so the wrapper also yields the process.
+                local bYieldOk = pcall(fRealYield)
+                
+                nPcLastYield = fRealUptime()
+
+                if bYieldOk and nCoDepth > 0 then
                     bForceYield = true
                 end
-                fRealYield()
-                nPcLastYield = fRealUptime()
             end
         end
 
-        -- [FIX] Wrapped coroutine library with depth tracking.
-        -- create, yield, status, running are passed through unchanged.
-        -- resume and wrap are intercepted to maintain nCoDepth and
-        -- honour bForceYield when returning to process level.
         local tSafeCoroutine = {
             create = fRealCreate,
             yield = fRealYield,
@@ -1682,8 +1713,6 @@ function kernel.create_sandbox(nPid, nRing)
             local tResults = {fRealResume(co, ...)}
             nCoDepth = nCoDepth - 1
 
-            -- Back at process level: if __pc() requested a yield while
-            -- we were inside the sub-coroutine, yield the process now.
             if nCoDepth == 0 and bForceYield then
                 bForceYield = false
                 fRealYield()
@@ -1706,7 +1735,6 @@ function kernel.create_sandbox(nPid, nRing)
                     nPcLastYield = fRealUptime()
                 end
 
-                -- coroutine.wrap convention: error on failure
                 if not tResults[1] then
                     error(tResults[2], 0)
                 end
@@ -1714,7 +1742,18 @@ function kernel.create_sandbox(nPid, nRing)
             end
         end
 
-        tProtected.coroutine = tSafeCoroutine -- [FIX] wrapped version
+        -- [SECURITY FIX] Create a localized freeze helper for the generated coroutine table
+        local function freeze_local(t)
+            local proxy = {}
+            setmetatable(proxy, {
+                __index = t,
+                __newindex = function() error("SECURITY VIOLATION: Attempt to modify coroutine library", 2) end,
+                __metatable = "protected"
+            })
+            return proxy
+        end
+
+        tProtected.coroutine = freeze_local(tSafeCoroutine) -- [FIX] frozen wrapped version
 
         local fKernelLoad = load
         tProtected.load = function(sChunk, sName, sMode, _tUserEnv)
@@ -1804,7 +1843,15 @@ function kernel.create_sandbox(nPid, nRing)
     elseif nRing <= 2 then
         -- Drivers / Pipeline Manager need component and raw ops
         tSafeGlobals.component = component
-        tSafeGlobals.rawset = rawset
+        local fRealRawset = rawset
+        local fRealGetMetatable = getmetatable
+        tSafeGlobals.rawset = function(t, k, v)
+            local mt = fRealGetMetatable(t)
+            if mt == "protected" or mt == "hypervisor_sealed" or mt == "hypervisor_monitored" then
+                error("SECURITY VIOLATION: rawset on frozen library or protected table", 2)
+            end
+            return fRealRawset(t, k, v)
+        end
         tSafeGlobals.rawget = rawget
     end
     -- Ring 2.5, 3: NO rawset, rawget, debug, raw_component, raw_computer
@@ -2074,6 +2121,24 @@ local function deepSanitize(vValue, nDepth, tCounter)
     end
     if sType == "table" then
         tCounter.n = tCounter.n + 1
+        
+        -- RING ESCALATION DETECTION: check for metatables
+        -- A Ring 3 process should NEVER send a table with a metatable
+        -- to Ring 1. Metatables enable metamethod exploitation.
+        local bHasMt = false
+        pcall(function()
+            local mt = getmetatable(vValue)
+            if mt and mt ~= "protected" then
+                bHasMt = true
+            end
+        end)
+        if bHasMt then
+            kprint("sec", "RING ESCALATION BLOCKED: table with metatable in cross-ring IPC")
+            kprint("sec", "  STATUS_RING_ESCALATION_METAMETHOD (0x020B)")
+            -- Strip the metatable and return empty table
+            return {}
+        end
+        
         local tClean = {}
         local key = nil
         while true do
@@ -2114,6 +2179,42 @@ function kernel.syscall_dispatch(sName, ...)
             end
             tProc._nSyscallCount = 0
             tProc._nSyscallWindowStart = nNow
+        end
+    end
+
+    if g_tSyscallProfiler and nPid and nPid >= 2 then
+        local tSP = g_tSyscallProfiler
+        if not tSP.bLocked then
+            -- Learning phase: record syscalls per PID
+            if not tSP.tProfiles[nPid] then tSP.tProfiles[nPid] = {} end
+            tSP.tProfiles[nPid][sName] = true
+
+            -- Check if stabilization period has elapsed
+            if raw_computer.uptime() - tSP.nStartTime > tSP.nStabilizeAfter then
+                tSP.bLocked = true
+                tSP.tBaselines = {}
+                for bpid, bset in pairs(tSP.tProfiles) do
+                    tSP.tBaselines[bpid] = bset
+                end
+                local nProf = 0
+                for _ in pairs(tSP.tBaselines) do nProf = nProf + 1 end
+                kprint("sec", "[PROFILER] Baselines locked for " .. nProf .. " processes")
+            end
+        else
+            -- Enforcement phase: flag new syscalls outside baseline
+            local tBase = tSP.tBaselines[nPid]
+            if tBase and not tBase[sName] then
+                local tAlert = {
+                    pid = nPid, syscall = sName,
+                    time = raw_computer.uptime(),
+                    ring = kernel.tRings[nPid],
+                }
+                tSP.tAlerts[#tSP.tAlerts + 1] = tAlert
+                if #tSP.tAlerts > 50 then table.remove(tSP.tAlerts, 1) end
+                kprint("sec", string.format(
+                    "[PROFILER] ANOMALY: PID %d (Ring %s) used '%s' outside baseline",
+                    nPid, tostring(kernel.tRings[nPid]), sName))
+            end
         end
     end
     
@@ -2233,7 +2334,7 @@ function kernel.syscall_dispatch(sName, ...)
 
         -- SANITIZE when Ring >= 2.5 sends to Ring 1 PM
         local tArgs
-        if kernel.tRings[nPid] >= 3 then
+        if kernel.tRings[nPid] >= 2.5 then
             tArgs = deepSanitize({...})
         else
             tArgs = {...}
@@ -2284,13 +2385,14 @@ function kernel.syscall_dispatch(sName, ...)
         return coroutine.yield()
     end
 
-    local tReturns = {pcall(tHandler.func, nPid, ...)}
-    local bIsOk = table.remove(tReturns, 1)
+    local tReturns = table.pack(pcall(tHandler.func, nPid, ...))
+    local bIsOk = tReturns[1]
     if not bIsOk then
-        return nil, tReturns[1]
+        return nil, tReturns[2]
     end
-    return table.unpack(tReturns)
+    return table.unpack(tReturns, 2, tReturns.n)
 end
+
 
 -------------------------------------------------
 -- SYSCALL DEFINITIONS
@@ -2422,6 +2524,30 @@ kernel.tSyscallTable["patchguard_check"] = {
         return g_oPatchGuard.Check()
     end,
     allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["syscall_profiler_status"] = {
+    func = function(nPid)
+        if not g_tSyscallProfiler then return nil end
+        local tSP = g_tSyscallProfiler
+        local nProfiles = 0
+        for _ in pairs(tSP.tProfiles) do nProfiles = nProfiles + 1 end
+        return {
+            bLocked = tSP.bLocked,
+            nProfiles = nProfiles,
+            nAlerts = #tSP.tAlerts,
+            nStabilizeAfter = tSP.nStabilizeAfter,
+            nElapsed = raw_computer.uptime() - tSP.nStartTime,
+            tRecentAlerts = (function()
+                local t = {}
+                for i = math.max(1, #tSP.tAlerts - 9), #tSP.tAlerts do
+                    t[#t+1] = tSP.tAlerts[i]
+                end
+                return t
+            end)(),
+        }
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
 
@@ -2602,7 +2728,7 @@ kernel.tSyscallTable["process_list"] = {
                 table.insert(tResult, {
                     pid = nProcPid,
                     parent = tProc.parent or 0,
-                    ring = tProc.ring or -1,
+                    ring = math.floor(tProc.ring or -1),   -- FIX: ensure Lua 5.3 integer for safe %d formatting
                     status = tProc.status or "?",
                     uid = tProc.uid or -1,
                     image = sImage
@@ -2616,6 +2742,7 @@ kernel.tSyscallTable["process_list"] = {
     end,
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
+
 
 kernel.tSyscallTable["process_list_threads"] = {
     func = function(nPid)
@@ -2637,6 +2764,10 @@ kernel.tSyscallTable["process_list_threads"] = {
 
 kernel.tSyscallTable["process_elevate"] = {
     func = function(nPid, nNewRing)
+        local tProc = kernel.tProcessTable[nPid]
+        if not tProc or (tProc.uid or 1000) ~= 0 then
+            return nil, "Permission denied: root required"
+        end
         if kernel.tRings[nPid] == 3 and nNewRing == 2.5 then
             kernel.tRings[nPid] = 2.5
             kernel.tProcessTable[nPid].ring = 2.5
@@ -3537,6 +3668,55 @@ kernel.tSyscallTable["ke_get_completion"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+kernel.tSyscallTable["exsi_create"] = {
+    func = function(nPid, sCode)
+        if not g_oExsi then return nil, "EXSi not loaded" end
+        return g_oExsi.CreateEnclave(nPid, sCode)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["exsi_call"] = {
+    func = function(nPid, nHandle, sMethod, ...)
+        if not g_oExsi then return nil, "EXSi not loaded" end
+        return g_oExsi.CallEnclave(nPid, nHandle, sMethod, ...)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["exsi_attest"] = {
+    func = function(nPid, nHandle)
+        if not g_oExsi then return nil, "EXSi not loaded" end
+        return g_oExsi.Attest(nHandle)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["exsi_destroy"] = {
+    func = function(nPid, nHandle)
+        if not g_oExsi then return nil, "EXSi not loaded" end
+        local nRing = kernel.tRings[nPid] or 3
+        return g_oExsi.DestroyEnclave(nPid, nRing, nHandle)
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["exsi_list"] = {
+    func = function(nPid)
+        if not g_oExsi then return {} end
+        return g_oExsi.ListEnclaves()
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["exsi_stats"] = {
+    func = function(nPid)
+        if not g_oExsi then return nil end
+        return g_oExsi.GetStats()
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
 kernel.tSyscallTable["kernel_register_device_tree"] = {
     func = function(nPid, tDevTree, tSymlinks)
         g_tKernelDeviceTree = tDevTree
@@ -3590,13 +3770,13 @@ kernel.tSyscallTable["sched_get_stats"] = {
     allowed_rings = {0, 1, 2, 2.5, 3}
 }
 
+
 kernel.tSyscallTable["mem_info"] = {
     func = function(nPid)
         local nTotal = computer.totalMemory()
         local nFree = computer.freeMemory()
         local nUsed = nTotal - nFree
 
-        -- Count per-process overhead estimates
         local tProcs = {}
         for nProcPid, tProc in pairs(kernel.tProcessTable) do
             if tProc.status ~= "dead" then
@@ -3617,16 +3797,30 @@ kernel.tSyscallTable["mem_info"] = {
                 if tProc.signal_queue then
                     nSignalQ = #tProc.signal_queue
                 end
+                local nThreads = tProc.threads and #tProc.threads or 0
+
+                -- Per-process memory estimate (KB):
+                --   Base sandbox+coroutine+env overhead: ~8 KB
+                --   Each cached module:  ~4 KB average
+                --   Each OB handle:      ~1 KB (entry + referenced object body)
+                --   Each thread:         ~4 KB (coroutine + env copy)
+                --   Each queued signal:  ~0.1 KB
+                local nEstMemKB = 8
+                    + nModules  * 4
+                    + nHandles  * 1
+                    + nThreads  * 4
+                    + nSignalQ
 
                 table.insert(tProcs, {
-                    pid = nProcPid,
-                    ring = tProc.ring or -1,
-                    status = tProc.status or "?",
+                    pid     = nProcPid,
+                    ring    = 3,  -- FIX: integer-safe
+                    status  = tProc.status or "?",
                     modules = nModules,
                     handles = nHandles,
                     signals = nSignalQ,
-                    threads = tProc.threads and #tProc.threads or 0,
-                    cpu = tProc.nCpuTime or 0
+                    threads = nThreads,
+                    cpu     = tProc.nCpuTime or 0,
+                    memKB   = math.floor(nEstMemKB),         -- NEW: per-process memory estimate
                 })
             end
         end
@@ -3634,7 +3828,6 @@ kernel.tSyscallTable["mem_info"] = {
             return a.pid < b.pid
         end)
 
-        -- Global overhead estimates
         local nDmesgEntries = #g_tDmesg
         local nBootLogEntries = #kernel.tBootLog
         local nLoadedModules = 0
@@ -4137,6 +4330,42 @@ else
     kprint("warn", "PatchGuard not available — no runtime integrity monitoring")
 end
 
+g_oExsi = __load_exsi()
+if g_oExsi then
+    -- Compute hardware identity seed for sealing key derivation.
+    -- Mixes multiple hardware addresses for strong machine binding.
+    local sExsiHwSeed = ""
+    pcall(function() sExsiHwSeed = sExsiHwSeed .. raw_computer.address() end)
+    pcall(function()
+        for addr in raw_component.list("eeprom") do
+            sExsiHwSeed = sExsiHwSeed .. addr; break
+        end
+    end)
+    pcall(function()
+        for addr in raw_component.list("data") do
+            sExsiHwSeed = sExsiHwSeed .. addr; break
+        end
+    end)
+    pcall(function()
+        for addr in raw_component.list("filesystem") do
+            local p = raw_component.proxy(addr)
+            if p and p.exists and p.exists("/kernel.lua") then
+                sExsiHwSeed = sExsiHwSeed .. addr; break
+            end
+        end
+    end)
+
+    g_oExsi.Initialize({
+        fLog          = function(s) kprint("info", s) end,
+        fUptime       = raw_computer.uptime,
+        oSha256       = g_oSha256Lib,
+        sHardwareSeed = sExsiHwSeed,
+    })
+    kprint("ok", "EXSi Enclaved Kernel eXecution Isolation loaded")
+else
+    kprint("warn", "EXSi not available — no enclave support")
+end
+
 -- 1. Mount Root FS
 kprint("info", "Reading fstab from /etc/fstab.lua...")
 local tFstab = primitive_load_lua("/etc/fstab.lua")
@@ -4271,27 +4500,53 @@ end
 kernel.nPipelinePid = nPipelinePid
 kprint("ok", "Ring 1 Pipeline Manager started as PID", nPipelinePid)
 
--- Initialize PatchGuard with kernel references
+
+-- Syscall Behavior Profiler (Feature 5)
+local g_tSyscallProfiler = {
+    tProfiles       = {},      -- [pid] -> {[syscall_name] = true}
+    nStartTime      = raw_computer.uptime(),
+    nStabilizeAfter = 120,     -- seconds before locking baselines
+    bLocked         = false,
+    tBaselines      = {},      -- [pid] -> frozen set after lock
+    tAlerts         = {},      -- recent anomaly alerts
+}
+
 -- Initialize PatchGuard with FULL monitoring data
 if g_oPatchGuard then
-    -- Build hardware verification functions
-    -- These are closures that PatchGuard stores as upvalues
     local fPgSha256 = nil
     local fPgReadEepromCode = nil
     local fPgReadEepromData = nil
     local fPgComputeBinding = nil
     local fPgHashKernel = nil
 
-    -- Find data card and eeprom for PatchGuard
     local sPgDataAddr, sPgEepAddr
     for addr in raw_component.list("data") do sPgDataAddr = addr; break end
     for addr in raw_component.list("eeprom") do sPgEepAddr = addr; break end
 
+    -- Generate XOR key from data card hardware RNG
+    local sPgXorKey = nil
     if sPgDataAddr then
         local oPgData = raw_component.proxy(sPgDataAddr)
-        if oPgData and oPgData.sha256 then
-            fPgSha256 = function(s) return oPgData.sha256(s) end
+        if oPgData then
+            -- Use hardware RNG for the XOR key (32 bytes)
+            if oPgData.random then
+                sPgXorKey = oPgData.random(32)
+                kprint("sec", "PatchGuard XOR key: 32 bytes from hardware RNG")
+            end
+            -- Data card SHA-256 as fallback hash function
+            if oPgData.sha256 then
+                fPgSha256 = function(s) return oPgData.sha256(s) end
+            end
         end
+    end
+    if not sPgXorKey and g_oSha256Lib then
+        -- Fallback: derive XOR key from entropy sources
+        local sSeed = tostring(raw_computer.uptime())
+            .. tostring(math.random(0, 0x7FFFFFFF))
+            .. tostring(math.random(0, 0x7FFFFFFF))
+            .. tostring(raw_computer.freeMemory())
+        sPgXorKey = g_oSha256Lib.digest(sSeed)
+        kprint("sec", "PatchGuard XOR key: 32 bytes from entropy fallback")
     end
 
     if sPgEepAddr then
@@ -4302,18 +4557,19 @@ if g_oPatchGuard then
         end
     end
 
-    if fPgSha256 then
+    if g_oSha256Lib or fPgSha256 then
+        local fHash = g_oSha256Lib and function(s) return g_oSha256Lib.digest(s) end
+                      or fPgSha256
+
         fPgComputeBinding = function()
             local t = {}
             for addr in raw_component.list("data") do t[#t+1] = addr; break end
             for addr in raw_component.list("eeprom") do t[#t+1] = addr; break end
             for addr in raw_component.list("filesystem") do
                 local p = raw_component.proxy(addr)
-                if p and p.exists and p.exists("/kernel.lua") then
-                    t[#t+1] = addr; break
-                end
+                if p and p.exists and p.exists("/kernel.lua") then t[#t+1] = addr; break end
             end
-            local sRaw = fPgSha256(table.concat(t))
+            local sRaw = fHash(table.concat(t))
             local tHex = {}
             for i = 1, #sRaw do tHex[i] = string.format("%02x", sRaw:byte(i)) end
             return table.concat(tHex)
@@ -4322,7 +4578,7 @@ if g_oPatchGuard then
         fPgHashKernel = function()
             local sCode = primitive_load("/kernel.lua")
             if not sCode then return nil end
-            local sRaw = fPgSha256(sCode)
+            local sRaw = fHash(sCode)
             local tHex = {}
             for i = 1, #sRaw do tHex[i] = string.format("%02x", sRaw:byte(i)) end
             return table.concat(tHex)
@@ -4330,32 +4586,21 @@ if g_oPatchGuard then
     end
 
     g_oPatchGuard.Initialize({
-        -- Tier 1: core structures
         tSyscallTable     = kernel.tSyscallTable,
         tSyscallOverrides = kernel.tSyscallOverrides,
         nPipelinePid      = kernel.nPipelinePid,
         fPanic            = function(s, co, tViol) kernel.panic(s, co, tViol) end,
         fLog              = function(s) kprint("sec", s) end,
         fUptime           = raw_computer.uptime,
-
-        -- Tier 1: process integrity
         tProcessTable     = kernel.tProcessTable,
         tRings            = kernel.tRings,
-
-        -- Tier 2: frozen libraries
         tFrozenLibs       = {
             string = g_tFrozenString,
             table  = g_tFrozenTable,
             math   = g_tFrozenMath,
         },
-
-        -- Tier 2: object manager
         oObManager        = g_oObManager,
-
-        -- Tier 3: SecureBoot attestation
         tBootSecurity     = boot_security or nil,
-
-        -- Tier 3: hardware verification
         fSha256           = fPgSha256,
         fComputeBinding   = fPgComputeBinding,
         fHashKernel       = fPgHashKernel,
@@ -4367,9 +4612,14 @@ if g_oPatchGuard then
             local bOk, nMtime = pcall(g_oPrimitiveFs.lastModified, sPath)
             return bOk and nMtime or nil
         end,
+        -- v3 additions:
+        oSha256           = g_oSha256Lib,
+        sXorKey           = sPgXorKey,
+        tSyscallProfiler  = g_tSyscallProfiler,
     })
-    kprint("ok", "PatchGuard v2 snapshot taken — arming deferred to post-boot")
+    kprint("ok", "PatchGuard v3 snapshot taken — arming deferred to post-boot")
 end
+
 
 
 -- =============================================
@@ -4410,6 +4660,13 @@ do
     else
         kprint("sec", "  PatchGuard:    UNAVAILABLE")
     end
+
+        -- EXSi
+    kprint("sec", string.format("  EXSi:          %s",
+        g_oExsi and string.format("ACTIVE (max=%d, sealing=%s)",
+            g_oExsi.MAX_ENCLAVES,
+            g_oExsi.GetStats().bSealingAvailable and "YES" or "NO")
+        or "UNAVAILABLE"))
 
     -- Data card
     local sDataTier = "NONE"
@@ -4942,6 +5199,10 @@ while true do
     end
 
     if g_oGdi then g_oGdi.Composite() end
+
+    if g_oExsi then
+        g_oExsi.CleanupProcess(nPid)
+    end
 
     -- ====== OOM KILLER ======
     local FREE_MEMORY_FLOOR = 2048

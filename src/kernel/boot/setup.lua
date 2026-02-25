@@ -406,11 +406,39 @@ local function editDrivers(loaderCfg)
             }
         end
         items[#items+1] = {label = "Driver Config Path", value = drvPath}
-
+        items[#items+1] = {label = ">> Clear ALL Quarantined Drivers", value = ""}
+        
         local idx, item = menuLoop("Driver Autoload Configuration", items,
             "Enter:Toggle  Esc:Back")
         if not idx then return end
 
+        if idx == #items then
+            -- Clear all quarantines
+            if rootFs then
+                local sRegCode = readFile("/lib/registry.lua")
+                -- Simple approach: iterate known driver keys and clear
+                cls(BLACK, GREEN)
+                center(H/2 - 1, "Clearing all driver quarantines...", GREEN)
+                
+                for _, d in ipairs(drivers) do
+                    local sPath = "@VT\\DRV\\" .. d.name
+                    -- We can't call syscall from setup, so write a flag file
+                end
+                
+                -- Write a clear-quarantine flag file
+                local hClear = rootFs.open("/etc/.clear_quarantine", "w")
+                if hClear then
+                    rootFs.write(hClear, "CLEAR_ALL\n")
+                    rootFs.close(hClear)
+                    center(H/2, "Quarantines will be cleared on next boot.", YELLOW)
+                else
+                    center(H/2, "Failed to write quarantine clear flag.", RED)
+                end
+                center(H/2 + 2, "Press any key...", GRAY)
+                pullKey()
+            end
+        end
+        
         if idx <= #drivers then
             -- Toggle driver enabled state
             local d = drivers[idx]

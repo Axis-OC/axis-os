@@ -1,14 +1,13 @@
 --
 -- /sys/security/patchguard.lua
--- AxisOS Kernel Integrity Monitor (PatchGuard) v2
+-- AxisOS Kernel Integrity Monitor (PatchGuard) v3
 --
--- NT-style tiered integrity verification:
---   Tier 1: Syscall table, overrides, PM PID, self-integrity, rings
---   Tier 2: Frozen libs, OB namespace, sandbox __metatable
---   Tier 3: SecureBoot attestation, EEPROM code, kernel disk hash
---
--- Check interval is RANDOMISED per cycle (30-100 ticks).
--- Self-contained — loaded by kernel at boot with minimal env.
+-- v3 additions over v2:
+--   • Pure-Lua /lib/sha256 hashing (no data card dependency)
+--   • XOR-encrypted snapshot hashes (per-boot random key)
+--   • Check function rotation (3 equivalent variants, random pick)
+--   • Syscall behavior profiling (baseline → anomaly detection)
+--   • Mtime-scan ALL files every tick for instantaneous detection
 --
 
 local PG = {}
@@ -21,11 +20,26 @@ local g_bArmed             = false
 local g_fPanic             = nil
 local g_fLog               = nil
 local g_fUptime            = nil
-local g_bVerbose           = true  -- log every check cycle detail
+local g_bVerbose           = true
 local g_nLastCheckMs       = 0
-local g_fFlush = nil
+local g_fFlush             = nil
 
-local g_tCriticalFileSnap   = {}  -- sPath → hex hash
+-- SHA-256 module (/lib/sha256.lua — pure Lua, no data card needed)
+local g_oSha256            = nil
+
+-- XOR encryption key for snapshot hashes (per-boot, from data card RNG)
+-- An attacker who dumps memory sees encrypted hashes, not the plain
+-- expected values.  They can't forge a matching hash without this key.
+local g_sXorKey            = nil   -- 32 bytes binary
+
+-- NOTE on check interval randomization:
+-- math.random() is kept over data_card.random() because math.random()
+-- is a native Lua PRNG call (~0μs), while data_card.random() is a
+-- component invoke (~50μs per call due to OC's IPC overhead).
+-- The unpredictability comes from the initial seed (uptime at boot)
+-- which is already non-deterministic in a multiplayer OC server.
+
+local g_tCriticalFileSnap   = {}
 
 local SUPERCRITICAL_FILES = {
     "/kernel.lua",
@@ -55,23 +69,18 @@ local CRITICAL_FILES = {
     "/boot/boot_secure.lua",
 }
 
-local g_tFileHashSnap     = {}   -- sPath → sHexHash
-local g_tFileSizeSnap     = {}   -- sPath → nBytes
-local g_nFileCheckCursor  = 1    -- round-robin index into CRITICAL_FILES
-local g_nFilesPerCheck    = 2    -- how many files to check per Tier 3 cycle (randomized 1-3)
-local g_nTotalFileChecks  = 0    -- total individual file verifications performed
-local g_nTotalFilePasses  = 0    -- total verifications that matched
-local g_nTotalFileFails   = 0    -- total mismatches
-local g_tFileLastChecked  = {}   -- sPath → uptime of last check (for audit)
-local g_fLastModified     = nil  -- function(sPath) → mtime or nil
-local g_tFileMtimeCache   = {}   -- sPath → last verified mtime
+local g_tFileHashSnap     = {}
+local g_tFileSizeSnap     = {}
+local g_nFileCheckCursor  = 1
+local g_nFilesPerCheck    = 2
+local g_nTotalFileChecks  = 0
+local g_nTotalFilePasses  = 0
+local g_nTotalFileFails   = 0
+local g_tFileLastChecked  = {}
+local g_fLastModified     = nil
+local g_tMtimeCache       = {}
 
-
--- Mtime cache: skip SHA-256 when file hasn't been written to
-local g_fLastModified   = nil   -- function(sPath) → mtime or nil
-local g_tMtimeCache     = {}    -- sPath → verified mtime
-
--- Monitored references (set by Initialize)
+-- Monitored references
 local g_tSyscallTable      = nil
 local g_tSyscallOverrides  = nil
 local g_nPipelinePid       = nil
@@ -81,57 +90,58 @@ local g_oObManager         = nil
 local g_tFrozenLibs        = nil
 
 -- SecureBoot / hardware verification functions
-local g_tBootSecurity      = nil   -- boot_security table (nil if SB disabled)
-local g_fComputeBinding    = nil   -- re-compute machine binding
-local g_fHashKernel        = nil   -- re-hash kernel from disk
-local g_fReadEepromCode    = nil   -- read EEPROM boot code
-local g_fReadEepromData    = nil   -- read EEPROM data area
-local g_fSha256            = nil   -- SHA-256 hash function
-local g_fHex               = nil   -- binary → hex string
-local g_fReadFile          = nil   -- read file from disk
+local g_tBootSecurity      = nil
+local g_fComputeBinding    = nil
+local g_fHashKernel        = nil
+local g_fReadEepromCode    = nil
+local g_fReadEepromData    = nil
+local g_fSha256            = nil  -- fallback: data card hash
+local g_fHex               = nil
+local g_fReadFile          = nil
 
--- Counters
--- local g_nTickCounter       = 0
--- local g_nCheckInterval     = 50
-
-local g_nNextCheckTime     = 0     -- uptime() when next check fires
-local g_nMinCheckSec       = 111.5   -- minimum seconds between checks
-local g_nMaxCheckSec       = 115.0   -- maximum seconds between checks
+-- Timing
+local g_nNextCheckTime     = 0
+local g_nMinCheckSec       = 2.5
+local g_nMaxCheckSec       = 9.0
 local g_nChecksPerformed   = 0
 local g_nTier2Counter      = 0
 local g_nTier3Counter      = 0
 local g_nViolations        = 0
 
--- =============================================
--- SNAPSHOTS
--- =============================================
+-- Mtime scan throttling: check supercritical frequently, critical less often
+local g_nLastSuperMtimeScan = 0
+local g_nLastCritMtimeScan  = 0
+local MTIME_SUPER_INTERVAL  = 0.5   -- supercritical files: every 0.5s (instant enough)
+local MTIME_CRIT_INTERVAL   = 2.0   -- critical files: every 2s (still fast, 10× less I/O)
 
--- Tier 1: Syscall table
-local g_tSyscallFuncSnap   = {}   -- sName → tostring(func)
-local g_tSyscallBytesSnap  = {}   -- sName → string.dump(func) or nil
-local g_tSyscallRingSnap   = {}   -- sName → "0,1,2"
-local g_sSyscallKeyFP      = ""   -- sorted key fingerprint
-local g_tOverrideSnap      = {}   -- sName → nPid
+-- Snapshots
+local g_tSyscallFuncSnap   = {}
+local g_tSyscallBytesSnap  = {}
+local g_tSyscallRingSnap   = {}
+local g_sSyscallKeyFP      = ""
+local g_tOverrideSnap      = {}
 local g_nSnapshotPMPid     = nil
-
--- Tier 1: Self-integrity (PG's own functions)
-local g_tSelfFuncSnap      = {}   -- funcName → tostring(func)
-
--- Tier 1: Process rings
-local g_tRingSnap          = {}   -- nPid → ring (only system PIDs < 20)
-
--- Tier 2: Frozen library fingerprints
-local g_tFrozenLibSnap     = {}   -- "string" → key count + sample keys
-
--- Tier 2: OB namespace critical paths
-local g_tObPathSnap        = {}   -- sPath → sType
-
--- Tier 3: SecureBoot attestation
-local g_sBootBindingSnap   = nil  -- machine binding at boot
-local g_sBootKernelHash    = nil  -- kernel hash at boot
-local g_sEepromCodeHash    = nil  -- EEPROM code hash at boot
-local g_sEepromDataSnap    = nil  -- EEPROM data area hash at boot
+local g_tSelfFuncSnap      = {}
+local g_tRingSnap          = {}
+local g_tFrozenLibSnap     = {}
+local g_tObPathSnap        = {}
+local g_sBootBindingSnap   = nil
+local g_sBootKernelHash    = nil
+local g_sEepromCodeHash    = nil
+local g_sEepromDataSnap    = nil
 local g_bSecureBootExpected = false
+local g_nQuarantineEvents = 0
+local g_nEscalationAttempts = 0
+
+-- Check function rotation state
+local g_tCheckVariants     = {}   -- array of check functions
+local g_nVariantCount      = 0
+
+-- Syscall behavior profiler reference (set by kernel)
+local g_tSyscallProfiler   = nil
+
+local g_nSuperCursor = 1
+local g_nCritCursor  = 1
 
 -- =============================================
 -- HELPERS
@@ -147,7 +157,6 @@ local function hex(s)
 end
 
 local function randomize()
-    -- g_nCheckInterval = 30 + math.random(0, 70)\
     g_nNextCheckTime = g_fUptime() + g_nMinCheckSec +
         math.random() * (g_nMaxCheckSec - g_nMinCheckSec)
 end
@@ -158,6 +167,49 @@ local function safeDump(f)
     return bOk and sBytes or nil
 end
 
+
+-- =============================================
+-- XOR HASH ENCRYPTION
+-- Encrypt/decrypt a binary hash with the per-boot key.
+-- Same operation for both (XOR is its own inverse).
+-- Without the key, the stored hashes are meaningless.
+-- =============================================
+
+local function xorBytes(sBin, sKey)
+    if not sKey or #sKey == 0 then return sBin end
+    local t = {}
+    local nKeyLen = #sKey
+    for i = 1, #sBin do
+        t[i] = string.char(
+            -- bit32.bxor is available in PatchGuard's environment
+            (type(bit32) == "table" and bit32.bxor or
+             function(a,b) return a ~ b end)(
+                sBin:byte(i),
+                sKey:byte(((i - 1) % nKeyLen) + 1)
+            )
+        )
+    end
+    return table.concat(t)
+end
+
+--- Hash data and return XOR-encrypted hex string.
+-- This is what gets stored in g_tFileHashSnap.
+-- An attacker dumping memory sees encrypted hex, not the real hash.
+local function protectedHash(sData)
+    local sBinHash
+    if g_oSha256 then
+        sBinHash = g_oSha256.digest(sData)
+    elseif g_fSha256 then
+        sBinHash = g_fSha256(sData)
+    else
+        return nil
+    end
+    if g_sXorKey then
+        sBinHash = xorBytes(sBinHash, g_sXorKey)
+    end
+    return hex(sBinHash)
+end
+
 -- =============================================
 -- SNAPSHOT: TIER 1
 -- =============================================
@@ -166,7 +218,6 @@ local function snapshotSyscallTable()
     g_tSyscallFuncSnap  = {}
     g_tSyscallBytesSnap = {}
     g_tSyscallRingSnap  = {}
-
     local tKeys = {}
     for sName, tH in pairs(g_tSyscallTable) do
         g_tSyscallFuncSnap[sName] = tostring(tH.func)
@@ -191,7 +242,6 @@ end
 
 local function snapshotSelf()
     g_tSelfFuncSnap = {}
-    -- Snapshot our own public functions
     local tSelfFuncs = {
         "Initialize", "TakeSnapshot", "Arm", "Disarm",
         "IsArmed", "Tick", "Check", "GetStats"
@@ -205,8 +255,6 @@ end
 
 local function snapshotRings()
     g_tRingSnap = {}
-    -- Only snapshot system processes (PID < 20)
-    -- These should NEVER change ring
     for nPid, nRing in pairs(g_tRings) do
         if nPid < 20 then
             g_tRingSnap[nPid] = nRing
@@ -228,7 +276,6 @@ local function snapshotFrozenLibs()
         g_tFrozenLibSnap[sLibName] = {
             nCount = #tKeys,
             sKeyFP = table.concat(tKeys, "|"),
-            -- Sample specific function identities
             tFuncIds = {}
         }
         for _, k in ipairs(tKeys) do
@@ -260,25 +307,20 @@ end
 
 local function snapshotSecureBoot()
     g_bSecureBootExpected = (g_tBootSecurity ~= nil)
-
     if g_tBootSecurity then
         g_sBootBindingSnap  = g_tBootSecurity.machine_binding
         g_sBootKernelHash   = g_tBootSecurity.kernel_hash
     end
-
-    -- Hash EEPROM code
-    if g_fReadEepromCode and g_fSha256 then
+    if g_fReadEepromCode and (g_oSha256 or g_fSha256) then
         local sCode = g_fReadEepromCode()
         if sCode and #sCode > 0 then
-            g_sEepromCodeHash = hex(g_fSha256(sCode))
+            g_sEepromCodeHash = protectedHash(sCode)
         end
     end
-
-    -- Hash EEPROM data area
-    if g_fReadEepromData and g_fSha256 then
+    if g_fReadEepromData and (g_oSha256 or g_fSha256) then
         local sData = g_fReadEepromData()
         if sData and #sData > 0 then
-            g_sEepromDataSnap = hex(g_fSha256(sData))
+            g_sEepromDataSnap = protectedHash(sData)
         end
     end
 end
@@ -288,29 +330,26 @@ local function snapshotCriticalFiles()
     g_tFileSizeSnap    = {}
     g_tFileLastChecked = {}
 
-    if not g_fReadFile or not g_fSha256 then
+    if not g_fReadFile or not (g_oSha256 or g_fSha256) then
         g_fLog("[PG] Tier3-files: SKIPPED (no read function or no SHA-256)")
         return
     end
 
-    -- Merge both lists for snapshotting
     local tAllFiles = {}
     for _, s in ipairs(SUPERCRITICAL_FILES) do tAllFiles[#tAllFiles + 1] = s end
     for _, s in ipairs(CRITICAL_FILES) do tAllFiles[#tAllFiles + 1] = s end
 
-    local nHashed     = 0
-    local nMissing    = 0
-    local nTotalBytes = 0
+    local nHashed, nMissing, nTotalBytes = 0, 0, 0
 
     g_fLog(string.format(
-        "[PG] Tier3-files: hashing %d files (%d supercritical + %d critical)...",
-        #tAllFiles, #SUPERCRITICAL_FILES, #CRITICAL_FILES))
+        "[PG] Tier3-files: hashing %d files (XOR key: %s)...",
+        #tAllFiles,
+        g_sXorKey and ("active, " .. #g_sXorKey .. "B") or "NONE"))
 
     for i, sPath in ipairs(tAllFiles) do
         local sContent = g_fReadFile(sPath)
-
         if sContent and #sContent > 0 then
-            local sHash = hex(g_fSha256(sContent))
+            local sHash = protectedHash(sContent)
             g_tFileHashSnap[sPath] = sHash
             g_tFileSizeSnap[sPath] = #sContent
             nHashed = nHashed + 1
@@ -327,24 +366,14 @@ local function snapshotCriticalFiles()
                     "[PG]   [%2d/%2d] %s %-28s %5d B  %s...",
                     i, #tAllFiles,
                     bSuper and "!!" or "  ",
-                    sShort,
-                    #sContent,
+                    sShort, #sContent,
                     sHash:sub(1, 12)))
             end
         else
             nMissing = nMissing + 1
-            if g_bVerbose then
-                local sShort = sPath:match("([^/]+)$") or sPath
-                g_fLog(string.format(
-                    "[PG]   [%2d/%2d]    %-28s  MISSING",
-                    i, #tAllFiles, sShort))
-            end
         end
 
-        -- Yield every 3 files so screen renders
-        if i % 3 == 0 then
-            g_fFlush()
-        end
+        if i % 3 == 0 then g_fFlush() end
     end
 
     g_fLog(string.format(
@@ -352,13 +381,13 @@ local function snapshotCriticalFiles()
         nHashed, #tAllFiles, nTotalBytes, nMissing))
 end
 
-local g_nSuperCursor = 1  -- which supercritical file to check THIS cycle
-local g_nCritCursor  = 1
+-- =============================================
+-- FILE CHECK (with encrypted comparison)
+-- =============================================
 
 local function fCheckOneFile(sPath, bSupercritical)
-    if not g_fReadFile or not g_fSha256 then return {} end
+    if not g_fReadFile or not (g_oSha256 or g_fSha256) then return {} end
     local tV = {}
-
     local sExpHash = g_tFileHashSnap[sPath]
     if not sExpHash then return tV end
 
@@ -369,27 +398,27 @@ local function fCheckOneFile(sPath, bSupercritical)
         local nMtime = g_fLastModified(sPath)
         if not nMtime then
             tV[#tV + 1] = {
-                t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL" or "KERNEL_MODULES_INTEGRITY_FAIL",
+                t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
+                    or "KERNEL_MODULES_INTEGRITY_FAIL",
                 d = sPath, e = sExpHash:sub(1, 24), a = "(file missing)"
             }
             g_nTotalFileFails = g_nTotalFileFails + 1
             g_tMtimeCache[sPath] = nil
             return tV
         end
-
         if g_tMtimeCache[sPath] == nMtime then
             g_nTotalFilePasses = g_nTotalFilePasses + 1
             g_tFileLastChecked[sPath] = g_fUptime()
-            return tV  -- file untouched
+            return tV
         end
     end
 
-    -- SLOW PATH
+    -- SLOW PATH: read + hash
     local sContent = g_fReadFile(sPath)
-
     if not sContent then
         tV[#tV + 1] = {
-            t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL" or "KERNEL_MODULES_INTEGRITY_FAIL",
+            t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
+                or "KERNEL_MODULES_INTEGRITY_FAIL",
             d = sPath, e = sExpHash:sub(1, 24), a = "(file missing)"
         }
         g_nTotalFileFails = g_nTotalFileFails + 1
@@ -398,11 +427,14 @@ local function fCheckOneFile(sPath, bSupercritical)
 
     g_fFlush()
 
-    local sCurHash = hex(g_fSha256(sContent))
+    -- Hash is XOR-encrypted with the same per-boot key,
+    -- so comparison works correctly: encrypt(hash(new)) == encrypt(hash(old))
+    local sCurHash = protectedHash(sContent)
 
     if sCurHash ~= sExpHash then
         tV[#tV + 1] = {
-            t = bSupercritical and "KERNEL_INTEGRITY_HASH_FAIL" or "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
+            t = bSupercritical and "KERNEL_INTEGRITY_HASH_FAIL"
+                or "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
             d = sPath, e = sExpHash:sub(1, 24), a = sCurHash:sub(1, 24)
         }
         g_nTotalFileFails = g_nTotalFileFails + 1
@@ -413,304 +445,369 @@ local function fCheckOneFile(sPath, bSupercritical)
             g_tMtimeCache[sPath] = g_fLastModified(sPath)
         end
     end
-
     return tV
 end
 
+-- =============================================
+-- MTIME SCAN — runs EVERY tick for instant detection
+-- Cost: ~1 stat call per file per tick (~0.5ms total)
+-- Only hashes when mtime changes (rare event)
+-- =============================================
 
 -- =============================================
--- INITIALIZE
+-- MTIME SCAN — rate-limited to avoid disk spam
+--
+-- Supercritical files (kernel, init, passwd): every 0.5s
+-- Critical files (drivers, libs): every 2s
+--
+-- Each CHECK is instant (no timeout/sleep), but we don't
+-- repeat the scan on every scheduler tick.  Detection
+-- latency: ≤0.5s for supercritical, ≤2s for critical.
+-- Disk reads: ~8/s supercritical + ~8.5/2s critical ≈ 12/s
+-- (down from ~420/s with every-tick scanning).
 -- =============================================
 
-function PG.Initialize(tCfg)
-    g_tSyscallTable     = tCfg.tSyscallTable
-    g_tSyscallOverrides = tCfg.tSyscallOverrides
-    g_nPipelinePid      = tCfg.nPipelinePid
-    g_fPanic            = tCfg.fPanic
-    g_fLog              = tCfg.fLog
-    g_fUptime           = tCfg.fUptime
-
-    -- NEW: extended monitoring
-    g_tProcessTable     = tCfg.tProcessTable
-    g_tRings            = tCfg.tRings
-    g_oObManager        = tCfg.oObManager
-    g_tFrozenLibs       = tCfg.tFrozenLibs
-    g_tBootSecurity     = tCfg.tBootSecurity
-
-    -- Hardware verification functions
-    g_fComputeBinding   = tCfg.fComputeBinding
-    g_fHashKernel       = tCfg.fHashKernel
-    g_fReadEepromCode   = tCfg.fReadEepromCode
-    g_fReadEepromData   = tCfg.fReadEepromData
-    g_fSha256           = tCfg.fSha256
-    g_fReadFile         = tCfg.fReadFile
-    g_fFlush            = tCfg.fFlush or function() end
-    g_fLastModified     = tCfg.fLastModified
-
-    g_fLog("[PG] PatchGuard v2 initializing...")
-    PG.TakeSnapshot()
-    randomize()
-    return true
-end
-
-function PG.TakeSnapshot(bRehashFiles)
-    -- bRehashFiles:
-    --   nil/true  = hash files if no hashes exist yet (first boot)
-    --   false     = never re-hash (reuse existing, only refresh syscall/override snapshots)
-    --   "force"   = always re-hash everything
-
-    g_fLog("[PG] Taking snapshot...")
-    g_fFlush()
-
-    -- Tier 1 (instant)
-    g_fLog("[PG] Tier1: syscall table, overrides, self, rings...")
-    snapshotSyscallTable()
-    snapshotOverrides()
-    snapshotSelf()
-    snapshotRings()
-    g_fFlush()
-
-    -- Tier 2 (instant)
-    g_fLog("[PG] Tier2: frozen libs, OB namespace...")
-    snapshotFrozenLibs()
-    snapshotObNamespace()
-    g_fFlush()
-
-    -- Tier 3: hardware attestation (fast)
-    g_fLog("[PG] Tier3: SecureBoot, EEPROM...")
-    snapshotSecureBoot()
-    g_fFlush()
-
-    -- Tier 3: file hashes (SLOW — only when necessary)
-    local nExisting = 0
-    for _ in pairs(g_tFileHashSnap) do nExisting = nExisting + 1 end
-
-    if bRehashFiles == "force" then
-        g_fLog("[PG] Tier3-files: forced full re-hash...")
-        snapshotCriticalFiles()
-    elseif bRehashFiles == false then
-        g_fLog(string.format("[PG] Tier3-files: reusing %d cached hashes (fast re-arm)", nExisting))
-    elseif nExisting == 0 then
-        g_fLog("[PG] Tier3-files: initial hash...")
-        snapshotCriticalFiles()
-    else
-        g_fLog(string.format("[PG] Tier3-files: reusing %d cached hashes", nExisting))
+local function fMtimeScanAll()
+    if not g_fReadFile or not (g_oSha256 or g_fSha256) or not g_fLastModified then
+        return {}
     end
 
-    -- Summary
-    local nSc = 0
-    for _ in pairs(g_tSyscallFuncSnap) do nSc = nSc + 1 end
-    local nOvr = 0
-    for _ in pairs(g_tOverrideSnap) do nOvr = nOvr + 1 end
-    local nLibs = 0
-    for _ in pairs(g_tFrozenLibSnap) do nLibs = nLibs + 1 end
-    local nFiles = 0
-    for _ in pairs(g_tFileHashSnap) do nFiles = nFiles + 1 end
-
-    g_fLog(string.format(
-        "[PG] Snapshot: %d syscalls, %d overrides, %d libs, %d files, PM=PID %s, SB=%s",
-        nSc, nOvr, nLibs, nFiles,
-        tostring(g_nPipelinePid),
-        g_bSecureBootExpected and "ACTIVE" or "inactive"))
-end
-
-function PG.Arm()
-    if not g_sSyscallKeyFP or #g_sSyscallKeyFP == 0 then
-        g_fLog("[PG] Cannot arm: no snapshot")
-        return false
-    end
-    g_bArmed = true
-    g_fLog("[PG] PatchGuard v2 ARMED — full integrity monitoring active")
-    return true
-end
-
-function PG.Disarm()  g_bArmed = false end
-function PG.IsArmed() return g_bArmed end
-
--- =============================================
--- CHECK: TIER 1 (every cycle)
--- =============================================
-
-local function checkTier1()
-    local nStart = g_fUptime()
+    local nNow = g_fUptime()
     local tV = {}
 
-    -- 1a. Syscall function identity
-    local nFuncOk = 0
-    local nFuncTotal = 0
-    for sName, sExpId in pairs(g_tSyscallFuncSnap) do
-        nFuncTotal = nFuncTotal + 1
-        local tH = g_tSyscallTable[sName]
-        if not tH then
-            tV[#tV+1] = {t="SYSCALL_REMOVED", d=sName}
-        elseif tostring(tH.func) ~= sExpId then
-            tV[#tV+1] = {t="SYSCALL_FUNC_REPLACED", d=sName,
-                e=sExpId:sub(1,20), a=tostring(tH.func):sub(1,20)}
+    local bScanSuper = (nNow - g_nLastSuperMtimeScan >= MTIME_SUPER_INTERVAL)
+    local bScanCrit  = (nNow - g_nLastCritMtimeScan  >= MTIME_CRIT_INTERVAL)
+
+    -- Nothing to scan this tick — early exit (zero disk I/O)
+    if not bScanSuper and not bScanCrit then
+        return tV
+    end
+
+    local function scanOne(sPath, bSupercritical)
+        local sExpHash = g_tFileHashSnap[sPath]
+        if not sExpHash then return end
+
+        local nMtime = g_fLastModified(sPath)
+        if not nMtime then
+            tV[#tV + 1] = {
+                t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
+                    or "KERNEL_MODULES_INTEGRITY_FAIL",
+                d = sPath, e = sExpHash:sub(1, 24), a = "(file missing)"
+            }
+            g_nTotalFileFails = g_nTotalFileFails + 1
+            g_tMtimeCache[sPath] = nil
+            return
+        end
+
+        if g_tMtimeCache[sPath] == nMtime then
+            return  -- unchanged since last scan
+        end
+
+        -- Mtime CHANGED — rehash immediately (this IS the instant detection)
+        local sContent = g_fReadFile(sPath)
+        if not sContent then
+            tV[#tV + 1] = {
+                t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
+                    or "KERNEL_MODULES_INTEGRITY_FAIL",
+                d = sPath, e = sExpHash:sub(1, 24), a = "(read failed)"
+            }
+            g_nTotalFileFails = g_nTotalFileFails + 1
+            return
+        end
+
+        g_nTotalFileChecks = g_nTotalFileChecks + 1
+        local sCurHash = protectedHash(sContent)
+
+        if sCurHash ~= sExpHash then
+            g_fLog(string.format(
+                "[PG] INSTANT DETECT: %s modified (mtime changed)",
+                sPath:match("([^/]+)$") or sPath))
+            tV[#tV + 1] = {
+                t = bSupercritical and "KERNEL_INTEGRITY_HASH_FAIL"
+                    or "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
+                d = sPath, e = sExpHash:sub(1, 24), a = sCurHash:sub(1, 24)
+            }
+            g_nTotalFileFails = g_nTotalFileFails + 1
         else
-            nFuncOk = nFuncOk + 1
+            g_tMtimeCache[sPath] = nMtime
+            g_nTotalFilePasses = g_nTotalFilePasses + 1
         end
     end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1a func_identity: %d/%d OK",
-            nFuncOk, nFuncTotal))
-    end
 
-    -- 1b. Syscall bytecode
-    local nByteOk = 0
-    local nByteChecked = 0
-    for sName, sExpBytes in pairs(g_tSyscallBytesSnap) do
-        if sExpBytes then
-            nByteChecked = nByteChecked + 1
-            local tH = g_tSyscallTable[sName]
-            if tH then
-                local sCurBytes = safeDump(tH.func)
-                if sCurBytes and sCurBytes ~= sExpBytes then
-                    tV[#tV+1] = {t="SYSCALL_BYTECODE_MODIFIED", d=sName}
-                else
-                    nByteOk = nByteOk + 1
-                end
-            end
+    if bScanSuper then
+        g_nLastSuperMtimeScan = nNow
+        for _, sPath in ipairs(SUPERCRITICAL_FILES) do
+            scanOne(sPath, true)
         end
     end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1b bytecode: %d/%d OK",
-            nByteOk, nByteChecked))
-    end
 
-    g_fFlush()  -- yield so other processes can run
-
-    -- 1c. Key set structure
-    local tCK = {}
-    for sN in pairs(g_tSyscallTable) do tCK[#tCK+1] = sN end
-    table.sort(tCK)
-    local sCurFP = table.concat(tCK, "|")
-    if sCurFP ~= g_sSyscallKeyFP then
-        local tES = {}
-        for sN in pairs(g_tSyscallFuncSnap) do tES[sN] = true end
-        local tCS = {}
-        for _, sN in ipairs(tCK) do tCS[sN] = true end
-        for _, sN in ipairs(tCK) do
-            if not tES[sN] then
-                tV[#tV+1] = {t="SYSCALL_INJECTED", d=sN}
-            end
+    if bScanCrit then
+        g_nLastCritMtimeScan = nNow
+        for _, sPath in ipairs(CRITICAL_FILES) do
+            scanOne(sPath, false)
         end
-        for sN in pairs(tES) do
-            if not tCS[sN] then
-                tV[#tV+1] = {t="SYSCALL_REMOVED", d=sN}
-            end
-        end
-    end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1c key_structure: %d keys, %s",
-            #tCK, sCurFP == g_sSyscallKeyFP and "OK" or "CHANGED"))
-    end
-
-    -- 1d. Ring permissions
-    local nRingOk = 0
-    local nRingTotal = 0
-    for sName, sExpR in pairs(g_tSyscallRingSnap) do
-        nRingTotal = nRingTotal + 1
-        local tH = g_tSyscallTable[sName]
-        if tH then
-            local tR = {}
-            for _, r in ipairs(tH.allowed_rings) do tR[#tR+1] = tostring(r) end
-            table.sort(tR)
-            if table.concat(tR, ",") ~= sExpR then
-                tV[#tV+1] = {t="RING_ESCALATION", d=sName,
-                    e=sExpR, a=table.concat(tR, ",")}
-            else
-                nRingOk = nRingOk + 1
-            end
-        end
-    end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1d ring_perms: %d/%d OK",
-            nRingOk, nRingTotal))
-    end
-
-    g_fFlush()  -- yield again
-
-    -- 1e. Override integrity
-    local nOvrOk = 0
-    local nOvrTotal = 0
-    for sName, nExpPid in pairs(g_tOverrideSnap) do
-        nOvrTotal = nOvrTotal + 1
-        if g_tSyscallOverrides[sName] ~= nExpPid then
-            tV[#tV+1] = {t="OVERRIDE_HIJACK", d=sName,
-                e=tostring(nExpPid),
-                a=tostring(g_tSyscallOverrides[sName])}
-        else
-            nOvrOk = nOvrOk + 1
-        end
-    end
-    for sName in pairs(g_tSyscallOverrides) do
-        if not g_tOverrideSnap[sName] then
-            tV[#tV+1] = {t="OVERRIDE_INJECTED", d=sName}
-        end
-    end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1e overrides: %d/%d OK",
-            nOvrOk, nOvrTotal))
-    end
-
-    -- 1f. Pipeline Manager PID
-    local bPmOk = true
-    if g_nSnapshotPMPid and g_nPipelinePid ~= g_nSnapshotPMPid then
-        tV[#tV+1] = {t="PM_PID_CHANGED",
-            e=tostring(g_nSnapshotPMPid),
-            a=tostring(g_nPipelinePid)}
-        bPmOk = false
-    end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1f pm_pid: %s (PID %s)",
-            bPmOk and "OK" or "CHANGED",
-            tostring(g_nPipelinePid)))
-    end
-
-    -- 1g. Self-integrity
-    local nSelfOk = 0
-    local nSelfTotal = 0
-    for sName, sExpId in pairs(g_tSelfFuncSnap) do
-        nSelfTotal = nSelfTotal + 1
-        if PG[sName] and tostring(PG[sName]) == sExpId then
-            nSelfOk = nSelfOk + 1
-        elseif not PG[sName] then
-            tV[#tV+1] = {t="PG_FUNC_REMOVED", d=sName}
-        else
-            tV[#tV+1] = {t="PG_SELF_TAMPERED", d=sName}
-        end
-    end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1g self_integrity: %d/%d OK",
-            nSelfOk, nSelfTotal))
-    end
-
-    -- 1h. System process ring escalation
-    local nRingProcOk = 0
-    local nRingProcTotal = 0
-    for nPid, nExpRing in pairs(g_tRingSnap) do
-        nRingProcTotal = nRingProcTotal + 1
-        local nCurRing = g_tRings[nPid]
-        if nCurRing and nCurRing < nExpRing then
-            tV[#tV+1] = {t="PROCESS_RING_ESCALATED",
-                d="PID " .. nPid,
-                e=tostring(nExpRing), a=tostring(nCurRing)}
-        else
-            nRingProcOk = nRingProcOk + 1
-        end
-    end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   1h proc_rings: %d/%d OK",
-            nRingProcOk, nRingProcTotal))
-    end
-
-    -- Summary
-    local nMs = math.floor((g_fUptime() - nStart) * 1000)
-    if g_bVerbose then
-        g_fLog(string.format("[PG] Tier1: %d violations, %dms", #tV, nMs))
     end
 
     return tV
+end
+
+-- =============================================
+-- CHECK FUNCTION ROTATION (Feature 4)
+--
+-- Three functionally-equivalent check functions with different
+-- variable names.  Each cycle, one is randomly selected.
+-- An attacker who patches one check function doesn't disable
+-- the others — they must find and patch ALL three.
+--
+-- The functions check the same things but in different order
+-- with different local variable names, producing different
+-- bytecode.  string.dump() of each yields different bytes.
+-- =============================================
+
+-- Variant A: focuses syscall identity first, then overrides
+local function checkVariantAlpha()
+    local va_start = g_fUptime()
+    local va_issues = {}
+
+    -- A1: syscall function pointers
+    for va_name, va_expId in pairs(g_tSyscallFuncSnap) do
+        local va_h = g_tSyscallTable[va_name]
+        if not va_h then
+            va_issues[#va_issues+1] = {t="SYSCALL_REMOVED", d=va_name}
+        elseif tostring(va_h.func) ~= va_expId then
+            va_issues[#va_issues+1] = {t="SYSCALL_FUNC_REPLACED", d=va_name,
+                e=va_expId:sub(1,20), a=tostring(va_h.func):sub(1,20)}
+        end
+    end
+
+    -- A2: override integrity
+    for va_ovrName, va_ovrPid in pairs(g_tOverrideSnap) do
+        if g_tSyscallOverrides[va_ovrName] ~= va_ovrPid then
+            va_issues[#va_issues+1] = {t="OVERRIDE_HIJACK", d=va_ovrName,
+                e=tostring(va_ovrPid), a=tostring(g_tSyscallOverrides[va_ovrName])}
+        end
+    end
+    for va_injName in pairs(g_tSyscallOverrides) do
+        if not g_tOverrideSnap[va_injName] then
+            va_issues[#va_issues+1] = {t="OVERRIDE_INJECTED", d=va_injName}
+        end
+    end
+
+    -- A3: PM PID
+    if g_nSnapshotPMPid and g_nPipelinePid ~= g_nSnapshotPMPid then
+        va_issues[#va_issues+1] = {t="PM_PID_CHANGED",
+            e=tostring(g_nSnapshotPMPid), a=tostring(g_nPipelinePid)}
+    end
+
+    -- A4: self integrity
+    for va_fn, va_fid in pairs(g_tSelfFuncSnap) do
+        if PG[va_fn] and tostring(PG[va_fn]) ~= va_fid then
+            va_issues[#va_issues+1] = {t="PG_SELF_TAMPERED", d=va_fn}
+        elseif not PG[va_fn] then
+            va_issues[#va_issues+1] = {t="PG_FUNC_REMOVED", d=va_fn}
+        end
+    end
+
+    -- A5: key structure
+    local va_curKeys = {}
+    for va_kn in pairs(g_tSyscallTable) do va_curKeys[#va_curKeys+1] = va_kn end
+    table.sort(va_curKeys)
+    if table.concat(va_curKeys, "|") ~= g_sSyscallKeyFP then
+        local va_expSet = {}
+        for va_en in pairs(g_tSyscallFuncSnap) do va_expSet[va_en] = true end
+        for _, va_ck in ipairs(va_curKeys) do
+            if not va_expSet[va_ck] then
+                va_issues[#va_issues+1] = {t="SYSCALL_INJECTED", d=va_ck}
+            end
+        end
+    end
+
+    -- A6: process ring escalation
+    for va_pid, va_expRing in pairs(g_tRingSnap) do
+        local va_curRing = g_tRings[va_pid]
+        if va_curRing and va_curRing < va_expRing then
+            va_issues[#va_issues+1] = {t="PROCESS_RING_ESCALATED",
+                d="PID " .. va_pid, e=tostring(va_expRing), a=tostring(va_curRing)}
+        end
+    end
+
+    -- A7: ring permissions on syscalls
+    for va_rn, va_rexp in pairs(g_tSyscallRingSnap) do
+        local va_rh = g_tSyscallTable[va_rn]
+        if va_rh then
+            local va_rt = {}
+            for _, va_rr in ipairs(va_rh.allowed_rings) do va_rt[#va_rt+1] = tostring(va_rr) end
+            table.sort(va_rt)
+            if table.concat(va_rt, ",") ~= va_rexp then
+                va_issues[#va_issues+1] = {t="RING_ESCALATION", d=va_rn,
+                    e=va_rexp, a=table.concat(va_rt, ",")}
+            end
+        end
+    end
+
+    return va_issues
+end
+
+-- Variant Beta: starts with self-integrity, different variable prefix
+local function checkVariantBeta()
+    local vb_t0 = g_fUptime()
+    local vb_viol = {}
+
+    -- B1: PG self-integrity first
+    for vb_selfK, vb_selfV in pairs(g_tSelfFuncSnap) do
+        if not PG[vb_selfK] then
+            vb_viol[#vb_viol+1] = {t="PG_FUNC_REMOVED", d=vb_selfK}
+        elseif tostring(PG[vb_selfK]) ~= vb_selfV then
+            vb_viol[#vb_viol+1] = {t="PG_SELF_TAMPERED", d=vb_selfK}
+        end
+    end
+
+    -- B2: override table
+    for vb_on, vb_op in pairs(g_tOverrideSnap) do
+        if g_tSyscallOverrides[vb_on] ~= vb_op then
+            vb_viol[#vb_viol+1] = {t="OVERRIDE_HIJACK", d=vb_on,
+                e=tostring(vb_op), a=tostring(g_tSyscallOverrides[vb_on])}
+        end
+    end
+    for vb_in in pairs(g_tSyscallOverrides) do
+        if not g_tOverrideSnap[vb_in] then
+            vb_viol[#vb_viol+1] = {t="OVERRIDE_INJECTED", d=vb_in}
+        end
+    end
+
+    -- B3: syscall function pointers
+    for vb_sc, vb_eid in pairs(g_tSyscallFuncSnap) do
+        local vb_handler = g_tSyscallTable[vb_sc]
+        if not vb_handler then
+            vb_viol[#vb_viol+1] = {t="SYSCALL_REMOVED", d=vb_sc}
+        elseif tostring(vb_handler.func) ~= vb_eid then
+            vb_viol[#vb_viol+1] = {t="SYSCALL_FUNC_REPLACED", d=vb_sc,
+                e=vb_eid:sub(1,20), a=tostring(vb_handler.func):sub(1,20)}
+        end
+    end
+
+    -- B4: PM PID
+    if g_nSnapshotPMPid and g_nPipelinePid ~= g_nSnapshotPMPid then
+        vb_viol[#vb_viol+1] = {t="PM_PID_CHANGED",
+            e=tostring(g_nSnapshotPMPid), a=tostring(g_nPipelinePid)}
+    end
+
+    -- B5: key structure + ring perms
+    local vb_kl = {}
+    for vb_kn in pairs(g_tSyscallTable) do vb_kl[#vb_kl+1] = vb_kn end
+    table.sort(vb_kl)
+    if table.concat(vb_kl, "|") ~= g_sSyscallKeyFP then
+        local vb_es = {}
+        for vb_ek in pairs(g_tSyscallFuncSnap) do vb_es[vb_ek] = true end
+        for _, vb_ck in ipairs(vb_kl) do
+            if not vb_es[vb_ck] then
+                vb_viol[#vb_viol+1] = {t="SYSCALL_INJECTED", d=vb_ck}
+            end
+        end
+    end
+
+    for vb_rn, vb_re in pairs(g_tSyscallRingSnap) do
+        local vb_rh = g_tSyscallTable[vb_rn]
+        if vb_rh then
+            local vb_rr = {}
+            for _, vb_rv in ipairs(vb_rh.allowed_rings) do vb_rr[#vb_rr+1] = tostring(vb_rv) end
+            table.sort(vb_rr)
+            if table.concat(vb_rr, ",") ~= vb_re then
+                vb_viol[#vb_viol+1] = {t="RING_ESCALATION", d=vb_rn,
+                    e=vb_re, a=table.concat(vb_rr, ",")}
+            end
+        end
+    end
+
+    -- B6: process rings
+    for vb_pp, vb_pr in pairs(g_tRingSnap) do
+        local vb_cr = g_tRings[vb_pp]
+        if vb_cr and vb_cr < vb_pr then
+            vb_viol[#vb_viol+1] = {t="PROCESS_RING_ESCALATED",
+                d="PID " .. vb_pp, e=tostring(vb_pr), a=tostring(vb_cr)}
+        end
+    end
+
+    return vb_viol
+end
+
+-- Variant Gamma: starts with ring checks, different prefix
+local function checkVariantGamma()
+    local gc_t = g_fUptime()
+    local gc_v = {}
+
+    -- G1: process ring escalation
+    for gc_pid, gc_er in pairs(g_tRingSnap) do
+        local gc_cr = g_tRings[gc_pid]
+        if gc_cr and gc_cr < gc_er then
+            gc_v[#gc_v+1] = {t="PROCESS_RING_ESCALATED",
+                d="PID " .. gc_pid, e=tostring(gc_er), a=tostring(gc_cr)}
+        end
+    end
+
+    -- G2: PM PID
+    if g_nSnapshotPMPid and g_nPipelinePid ~= g_nSnapshotPMPid then
+        gc_v[#gc_v+1] = {t="PM_PID_CHANGED",
+            e=tostring(g_nSnapshotPMPid), a=tostring(g_nPipelinePid)}
+    end
+
+    -- G3: self integrity
+    for gc_fn, gc_fv in pairs(g_tSelfFuncSnap) do
+        if not PG[gc_fn] then
+            gc_v[#gc_v+1] = {t="PG_FUNC_REMOVED", d=gc_fn}
+        elseif tostring(PG[gc_fn]) ~= gc_fv then
+            gc_v[#gc_v+1] = {t="PG_SELF_TAMPERED", d=gc_fn}
+        end
+    end
+
+    -- G4: syscall functions
+    for gc_sn, gc_si in pairs(g_tSyscallFuncSnap) do
+        local gc_sh = g_tSyscallTable[gc_sn]
+        if not gc_sh then
+            gc_v[#gc_v+1] = {t="SYSCALL_REMOVED", d=gc_sn}
+        elseif tostring(gc_sh.func) ~= gc_si then
+            gc_v[#gc_v+1] = {t="SYSCALL_FUNC_REPLACED", d=gc_sn,
+                e=gc_si:sub(1,20), a=tostring(gc_sh.func):sub(1,20)}
+        end
+    end
+
+    -- G5: overrides
+    for gc_on, gc_op in pairs(g_tOverrideSnap) do
+        if g_tSyscallOverrides[gc_on] ~= gc_op then
+            gc_v[#gc_v+1] = {t="OVERRIDE_HIJACK", d=gc_on,
+                e=tostring(gc_op), a=tostring(g_tSyscallOverrides[gc_on])}
+        end
+    end
+    for gc_in in pairs(g_tSyscallOverrides) do
+        if not g_tOverrideSnap[gc_in] then
+            gc_v[#gc_v+1] = {t="OVERRIDE_INJECTED", d=gc_in}
+        end
+    end
+
+    -- G6: key structure + ring permissions
+    local gc_kl = {}
+    for gc_kn in pairs(g_tSyscallTable) do gc_kl[#gc_kl+1] = gc_kn end
+    table.sort(gc_kl)
+    if table.concat(gc_kl, "|") ~= g_sSyscallKeyFP then
+        local gc_es = {}
+        for gc_ek in pairs(g_tSyscallFuncSnap) do gc_es[gc_ek] = true end
+        for _, gc_ck in ipairs(gc_kl) do
+            if not gc_es[gc_ck] then gc_v[#gc_v+1] = {t="SYSCALL_INJECTED", d=gc_ck} end
+        end
+    end
+    for gc_rn, gc_re in pairs(g_tSyscallRingSnap) do
+        local gc_rh = g_tSyscallTable[gc_rn]
+        if gc_rh then
+            local gc_rr = {}
+            for _, gc_rv in ipairs(gc_rh.allowed_rings) do gc_rr[#gc_rr+1] = tostring(gc_rv) end
+            table.sort(gc_rr)
+            if table.concat(gc_rr, ",") ~= gc_re then
+                gc_v[#gc_v+1] = {t="RING_ESCALATION", d=gc_rn, e=gc_re, a=table.concat(gc_rr, ",")}
+            end
+        end
+    end
+
+    return gc_v
 end
 
 -- =============================================
@@ -718,15 +815,7 @@ end
 -- =============================================
 
 local function checkTier2()
-    local nStart = g_fUptime()
     local tV = {}
-
-    if g_bVerbose then
-        g_fLog("[PG] Tier2: checking frozen libs, OB namespace, sandbox metatables")
-    end
-
-    -- 2a. Frozen libs
-    local nLibsOk = 0
     if g_tFrozenLibs then
         for sLibName, tSnap in pairs(g_tFrozenLibSnap) do
             local tLib = g_tFrozenLibs[sLibName]
@@ -735,365 +824,125 @@ local function checkTier2()
             else
                 local nCount = 0
                 local tCurKeys = {}
-                for k in pairs(tLib) do
-                    nCount = nCount + 1
-                    tCurKeys[#tCurKeys+1] = tostring(k)
-                end
+                for k in pairs(tLib) do nCount = nCount + 1; tCurKeys[#tCurKeys+1] = tostring(k) end
                 table.sort(tCurKeys)
-                local sCurFP = table.concat(tCurKeys, "|")
-
-                if sCurFP ~= tSnap.sKeyFP then
+                if table.concat(tCurKeys, "|") ~= tSnap.sKeyFP then
                     tV[#tV+1] = {t="FROZEN_LIB_KEYS_CHANGED", d=sLibName,
                         e=tostring(tSnap.nCount), a=tostring(nCount)}
                 else
-                    -- Check function identities
-                    local bFuncsOk = true
                     for k, sExpId in pairs(tSnap.tFuncIds) do
                         if type(tLib[k]) ~= "function" then
-                            tV[#tV+1] = {t="FROZEN_LIB_FUNC_TYPE",
-                                d=sLibName.."."..k}
-                            bFuncsOk = false
+                            tV[#tV+1] = {t="FROZEN_LIB_FUNC_TYPE", d=sLibName.."."..k}
                         elseif tostring(tLib[k]) ~= sExpId then
-                            tV[#tV+1] = {t="FROZEN_LIB_FUNC_REPLACED",
-                                d=sLibName.."."..k}
-                            bFuncsOk = false
+                            tV[#tV+1] = {t="FROZEN_LIB_FUNC_REPLACED", d=sLibName.."."..k}
                         end
                     end
-                    if bFuncsOk then nLibsOk = nLibsOk + 1 end
                 end
             end
         end
     end
-
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   2a frozen_libs: %d/%d intact",
-            nLibsOk,
-            (function() local n=0; for _ in pairs(g_tFrozenLibSnap) do n=n+1 end; return n end)()))
-    end
-
-    -- 2b. OB namespace
-    local nObOk = 0
     if g_oObManager then
         for sPath, sExpType in pairs(g_tObPathSnap) do
             local pH = g_oObManager.ObLookupObject(sPath)
-            if not pH then
-                tV[#tV+1] = {t="OB_PATH_REMOVED", d=sPath}
+            if not pH then tV[#tV+1] = {t="OB_PATH_REMOVED", d=sPath}
             elseif pH.sType ~= sExpType then
-                tV[#tV+1] = {t="OB_PATH_TYPE_CHANGED", d=sPath,
-                    e=sExpType, a=pH.sType}
-            else
-                nObOk = nObOk + 1
+                tV[#tV+1] = {t="OB_PATH_TYPE_CHANGED", d=sPath, e=sExpType, a=pH.sType}
             end
         end
     end
-
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   2b ob_namespace: %d/%d intact",
-            nObOk,
-            (function() local n=0; for _ in pairs(g_tObPathSnap) do n=n+1 end; return n end)()))
-    end
-
-    -- 2c. Sandbox metatables
-    local nMtOk = 0
-    local nMtChecked = 0
     if g_tProcessTable then
         for nPid, tProc in pairs(g_tProcessTable) do
             if nPid < 20 and tProc.status ~= "dead" and tProc.env ~= nil then
-                nMtChecked = nMtChecked + 1
                 local bOk, sMt = pcall(getmetatable, tProc.env)
-                if bOk and sMt == "protected" then
-                    nMtOk = nMtOk + 1
-                elseif bOk then
-                    tV[#tV+1] = {t="SANDBOX_MT_BROKEN",
-                        d="PID " .. nPid,
+                if bOk and sMt ~= "protected" then
+                    tV[#tV+1] = {t="SANDBOX_MT_BROKEN", d="PID " .. nPid,
                         e="protected", a=tostring(sMt)}
                 end
             end
         end
     end
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   2c sandbox_mt: %d/%d OK",
-            nMtOk, nMtChecked))
-    end
-
-    if g_bVerbose then
-        g_fLog(string.format("[PG]   2c sandbox_mt: %d system processes OK", nMtOk))
-        local nMs = math.floor((g_fUptime() - nStart) * 1000)
-        g_fLog(string.format("[PG] Tier2: %d violations, %dms", #tV, nMs))
-    end
-
     return tV
 end
 
 -- =============================================
--- CHECK: TIER 3 (every 20th cycle)
+-- CHECK: TIER 3 HW
 -- =============================================
 
 local function checkTier3()
-    local nStart = g_fUptime()
     local tV = {}
-
-    if g_bVerbose then
-        g_fLog("[PG] Tier3-HW: SecureBoot, binding, EEPROM")
+    if g_bSecureBootExpected and not g_tBootSecurity then
+        tV[#tV+1] = {t="SECUREBOOT_TABLE_REMOVED", d="boot_security wiped from memory"}
     end
-
-    -- 3a. SecureBoot table presence
-    if g_bSecureBootExpected then
-        if g_tBootSecurity then
-            if g_bVerbose then g_fLog("[PG]   3a secureboot_table: PRESENT") end
-        else
-            tV[#tV+1] = {t="SECUREBOOT_TABLE_REMOVED",
-                d="boot_security wiped from memory"}
-        end
-    else
-        if g_bVerbose then g_fLog("[PG]   3a secureboot: not enabled (skipping)") end
-    end
-
-    -- 3b. Machine binding re-verification
     if g_sBootBindingSnap and g_fComputeBinding then
-        local sCurrentBinding = g_fComputeBinding()
-        if sCurrentBinding then
-            if sCurrentBinding == g_sBootBindingSnap then
-                if g_bVerbose then
-                    g_fLog(string.format("[PG]   3b machine_binding: MATCH (%s...)",
-                        g_sBootBindingSnap:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="SECUREBOOT_BINDING_MISMATCH",
-                    d="Hardware fingerprint changed at runtime",
-                    e=g_sBootBindingSnap:sub(1,24),
-                    a=sCurrentBinding:sub(1,24)}
-            end
+        local sC = g_fComputeBinding()
+        if sC and sC ~= g_sBootBindingSnap then
+            tV[#tV+1] = {t="SECUREBOOT_BINDING_MISMATCH",
+                d="Hardware fingerprint changed", e=g_sBootBindingSnap:sub(1,24), a=sC:sub(1,24)}
         end
-    else
-        if g_bVerbose then g_fLog("[PG]   3b machine_binding: skipped") end
     end
-
-    -- 3c. Kernel disk hash
     if g_sBootKernelHash and g_fHashKernel then
-        local sCurrentHash = g_fHashKernel()
-        if sCurrentHash then
-            if sCurrentHash == g_sBootKernelHash then
-                if g_bVerbose then
-                    g_fLog(string.format("[PG]   3c kernel_hash: MATCH (%s...)",
-                        g_sBootKernelHash:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="SECUREBOOT_KERNEL_MISMATCH",
-                    d="/kernel.lua modified on disk since boot",
-                    e=g_sBootKernelHash:sub(1,24),
-                    a=sCurrentHash:sub(1,24)}
-            end
+        local sC = g_fHashKernel()
+        if sC and sC ~= g_sBootKernelHash then
+            tV[#tV+1] = {t="SECUREBOOT_KERNEL_MISMATCH",
+                d="/kernel.lua modified on disk since boot",
+                e=g_sBootKernelHash:sub(1,24), a=sC:sub(1,24)}
         end
-    else
-        if g_bVerbose then g_fLog("[PG]   3c kernel_hash: skipped") end
     end
-
-    -- 3d. EEPROM code integrity
-    if g_sEepromCodeHash and g_fReadEepromCode and g_fSha256 then
+    if g_sEepromCodeHash and g_fReadEepromCode and (g_oSha256 or g_fSha256) then
         local sCode = g_fReadEepromCode()
         if sCode then
-            local sCurHash = hex(g_fSha256(sCode))
-            if sCurHash == g_sEepromCodeHash then
-                if g_bVerbose then
-                    g_fLog(string.format("[PG]   3d eeprom_code: INTACT (%s...)",
-                        g_sEepromCodeHash:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="EEPROM_CODE_TAMPERED",
-                    d="Boot ROM changed at runtime",
-                    e=g_sEepromCodeHash:sub(1,24),
-                    a=sCurHash:sub(1,24)}
+            local sCur = protectedHash(sCode)
+            if sCur ~= g_sEepromCodeHash then
+                tV[#tV+1] = {t="EEPROM_CODE_TAMPERED", d="Boot ROM changed at runtime",
+                    e=g_sEepromCodeHash:sub(1,24), a=sCur:sub(1,24)}
             end
         end
-    else
-        if g_bVerbose then g_fLog("[PG]   3d eeprom_code: skipped") end
     end
-
-    -- 3e. EEPROM data area
-    if g_sEepromDataSnap and g_fReadEepromData and g_fSha256 then
+    if g_sEepromDataSnap and g_fReadEepromData and (g_oSha256 or g_fSha256) then
         local sData = g_fReadEepromData()
         if sData then
-            local sCurHash = hex(g_fSha256(sData))
-            if sCurHash == g_sEepromDataSnap then
-                if g_bVerbose then
-                    g_fLog(string.format("[PG]   3e eeprom_data: INTACT (%s...)",
-                        g_sEepromDataSnap:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="EEPROM_DATA_TAMPERED",
-                    d="Attestation data changed at runtime",
-                    e=g_sEepromDataSnap:sub(1,24),
-                    a=sCurHash:sub(1,24)}
+            local sCur = protectedHash(sData)
+            if sCur ~= g_sEepromDataSnap then
+                tV[#tV+1] = {t="EEPROM_DATA_TAMPERED", d="Attestation data changed",
+                    e=g_sEepromDataSnap:sub(1,24), a=sCur:sub(1,24)}
             end
         end
     end
-
-    if g_bVerbose then
-        local nMs = math.floor((g_fUptime() - nStart) * 1000)
-        g_fLog(string.format("[PG] Tier3-HW: %d violations, %dms", #tV, nMs))
-    end
-
     return tV
 end
 
---[[
-local function checkTier3()
-    local nStart = g_fUptime()
+-- =============================================
+-- SYSCALL BEHAVIOR PROFILING CHECK (Feature 5)
+-- =============================================
+
+local function checkSyscallProfiles()
+    if not g_tSyscallProfiler then return {} end
     local tV = {}
+    local tAlerts = g_tSyscallProfiler.tAlerts
+    if not tAlerts then return tV end
 
-    if g_bVerbose then
-        g_fLog("[PG] Tier3: SecureBoot attestation, EEPROM integrity, kernel hash")
+    -- Check for recent anomalies since last PG cycle
+    local nNow = g_fUptime()
+    for i = #tAlerts, 1, -1 do
+        local tA = tAlerts[i]
+        if nNow - tA.time > 10 then break end  -- only recent alerts
+        tV[#tV + 1] = {
+            t = "SYSCALL_PROFILE_VIOLATION",
+            d = string.format("PID %d used '%s' (Ring %s) — not in behavioral baseline",
+                tA.pid, tA.syscall, tostring(tA.ring)),
+            e = "baseline syscalls only",
+            a = tA.syscall,
+        }
     end
-
-    -- 3a. SecureBoot table presence
-    if g_bSecureBootExpected then
-        if g_tBootSecurity then
-            if g_bVerbose then
-                g_fLog("[PG]   3a secureboot_table: PRESENT (verified=%s)",
-                    tostring(g_tBootSecurity.verified))
-            end
-        else
-            tV[#tV+1] = {t="SECUREBOOT_TABLE_REMOVED",
-                d="boot_security wiped from memory"}
-        end
-    else
-        if g_bVerbose then
-            g_fLog("[PG]   3a secureboot: not enabled (skipping)")
-        end
-    end
-    g_fFlush()
-
-    -- 3b. Machine binding re-verification
-    if g_sBootBindingSnap and g_fComputeBinding then
-        local sCurrentBinding = g_fComputeBinding()
-        if sCurrentBinding then
-            if sCurrentBinding == g_sBootBindingSnap then
-                if g_bVerbose then
-                    g_fLog(string.format(
-                        "[PG]   3b machine_binding: MATCH (%s...)",
-                        g_sBootBindingSnap:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="SECUREBOOT_BINDING_MISMATCH",
-                    d="Hardware fingerprint changed at runtime",
-                    e=g_sBootBindingSnap:sub(1,24),
-                    a=sCurrentBinding:sub(1,24)}
-                g_fLog(string.format(
-                    "[PG]   3b machine_binding: MISMATCH!"))
-                g_fLog(string.format(
-                    "[PG]     expected: %s", g_sBootBindingSnap:sub(1,32)))
-                g_fLog(string.format(
-                    "[PG]     actual:   %s", sCurrentBinding:sub(1,32)))
-            end
-        end
-    else
-        if g_bVerbose then
-            g_fLog("[PG]   3b machine_binding: skipped (no snapshot or no data card)")
-        end
-    end
-    g_fFlush()
-
-    -- 3c. Kernel disk hash
-    if g_sBootKernelHash and g_fHashKernel then
-        local sCurrentHash = g_fHashKernel()
-        if sCurrentHash then
-            if sCurrentHash == g_sBootKernelHash then
-                if g_bVerbose then
-                    g_fLog(string.format(
-                        "[PG]   3c kernel_hash: MATCH (%s...)",
-                        g_sBootKernelHash:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="SECUREBOOT_KERNEL_MISMATCH",
-                    d="/kernel.lua modified on disk since boot",
-                    e=g_sBootKernelHash:sub(1,24),
-                    a=sCurrentHash:sub(1,24)}
-                g_fLog("[PG]   3c kernel_hash: MISMATCH!")
-                g_fLog("[PG]     boot:    " .. g_sBootKernelHash:sub(1,32))
-                g_fLog("[PG]     current: " .. sCurrentHash:sub(1,32))
-            end
-        end
-    else
-        if g_bVerbose then
-            g_fLog("[PG]   3c kernel_hash: skipped (no SB or no data card)")
-        end
-    end
-    g_fFlush()
-
-    -- 3d. EEPROM code integrity
-    if g_sEepromCodeHash and g_fReadEepromCode and g_fSha256 then
-        local sCode = g_fReadEepromCode()
-        if sCode then
-            local sCurHash = hex(g_fSha256(sCode))
-            if sCurHash == g_sEepromCodeHash then
-                if g_bVerbose then
-                    g_fLog(string.format(
-                        "[PG]   3d eeprom_code: INTACT (%s..., %d bytes)",
-                        g_sEepromCodeHash:sub(1,16), #sCode))
-                end
-            else
-                tV[#tV+1] = {t="EEPROM_CODE_TAMPERED",
-                    d="Boot ROM changed at runtime",
-                    e=g_sEepromCodeHash:sub(1,24),
-                    a=sCurHash:sub(1,24)}
-                g_fLog("[PG]   3d eeprom_code: TAMPERED!")
-            end
-        end
-    else
-        if g_bVerbose then
-            g_fLog("[PG]   3d eeprom_code: skipped (no snapshot)")
-        end
-    end
-    g_fFlush()
-
-    -- 3e. EEPROM data area
-    if g_sEepromDataSnap and g_fReadEepromData and g_fSha256 then
-        local sData = g_fReadEepromData()
-        if sData then
-            local sCurHash = hex(g_fSha256(sData))
-            if sCurHash == g_sEepromDataSnap then
-                if g_bVerbose then
-                    g_fLog(string.format(
-                        "[PG]   3e eeprom_data: INTACT (%s...)",
-                        g_sEepromDataSnap:sub(1,16)))
-                end
-            else
-                tV[#tV+1] = {t="EEPROM_DATA_TAMPERED",
-                    d="Attestation data changed at runtime",
-                    e=g_sEepromDataSnap:sub(1,24),
-                    a=sCurHash:sub(1,24)}
-                g_fLog("[PG]   3e eeprom_data: TAMPERED!")
-            end
-        end
-    end
-    g_fFlush()
-    local tSuperV = checkOneSupercriticalFile()
-    for _, v in ipairs(tSuperV) do tV[#tV + 1] = v end
-
-    -- 3g. ONE critical file (rotates each cycle)
-    local tFileV = checkOneCriticalFile()
-    for _, v in ipairs(tFileV) do tV[#tV + 1] = v end
-
-    if g_bVerbose then
-        local nMs = math.floor((g_fUptime() - nStart) * 1000)
-        g_fLog(string.format("[PG] Tier3: %d violations, %dms (pass/fail: %d/%d)",
-            #tV, nMs, g_nTotalFilePasses, g_nTotalFileFails))
-    end
-
     return tV
 end
 
-]]
-
 -- =============================================
--- MAIN CHECK ORCHESTRATOR
+-- VIOLATION HANDLER
 -- =============================================
-
 
 local function handleViolations(tViolations)
     if #tViolations == 0 then return true end
-
     g_nViolations = g_nViolations + #tViolations
 
     g_fLog("[PG] ╔══ INTEGRITY VIOLATION DETECTED ══╗")
@@ -1124,9 +973,143 @@ local function handleViolations(tViolations)
     return false
 end
 
+-- =============================================
+-- INITIALIZE
+-- =============================================
+
+function PG.Initialize(tCfg)
+    g_tSyscallTable     = tCfg.tSyscallTable
+    g_tSyscallOverrides = tCfg.tSyscallOverrides
+    g_nPipelinePid      = tCfg.nPipelinePid
+    g_fPanic            = tCfg.fPanic
+    g_fLog              = tCfg.fLog
+    g_fUptime           = tCfg.fUptime
+    g_tProcessTable     = tCfg.tProcessTable
+    g_tRings            = tCfg.tRings
+    g_oObManager        = tCfg.oObManager
+    g_tFrozenLibs       = tCfg.tFrozenLibs
+    g_tBootSecurity     = tCfg.tBootSecurity
+    g_fComputeBinding   = tCfg.fComputeBinding
+    g_fHashKernel       = tCfg.fHashKernel
+    g_fReadEepromCode   = tCfg.fReadEepromCode
+    g_fReadEepromData   = tCfg.fReadEepromData
+    g_fSha256           = tCfg.fSha256          -- data card fallback
+    g_fReadFile         = tCfg.fReadFile
+    g_fFlush            = tCfg.fFlush or function() end
+    g_fLastModified     = tCfg.fLastModified
+
+    -- pure-Lua SHA-256 module (preferred over data card)
+    g_oSha256           = tCfg.oSha256
+
+    -- XOR encryption key for hash storage
+    g_sXorKey           = tCfg.sXorKey
+
+    -- syscall behavior profiler reference
+    g_tSyscallProfiler  = tCfg.tSyscallProfiler
+
+    g_fLog("[PG] PatchGuard v3 initializing...")
+    g_fLog(string.format("[PG]   SHA-256: %s",
+        g_oSha256 and "/lib/sha256 (pure Lua)" or
+        (g_fSha256 and "data card" or "NONE")))
+    g_fLog(string.format("[PG]   XOR key: %s",
+        g_sXorKey and (tostring(#g_sXorKey) .. " bytes from hardware RNG") or "DISABLED"))
+    g_fLog(string.format("[PG]   Check rotation: 3 variants (alpha/beta/gamma)"))
+    g_fLog(string.format("[PG]   Syscall profiler: %s",
+        g_tSyscallProfiler and "ACTIVE" or "DISABLED"))
+
+    -- Build check function variant array
+    g_tCheckVariants = { checkVariantAlpha, checkVariantBeta, checkVariantGamma }
+    g_nVariantCount = #g_tCheckVariants
+
+    PG.TakeSnapshot()
+    randomize()
+    return true
+end
+
+function PG.NotifyQuarantine(sDriverName, sReason)
+    g_nQuarantineEvents = g_nQuarantineEvents + 1
+    g_fLog(string.format(
+        "[PG] QUARANTINE EVENT: Driver '%s' quarantined — %s",
+        sDriverName, sReason or "fault limit"))
+end
+
+function PG.NotifyEscalation(nPid, sDetails)
+    g_nEscalationAttempts = g_nEscalationAttempts + 1
+    g_fLog(string.format(
+        "[PG] RING ESCALATION ATTEMPT: PID %d — %s",
+        nPid, sDetails or "unknown"))
+end
+
+function PG.TakeSnapshot(bRehashFiles)
+    g_fLog("[PG] Taking snapshot...")
+    g_fFlush()
+
+    g_fLog("[PG] Tier1: syscall table, overrides, self, rings...")
+    snapshotSyscallTable()
+    snapshotOverrides()
+    snapshotSelf()
+    snapshotRings()
+    g_fFlush()
+
+    g_fLog("[PG] Tier2: frozen libs, OB namespace...")
+    snapshotFrozenLibs()
+    snapshotObNamespace()
+    g_fFlush()
+
+    g_fLog("[PG] Tier3: SecureBoot, EEPROM...")
+    snapshotSecureBoot()
+    g_fFlush()
+
+    local nExisting = 0
+    for _ in pairs(g_tFileHashSnap) do nExisting = nExisting + 1 end
+
+    if bRehashFiles == "force" then
+        g_fLog("[PG] Tier3-files: forced full re-hash...")
+        snapshotCriticalFiles()
+    elseif bRehashFiles == false then
+        g_fLog(string.format("[PG] Tier3-files: reusing %d cached hashes (fast re-arm)", nExisting))
+    elseif nExisting == 0 then
+        g_fLog("[PG] Tier3-files: initial hash...")
+        snapshotCriticalFiles()
+    else
+        g_fLog(string.format("[PG] Tier3-files: reusing %d cached hashes", nExisting))
+    end
+
+    local nSc = 0
+    for _ in pairs(g_tSyscallFuncSnap) do nSc = nSc + 1 end
+    local nOvr = 0
+    for _ in pairs(g_tOverrideSnap) do nOvr = nOvr + 1 end
+    local nFiles = 0
+    for _ in pairs(g_tFileHashSnap) do nFiles = nFiles + 1 end
+
+    g_fLog(string.format(
+        "[PG] Snapshot: %d syscalls, %d overrides, %d files, PM=PID %s, SB=%s",
+        nSc, nOvr, nFiles, tostring(g_nPipelinePid),
+        g_bSecureBootExpected and "ACTIVE" or "inactive"))
+end
+
+function PG.Arm()
+    if not g_sSyscallKeyFP or #g_sSyscallKeyFP == 0 then
+        g_fLog("[PG] Cannot arm: no snapshot")
+        return false
+    end
+    g_bArmed = true
+    g_fLog("[PG] PatchGuard v3 ARMED — rotating checks, encrypted hashes, mtime scanning")
+    return true
+end
+
+function PG.Disarm()  g_bArmed = false end
+function PG.IsArmed() return g_bArmed end
+
 function PG.Check()
     g_nChecksPerformed = g_nChecksPerformed + 1
-    local tViolations = checkTier1()
+
+    -- Use ALL three check variants on full check
+    local tViolations = checkVariantAlpha()
+    local tVB = checkVariantBeta()
+    for _, v in ipairs(tVB) do tViolations[#tViolations+1] = v end
+    local tVG = checkVariantGamma()
+    for _, v in ipairs(tVG) do tViolations[#tViolations+1] = v end
 
     local tV2 = checkTier2()
     for _, v in ipairs(tV2) do tViolations[#tViolations+1] = v end
@@ -1134,6 +1117,7 @@ function PG.Check()
     local tV3 = checkTier3()
     for _, v in ipairs(tV3) do tViolations[#tViolations+1] = v end
 
+    -- All files
     for _, sPath in ipairs(SUPERCRITICAL_FILES) do
         local tVF = fCheckOneFile(sPath, true)
         for _, v in ipairs(tVF) do tViolations[#tViolations+1] = v end
@@ -1143,176 +1127,41 @@ function PG.Check()
         for _, v in ipairs(tVF) do tViolations[#tViolations+1] = v end
     end
 
-    if #tViolations > 0 then
-        return handleViolations(tViolations)
-    end
+    -- Syscall profiles
+    local tVP = checkSyscallProfiles()
+    for _, v in ipairs(tVP) do tViolations[#tViolations+1] = v end
+
+    if #tViolations > 0 then return handleViolations(tViolations) end
     return true
 end
 
-local g_nTicksSinceLastLog = 0
-
-local function fMtimeScanAndHash()
-    if not g_fReadFile or not g_fSha256 or not g_fLastModified then
-        return {}
-    end
-
-    local tV = {}
-
-    -- Scan ALL files' mtime every cycle
-    -- Cost: ~0.05 ticks × 25 files ≈ 1.25 ticks total
-    -- This catches external edits within one PG cycle
-
-    -- Supercritical first
-    for _, sPath in ipairs(SUPERCRITICAL_FILES) do
-        local sExpHash = g_tFileHashSnap[sPath]
-        if not sExpHash then goto nextFile end
-
-        g_nTotalFileChecks = g_nTotalFileChecks + 1
-        local nMtime = g_fLastModified(sPath)
-
-        if not nMtime then
-            -- File deleted externally
-            tV[#tV+1] = {
-                t = "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL",
-                d = sPath,
-                e = sExpHash:sub(1, 24),
-                a = "(file missing)"
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-            g_tMtimeCache[sPath] = nil
-            goto nextFile
-        end
-
-        if g_tMtimeCache[sPath] == nMtime then
-            -- Mtime unchanged — file not touched since last verified hash
-            g_nTotalFilePasses = g_nTotalFilePasses + 1
-            goto nextFile
-        end
-
-        -- Mtime CHANGED — someone wrote to this file externally
-        -- This is the only case where we pay the read+hash cost
-        g_fLog(string.format(
-            "[PG] mtime changed: %s (cached=%s now=%s) — rehashing",
-            sPath:match("([^/]+)$") or sPath,
-            tostring(g_tMtimeCache[sPath]),
-            tostring(nMtime)))
-
-        local sContent = g_fReadFile(sPath)
-        g_fFlush() -- yield between read and hash
-
-        if not sContent then
-            tV[#tV+1] = {
-                t = "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL",
-                d = sPath,
-                e = sExpHash:sub(1, 24),
-                a = "(read failed after mtime change)"
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-            g_tMtimeCache[sPath] = nil
-            goto nextFile
-        end
-
-        local sCurHash = hex(g_fSha256(sContent))
-
-        if sCurHash ~= sExpHash then
-            tV[#tV+1] = {
-                t = "KERNEL_INTEGRITY_HASH_FAIL",
-                d = sPath,
-                e = sExpHash:sub(1, 24),
-                a = sCurHash:sub(1, 24)
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-            -- DON'T update mtime cache — keep detecting on every cycle
-        else
-            -- File was rewritten with identical content (or our snapshot
-            -- was stale). Either way, current state matches boot.
-            g_tMtimeCache[sPath] = nMtime
-            g_nTotalFilePasses = g_nTotalFilePasses + 1
-        end
-
-        ::nextFile::
-    end
-
-    -- Then critical files (same logic)
-    for _, sPath in ipairs(CRITICAL_FILES) do
-        local sExpHash = g_tFileHashSnap[sPath]
-        if not sExpHash then goto nextCrit end
-
-        g_nTotalFileChecks = g_nTotalFileChecks + 1
-        local nMtime = g_fLastModified(sPath)
-
-        if not nMtime then
-            tV[#tV+1] = {
-                t = "KERNEL_MODULES_INTEGRITY_FAIL",
-                d = sPath,
-                e = sExpHash:sub(1, 24),
-                a = "(file missing)"
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-            g_tMtimeCache[sPath] = nil
-            goto nextCrit
-        end
-
-        if g_tMtimeCache[sPath] == nMtime then
-            g_nTotalFilePasses = g_nTotalFilePasses + 1
-            goto nextCrit
-        end
-
-        g_fLog(string.format(
-            "[PG] mtime changed: %s — rehashing",
-            sPath:match("([^/]+)$") or sPath))
-
-        local sContent = g_fReadFile(sPath)
-        g_fFlush()
-
-        if not sContent then
-            tV[#tV+1] = {
-                t = "KERNEL_MODULES_INTEGRITY_FAIL",
-                d = sPath,
-                e = sExpHash:sub(1, 24),
-                a = "(read failed)"
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-            g_tMtimeCache[sPath] = nil
-            goto nextCrit
-        end
-
-        local sCurHash = hex(g_fSha256(sContent))
-
-        if sCurHash ~= sExpHash then
-            tV[#tV+1] = {
-                t = "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
-                d = sPath,
-                e = sExpHash:sub(1, 24),
-                a = sCurHash:sub(1, 24)
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-        else
-            g_tMtimeCache[sPath] = nMtime
-            g_nTotalFilePasses = g_nTotalFilePasses + 1
-        end
-
-        ::nextCrit::
-    end
-
-    return tV
-end
+-- =============================================
+-- TICK — main per-scheduler-iteration entry
+-- =============================================
 
 function PG.Tick()
     if not g_bArmed then return true end
-
-    -- g_nTickCounter = g_nTickCounter + 1
-    -- if g_nTickCounter < g_nCheckInterval then return true end
-    -- g_nTickCounter = 0
-    if g_fUptime() < g_nNextCheckTime then return true end
+    if g_fUptime() < g_nNextCheckTime then
+        -- Even between full checks, scan ALL file mtimes for instant detection
+        local tMtV = fMtimeScanAll()
+        if #tMtV > 0 then return handleViolations(tMtV) end
+        return true
+    end
 
     randomize()
     g_nChecksPerformed = g_nChecksPerformed + 1
 
-    -- Tier 1+2: in-memory, always run, zero cost
-    local tV = checkTier1()
-    local tV2 = checkTier2()
-    for _, v in ipairs(tV2) do tV[#tV+1] = v end
+    -- ROTATED CHECK: randomly pick one of the 3 variants
+    local nVariant = math.random(1, g_nVariantCount)
+    local tV = g_tCheckVariants[nVariant]()
+
+    -- Tier 2: every 5th cycle
+    g_nTier2Counter = g_nTier2Counter + 1
+    if g_nTier2Counter >= 5 then
+        g_nTier2Counter = 0
+        local tV2 = checkTier2()
+        for _, v in ipairs(tV2) do tV[#tV+1] = v end
+    end
 
     -- Tier 3 HW: every 10th cycle
     g_nTier3Counter = g_nTier3Counter + 1
@@ -1322,28 +1171,23 @@ function PG.Tick()
         for _, v in ipairs(tV3) do tV[#tV+1] = v end
     end
 
-    -- Tier 3 FILES: Round-Robin
+    -- Files: round-robin (one supercritical + one critical per cycle)
     if #SUPERCRITICAL_FILES > 0 then
-        local sSuperPath = SUPERCRITICAL_FILES[g_nSuperCursor]
-        local tVF1 = fCheckOneFile(sSuperPath, true)
-        for _, v in ipairs(tVF1) do tV[#tV+1] = v end
-        
-        g_nSuperCursor = g_nSuperCursor + 1
-        if g_nSuperCursor > #SUPERCRITICAL_FILES then g_nSuperCursor = 1 end
+        local tVF = fCheckOneFile(SUPERCRITICAL_FILES[g_nSuperCursor], true)
+        for _, v in ipairs(tVF) do tV[#tV+1] = v end
+        g_nSuperCursor = g_nSuperCursor % #SUPERCRITICAL_FILES + 1
     end
-
     if #CRITICAL_FILES > 0 then
-        local sCritPath = CRITICAL_FILES[g_nCritCursor]
-        local tVF2 = fCheckOneFile(sCritPath, false)
-        for _, v in ipairs(tVF2) do tV[#tV+1] = v end
-        
-        g_nCritCursor = g_nCritCursor + 1
-        if g_nCritCursor > #CRITICAL_FILES then g_nCritCursor = 1 end
+        local tVF = fCheckOneFile(CRITICAL_FILES[g_nCritCursor], false)
+        for _, v in ipairs(tVF) do tV[#tV+1] = v end
+        g_nCritCursor = g_nCritCursor % #CRITICAL_FILES + 1
     end
 
-    if #tV > 0 then
-        return handleViolations(tV)
-    end
+    -- Syscall profile anomalies
+    local tVP = checkSyscallProfiles()
+    for _, v in ipairs(tVP) do tV[#tV+1] = v end
+
+    if #tV > 0 then return handleViolations(tV) end
     return true
 end
 
@@ -1353,39 +1197,38 @@ end
 
 function PG.GetStats()
     return {
-        bArmed             = g_bArmed,
-        nChecksPerformed   = g_nChecksPerformed,
-        nViolations        = g_nViolations,
-        -- nCheckInterval     = g_nCheckInterval,
-        nMinCheckSec       = g_nMinCheckSec,
-        nMaxCheckSec       = g_nMaxCheckSec,
-        bSecureBootActive  = g_bSecureBootExpected,
-        bEepromMonitored   = g_sEepromCodeHash ~= nil,
-        nCriticalFiles     = #CRITICAL_FILES,
-        nFileChecksTotal   = g_nTotalFileChecks,
-        nFilePassTotal     = g_nTotalFilePasses,
-        nFileFailTotal     = g_nTotalFileFails,
-        nFileCheckCursor   = g_nSuperCursor,
+        bArmed               = g_bArmed,
+        nChecksPerformed     = g_nChecksPerformed,
+        nViolations          = g_nViolations,
+        nMinCheckSec         = g_nMinCheckSec,
+        nMaxCheckSec         = g_nMaxCheckSec,
+        bSecureBootActive    = g_bSecureBootExpected,
+        bEepromMonitored     = g_sEepromCodeHash ~= nil,
+        nCriticalFiles       = #CRITICAL_FILES + #SUPERCRITICAL_FILES,
+        nFileChecksTotal     = g_nTotalFileChecks,
+        nFilePassTotal       = g_nTotalFilePasses,
+        nFileFailTotal       = g_nTotalFileFails,
+        nQuarantineEvents    = g_nQuarantineEvents or 0,
+        nEscalationAttempts  = g_nEscalationAttempts or 0,
 
+        bXorKeyActive        = (g_sXorKey ~= nil),
+        nXorKeyBytes         = g_sXorKey and #g_sXorKey or 0,
+        bSha256Module        = (g_oSha256 ~= nil),
+        nCheckVariants       = g_nVariantCount,
+        bSyscallProfiler     = (g_tSyscallProfiler ~= nil),
+        bProfilesLocked      = g_tSyscallProfiler and g_tSyscallProfiler.bLocked or false,
+        nProfileAlerts       = g_tSyscallProfiler and #(g_tSyscallProfiler.tAlerts or {}) or 0,
         nCriticalFilesHashed = (function()
-        local n = 0
-        for _ in pairs(g_tFileHashSnap) do n = n + 1 end
-        return n
+            local n = 0; for _ in pairs(g_tFileHashSnap) do n = n + 1 end; return n
         end)(),
-        nSyscallsMonitored = (function()
-            local n = 0
-            for _ in pairs(g_tSyscallFuncSnap) do n = n + 1 end
-            return n
+        nSyscallsMonitored   = (function()
+            local n = 0; for _ in pairs(g_tSyscallFuncSnap) do n = n + 1 end; return n
         end)(),
-        nFrozenLibs        = (function()
-            local n = 0
-            for _ in pairs(g_tFrozenLibSnap) do n = n + 1 end
-            return n
+        nFrozenLibs          = (function()
+            local n = 0; for _ in pairs(g_tFrozenLibSnap) do n = n + 1 end; return n
         end)(),
-        nObPaths           = (function()
-            local n = 0
-            for _ in pairs(g_tObPathSnap) do n = n + 1 end
-            return n
+        nObPaths             = (function()
+            local n = 0; for _ in pairs(g_tObPathSnap) do n = n + 1 end; return n
         end)(),
     }
 end

@@ -34,6 +34,7 @@ g_tDriverInfo = {
     nLoadPriority       = 150,
     sVersion            = "2.0.0",
     bAsyncIoSupported   = true,   -- DKMS async I/O contract
+    capabilities        = {"GPU_ACCESS", "SCREEN_ACCESS", "RAW_COMPONENT_LIST", "RAW_COMPONENT_PROXY"},
 }
 
 -- =============================================

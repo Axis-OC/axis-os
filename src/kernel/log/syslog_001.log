@@ -1,85 +1,100 @@
 === LOG SESSION START ===
-[  17.8000] [ INFO ] PID=3   Creating process 6 ('/drivers/filesystem.sys.lua') at Ring 2
-[  17.8000] [ PROC ] PID=3   spawn image=/drivers/filesystem.sys.lua parent=3 pid=6 ring=2
-[  17.8500] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 6)
-[  17.8500] [ INFO ] PID=3   [DKMS] Loading: /drivers/eeprom.sys.lua
-[  17.8500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  17.8500] [ INFO ] PID=3   Creating process 7 ('/drivers/eeprom.sys.lua') at Ring 2
-[  17.8500] [ PROC ] PID=3   spawn image=/drivers/eeprom.sys.lua parent=3 pid=7 ring=2
-[  17.9000] [ INFO ] PID=3   [DKMS] Loaded 'AxisEEPROMStub' (PID 7)
-[  17.9000] [ INFO ] PID=3   [DKMS] Loading: /drivers/filesystem.sys.lua
-[  17.9000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  17.9000] [ INFO ] PID=3   Creating process 8 ('/drivers/filesystem.sys.lua') at Ring 2
-[  17.9000] [ PROC ] PID=3   spawn image=/drivers/filesystem.sys.lua parent=3 pid=8 ring=2
-[  17.9500] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 8)
-[  17.9500] [ INFO ] PID=3   [DKMS] Loading: /drivers/internet.sys.lua
-[  18.1000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  18.1000] [ INFO ] PID=3   Creating process 9 ('/drivers/internet.sys.lua') at Ring 2
-[  18.1000] [ PROC ] PID=3   spawn image=/drivers/internet.sys.lua parent=3 pid=9 ring=2
-[  18.2000] [ INFO ] PID=3   [DKMS] Device '\Device\Net0' created.
-[  18.2000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_002
-[  18.2000] [ INFO ] PID=3   [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
-[  18.2000] [ INFO ] PID=3   [DKMS] Loaded 'AxisNet' (PID 9)
-[  18.2000] [ INFO ] PID=2   [PM] Loading RingFS driver...
-[  18.2000] [ INFO ] PID=3   [DKMS] Loading: /drivers/ringfs.sys.lua
-[  18.2500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  18.2500] [ INFO ] PID=3   Creating process 10 ('/drivers/ringfs.sys.lua') at Ring 2
-[  18.2500] [ PROC ] PID=3   spawn image=/drivers/ringfs.sys.lua parent=3 pid=10 ring=2
-[  18.3000] [ INFO ] PID=3   [DKMS] Device '\Device\ringlog' created.
-[  18.3000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_003
-[  18.3000] [ INFO ] PID=3   [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
-[  18.3000] [ INFO ] PID=3   [DKMS] Loaded 'AxisRingFS' (PID 10)
-[  18.3000] [ INFO ] PID=2   [PM] Initializing log system on /dev/ringlog
-[  18.5000] [ INFO ] PID=2   [PM] Ringfs handle opened (persistent).
-[  18.5500] [ INFO ] PID=2   [PM] Log system initialized.
-[  18.5500] [ INFO ] PID=2   [PM] Processing driver autoload...
-[  18.5500] [ INFO ] PID=2   [PM] Loaded /boot/sys/drivers.cfg (2 entries)
-[  18.5500] [ INFO ] PID=2   [PM] Drivers: 2 enabled, 0 disabled
-[  18.6000] [ INFO ] PID=2   [PM] FAIL: 'RBMK' — file not found: /sys/drivers/hbm_rbmk.syss.lua
-[  18.6000] [ INFO ] PID=2   [PM] [2/2] Loading 'blkdev' (pri=200) /drivers/blkdev.sys.lua
-[  18.6000] [ INFO ] PID=2   [PM] Loading driver: /drivers/blkdev.sys.lua
-[  18.6500] [ INFO ] PID=3   [DKMS] Auto-discovery for type: drive
-[  18.6500] [ INFO ] PID=3   [DKMS] Loading: /drivers/blkdev.sys.lua
-[  18.7000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
-[  18.7000] [ INFO ] PID=3   Creating process 11 ('/drivers/blkdev.sys.lua') at Ring 2
-[  18.7000] [ PROC ] PID=3   spawn image=/drivers/blkdev.sys.lua parent=3 pid=11 ring=2
-[  18.7500] [ INFO ] PID=3   [DKMS] Device '\Device\drive_256973' created.
-[  18.7500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\PHYS_004
-[  18.7500] [ INFO ] PID=3   [DKMS] Symlink '/dev/drive_256973_0' -> '\Device\drive_256973' created.
-[  18.7500] [ INFO ] PID=3   [DKMS] Loaded 'AxisBlockDev' (PID 11)
-[  18.7500] [ INFO ] PID=2   [PM] OK: Auto-loaded 1 instances of AxisBlockDev
-[  18.7500] [ INFO ] PID=2   [PM] Autoload complete: 1 loaded, 1 failed, 0 disabled
-[  18.8000] [ INFO ] PID=2   [PM] Waiting for system stabilization...
-[  19.8000] [ INFO ] PID=2   [IO_MGR] I/O Manager started (PID 2)
-[  19.8000] [ INFO ] PID=2   [SEC_MON] Security Monitor initialized
-[  19.8000] [ INFO ] PID=2   [SESS] Session Manager initialized
-[  19.8000] [ INFO ] PID=2   [PM] Silence on deck. Handing off to userspace.
-[  19.8000] [ INFO ] PID=2   [PM] Spawning /bin/init.lua...
-[  19.8000] [ INFO ] PID=2   Creating process 12 ('/bin/init.lua') at Ring 3
-[  19.8000] [ PROC ] PID=2   spawn image=/bin/init.lua parent=2 pid=12 ring=3
-[  19.8500] [ INFO ] PID=2   [PM] Init spawned as PID 12
-[  19.9500] [ SEC  ] PID=1   PatchGuard auto-arming (post-boot, tick 300)...
-[  19.9500] [ SEC  ] PID=1   [PG] Taking snapshot...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier1: syscall table, overrides, self, rings...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier2: frozen libs, OB namespace...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier3: SecureBoot, EEPROM...
-[  19.9500] [ SEC  ] PID=1   [PG] Tier3-files: reusing 22 cached hashes (fast re-arm)
-[  19.9500] [ SEC  ] PID=1   [PG] Snapshot: 175 syscalls, 17 overrides, 3 libs, 22 files, PM=PID 2, SB=inactive
-[  19.9500] [ SEC  ] PID=1   [PG] PatchGuard v2 ARMED — full integrity monitoring active
-[  19.9500] [ SEC  ] PID=1   PatchGuard ARMED — all integrity monitoring active
-[  20.0000] [ INFO ] PID=12  [INIT] Display Manager mode enabled — launching DM
-[  20.0000] [ INFO ] PID=12  Creating process 13 ('/system/dm.lua') at Ring 3
-[  20.0000] [ PROC ] PID=12  spawn image=/system/dm.lua parent=12 pid=13 ring=3
-[  22.3500] [ INFO ] PID=13  Creating process 14 ('/system/desktop.lua') at Ring 3
-[  22.3500] [ PROC ] PID=13  spawn image=/system/desktop.lua parent=13 pid=14 ring=3
-[  23.6000] [ INFO ] PID=14  Creating process 15 ('/system/apps/terminal.lua') at Ring 3
-[  23.6000] [ PROC ] PID=14  spawn image=/system/apps/terminal.lua parent=14 pid=15 ring=3
-[  41.4000] [ INFO ] PID=15  Creating process 16 ('/usr/commands/xe_pages.lua') at Ring 3
-[  41.4000] [ PROC ] PID=15  spawn image=/usr/commands/xe_pages.lua parent=15 pid=16 ring=3
-[  43.3000] [ INFO ] PID=16  Process 16 exited normally.
-[  62.0500] [ INFO ] PID=15  Process 15 exited normally.
-[  63.1000] [ INFO ] PID=14  Creating process 17 ('/system/apps/terminal.lua') at Ring 3
-[  63.1000] [ PROC ] PID=14  spawn image=/system/apps/terminal.lua parent=14 pid=17 ring=3
-[  64.3000] [ INFO ] PID=17  Process 17 exited normally.
-[  75.9000] [ INFO ] PID=14  Creating process 18 ('/system/apps/terminal.lua') at Ring 3
-[  75.9000] [ PROC ] PID=14  spawn image=/system/apps/terminal.lua parent=14 pid=18 ring=3
+[   8.1500] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 6)
+[   8.1500] [ INFO ] PID=3   [DKMS] Loading: /drivers/internet.sys.lua
+[   8.3000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.3500] [ INFO ] PID=3   [HVCI] Driver 'AxisNet' sandboxed with 2 capabilities: INTERNET_CARD, RAW_COMPONENT_LIST
+[   8.3500] [ INFO ] PID=3   Creating process 7 ('/drivers/internet.sys.lua') at Ring 2
+[   8.3500] [ PROC ] PID=3   spawn image=/drivers/internet.sys.lua parent=3 pid=7 ring=2
+[   8.4500] [ INFO ] PID=3   [DKMS] Device '\Device\Net0' created.
+[   8.4500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_002
+[   8.4500] [ INFO ] PID=3   [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
+[   8.4500] [ INFO ] PID=3   [DKMS] Loaded 'AxisNet' (PID 7)
+[   8.4500] [ INFO ] PID=3   [DKMS] Loading: /drivers/eeprom.sys.lua
+[   8.5000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.5000] [ INFO ] PID=3   Creating process 8 ('/drivers/eeprom.sys.lua') at Ring 2
+[   8.5000] [ PROC ] PID=3   spawn image=/drivers/eeprom.sys.lua parent=3 pid=8 ring=2
+[   8.5000] [ INFO ] PID=3   [DKMS] Loaded 'AxisEEPROMStub' (PID 8)
+[   8.5000] [ INFO ] PID=3   [DKMS] Loading: /drivers/computer.sys.lua
+[   8.5500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.5500] [ INFO ] PID=3   Creating process 9 ('/drivers/computer.sys.lua') at Ring 2
+[   8.5500] [ PROC ] PID=3   spawn image=/drivers/computer.sys.lua parent=3 pid=9 ring=2
+[   8.5500] [ INFO ] PID=3   [DKMS] Loaded 'AxisComputerStub' (PID 9)
+[   8.5500] [ INFO ] PID=3   [DKMS] Loading: /drivers/drive.sys.lua
+[   8.6000] [ INFO ] PID=2   [PM] Loading RingFS driver...
+[   8.6000] [ INFO ] PID=3   [DKMS] Loading: /drivers/ringfs.sys.lua
+[   8.6500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   8.6500] [ INFO ] PID=3   Creating process 10 ('/drivers/ringfs.sys.lua') at Ring 2
+[   8.6500] [ PROC ] PID=3   spawn image=/drivers/ringfs.sys.lua parent=3 pid=10 ring=2
+[   8.6500] [ INFO ] PID=3   [DKMS] Device '\Device\ringlog' created.
+[   8.7000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_003
+[   8.7000] [ INFO ] PID=3   [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
+[   8.7000] [ INFO ] PID=3   [DKMS] Loaded 'AxisRingFS' (PID 10)
+[   8.7000] [ INFO ] PID=2   [PM] Initializing log system on /dev/ringlog
+[   8.9000] [ INFO ] PID=2   [PM] Ringfs handle opened (persistent).
+[   8.9500] [ INFO ] PID=2   [PM] Log system initialized.
+[   8.9500] [ INFO ] PID=2   [PM] Processing driver autoload...
+[   8.9500] [ INFO ] PID=2   [PM] Loaded /boot/sys/drivers.cfg (2 entries)
+[   8.9500] [ INFO ] PID=2   [PM] Drivers: 2 enabled, 0 disabled
+[   9.0000] [ INFO ] PID=2   [PM] FAIL: 'RBMK' — file not found: /sys/drivers/hbm_rbmk.syss.lua
+[   9.0000] [ INFO ] PID=2   [PM] [2/2] Loading 'blkdev' (pri=200) /drivers/blkdev.sys.lua
+[   9.0000] [ INFO ] PID=2   [PM] Loading driver: /drivers/blkdev.sys.lua
+[   9.0500] [ INFO ] PID=3   [DKMS] Auto-discovery for type: drive
+[   9.0500] [ INFO ] PID=3   [DKMS] Loading: /drivers/blkdev.sys.lua
+[   9.1000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   9.1000] [ INFO ] PID=3   [HVCI] Driver 'AxisBlockDev' sandboxed with 1 capabilities: DISK_ACCESS
+[   9.1000] [ INFO ] PID=3   Creating process 11 ('/drivers/blkdev.sys.lua') at Ring 2
+[   9.1000] [ PROC ] PID=3   spawn image=/drivers/blkdev.sys.lua parent=3 pid=11 ring=2
+[   9.1500] [ INFO ] PID=3   [DKMS] Device '\Device\drive_256973' created.
+[   9.1500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\PHYS_004
+[   9.1500] [ INFO ] PID=3   [DKMS] Symlink '/dev/drive_256973_0' -> '\Device\drive_256973' created.
+[   9.1500] [ INFO ] PID=3   [DKMS] Loaded 'AxisBlockDev' (PID 11)
+[   9.1500] [ INFO ] PID=2   [PM] OK: Auto-loaded 1 instances of AxisBlockDev
+[   9.1500] [ INFO ] PID=2   [PM] Autoload complete: 1 loaded, 1 failed, 0 disabled
+[   9.2000] [ INFO ] PID=2   [PM] Waiting for system stabilization...
+[  10.2000] [ INFO ] PID=2   [IO_MGR] I/O Manager started (PID 2)
+[  10.2000] [ INFO ] PID=2   [SEC_MON] Security Monitor initialized
+[  10.2000] [ INFO ] PID=2   [SESS] Session Manager initialized
+[  10.2000] [ INFO ] PID=2   [PM] Silence on deck. Handing off to userspace.
+[  10.2000] [ INFO ] PID=2   [PM] Spawning /bin/init.lua...
+[  10.2000] [ INFO ] PID=2   Creating process 12 ('/bin/init.lua') at Ring 3
+[  10.2000] [ PROC ] PID=2   spawn image=/bin/init.lua parent=2 pid=12 ring=3
+[  10.2500] [ INFO ] PID=2   [PM] Init spawned as PID 12
+[  10.3500] [ SEC  ] PID=1   PatchGuard auto-arming (post-boot, tick 300)...
+[  10.3500] [ SEC  ] PID=1   [PG] Taking snapshot...
+[  10.3500] [ SEC  ] PID=1   [PG] Tier1: syscall table, overrides, self, rings...
+[  10.3500] [ SEC  ] PID=1   [PG] Tier2: frozen libs, OB namespace...
+[  10.3500] [ SEC  ] PID=1   [PG] Tier3: SecureBoot, EEPROM...
+[  10.4000] [ SEC  ] PID=1   [PG] Tier3-files: reusing 22 cached hashes (fast re-arm)
+[  10.4000] [ SEC  ] PID=1   [PG] Snapshot: 182 syscalls, 17 overrides, 22 files, PM=PID 2, SB=inactive
+[  10.4000] [ SEC  ] PID=1   [PG] PatchGuard v3 ARMED — rotating checks, encrypted hashes, mtime scanning
+[  10.4000] [ SEC  ] PID=1   PatchGuard ARMED — all integrity monitoring active
+[  11.3500] [ INFO ] PID=12  Creating process 13 ('/bin/sh.lua') at Ring 3
+[  11.3500] [ PROC ] PID=12  spawn image=/bin/sh.lua parent=12 pid=13 ring=3
+[  12.3500] [ INFO ] PID=13  Creating process 14 ('/usr/commands/qtest.lua') at Ring 3
+[  12.3500] [ PROC ] PID=13  spawn image=/usr/commands/qtest.lua parent=13 pid=14 ring=3
+[  12.4000] [ INFO ] PID=14  Process 14 exited normally.
+[  31.2000] [ INFO ] PID=13  Creating process 15 ('/usr/commands/qtest.lua') at Ring 3
+[  31.2000] [ PROC ] PID=13  spawn image=/usr/commands/qtest.lua parent=13 pid=15 ring=3
+[  31.2500] [ INFO ] PID=2   [PM] User (PID 15) requested load of: /drivers/quarantine_test.sys.lua
+[  31.3000] [ INFO ] PID=3   [DKMS] Loading: /drivers/quarantine_test.sys.lua
+[  31.3000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[  31.3000] [ INFO ] PID=3   Creating process 16 ('/drivers/quarantine_test.sys.lua') at Ring 2
+[  31.3000] [ PROC ] PID=3   spawn image=/drivers/quarantine_test.sys.lua parent=3 pid=16 ring=2
+[  31.3500] [ INFO ] PID=3   [DKMS] Device '/dev/qtest' created.
+[  31.3500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_005
+[  31.3500] [ INFO ] PID=3   [DKMS] Symlink '/dev/qtest' -> '/dev/qtest' created.
+[  31.3500] [ INFO ] PID=3   [DKMS] Loaded 'QuarantineTester' (PID 16)
+[  31.3500] [ INFO ] PID=2   [PM] Loaded 'QuarantineTester' (PID 16)
+[  31.4000] [ INFO ] PID=3   [DKMS] IRP dispatch CRASHED: /system/driverdispatch.lua:32: attempt to index a boolean value (field 'tDispatch')
+[  31.4500] [ INFO ] PID=3   [DKMS] IRP dispatch CRASHED: /system/driverdispatch.lua:32: attempt to index a boolean value (field 'tDispatch')
+[  31.5000] [ INFO ] PID=3   [DKMS] IRP dispatch CRASHED: /system/driverdispatch.lua:32: attempt to index a boolean value (field 'tDispatch')
+[  31.5000] [ INFO ] PID=3   [HVCI] ╔══ DRIVER QUARANTINED ══╗
+[  31.5000] [ INFO ] PID=3   [HVCI] ║  QuarantineTester  ║
+[  31.5000] [ INFO ] PID=3   [HVCI] ║  3 faults in 60s       ║
+[  31.5000] [ INFO ] PID=3   [HVCI] ║  Clear via BIOS Setup  ║
+[  31.5000] [ INFO ] PID=3   [HVCI] ╚════════════════════════╝
+[  31.5000] [ INFO ] PID=3   [DKMS] !!! DRIVER QUARANTINED: QuarantineTester — 3 faults in 60s. IRPs will no longer be dispatched.
+[  31.5500] [ INFO ] PID=3   [DKMS] IRP blocked: QuarantineTester is quarantined
+[  31.6000] [ INFO ] PID=15  Process 15 exited normally.
+[  43.6000] [ INFO ] PID=13  Creating process 17 ('/usr/commands/regedit.lua') at Ring 3
+[  43.6000] [ PROC ] PID=13  spawn image=/usr/commands/regedit.lua parent=13 pid=17 ring=3

@@ -23,6 +23,62 @@ local OB_ACCESS_DEVCTL = 0x0008
 
 local g_oRootFs = nil
 
+
+-- ==========================================
+-- RING ESCALATION DETECTION
+-- Validates argument types before processing.
+-- Catches metamethod exploitation attempts.
+-- ==========================================
+
+local function fValidateStringArg(v, sArgName)
+    if type(v) ~= "string" then
+        local sType = type(v)
+        syscall("kernel_log", string.format(
+            "[IO_MGR] !! RING ESCALATION ATTEMPT: %s is %s (expected string) — PID %d",
+            sArgName, sType, nMyPid))
+        -- Notify PatchGuard
+        pcall(function()
+            syscall("kernel_log",
+                "[SEC] STATUS_RING_ESCALATION_TYPE_MISMATCH: " ..
+                sArgName .. " received " .. sType ..
+                " — possible metamethod injection")
+        end)
+        return false, "TYPE_MISMATCH: " .. sArgName .. " must be string, got " .. sType
+    end
+    return true
+end
+
+-- ==========================================
+-- SAFE HANDLER WRAPPER
+-- Wraps all VFS handlers in pcall to catch
+-- nil method calls from metamethod exploits.
+-- ==========================================
+
+local function fSafeHandler(sName, fHandler, ...)
+    local tResults = table.pack(pcall(fHandler, ...))
+    if not tResults[1] then
+        local sErr = tostring(tResults[2] or "unknown")
+        -- Detect nil method call pattern (metamethod exploitation)
+        if sErr:find("attempt to call a nil value") or
+           sErr:find("attempt to index a nil value") or
+           sErr:find("attempt to call a table value") then
+            syscall("kernel_log", string.format(
+                "[IO_MGR] ╔══ RING ESCALATION CAUGHT ══╗"))
+            syscall("kernel_log", string.format(
+                "[IO_MGR] ║ Syscall: %-18s ║", sName))
+            syscall("kernel_log", string.format(
+                "[IO_MGR] ║ Error: %-20s ║", sErr:sub(1,20)))
+            syscall("kernel_log", string.format(
+                "[IO_MGR] ╚═════════════════════════════╝"))
+            return nil, "RING_ESCALATION_BLOCKED: " .. sErr
+        end
+        -- Other errors: still return safely (no kernel panic)
+        syscall("kernel_log", "[IO_MGR] Handler '" .. sName .. "' error: " .. sErr)
+        return nil, sErr
+    end
+    return table.unpack(tResults, 2, tResults.n)
+end
+
 local function fResolveObject(nCallerPid, sSynapseToken, vHandle, nAccess)
     local pObj, nSt = syscall("ob_reference_by_handle", nCallerPid, vHandle, nAccess, sSynapseToken)
     if not pObj then return nil, "Handle invalid or access denied" end
@@ -136,6 +192,13 @@ local tHandlers = {}
 function tHandlers.vfs_open(nSenderPid, sSynapseToken, sPath, sMode)
     local tBody = { sPath = sPath, sMode = sMode }
 
+    local bValid, sValErr = fValidateStringArg(sPath, "sPath")
+    if not bValid then return nil, sValErr end
+    if sMode ~= nil then
+        bValid, sValErr = fValidateStringArg(sMode, "sMode")
+        if not bValid then return nil, sValErr end
+    end
+
     if sPath:sub(1, 5) == "/dev/" then
         local sDevName = fResolveDeviceName(sPath)
         local nSt, nDrvPid = sendDeviceCreate(sDevName)
@@ -144,7 +207,7 @@ function tHandlers.vfs_open(nSenderPid, sSynapseToken, sPath, sMode)
         tBody.sDeviceName = sDevName
         tBody.nDriverPid = nDrvPid
     else
-        -- FIX: For write/append modes, ensure parent directories exist
+        -- For write/append modes, ensure parent directories exist
         -- before attempting to open.  This fixes file creation failures
         -- when the parent directory hasn't been created yet (e.g. /root,
         -- /log, /vbl on first boot).
@@ -300,25 +363,25 @@ function oIoM.HandleSyscall(tData)
     if not fH then return nil, "Unknown VFS op: " .. sName end
 
     if sName == "vfs_open" then
-        return fH(nCaller, sSynToken, tArgs[1], tArgs[2])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2])
     elseif sName == "vfs_write" then
-        return fH(nCaller, sSynToken, tArgs[1], tArgs[2])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2])
     elseif sName == "vfs_read" then
-        return fH(nCaller, sSynToken, tArgs[1], tArgs[2])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2])
     elseif sName == "vfs_close" then
-        return fH(nCaller, sSynToken, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
     elseif sName == "vfs_list" then
-        return fH(nCaller, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
     elseif sName == "vfs_delete" then
-        return fH(nCaller, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
     elseif sName == "vfs_mkdir" then
-        return fH(nCaller, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
     elseif sName == "vfs_chmod" then
-        return fH(nCaller, tArgs[1], tArgs[2])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2])
     elseif sName == "vfs_device_control" then
-        return fH(nCaller, sSynToken, tArgs[1], tArgs[2], tArgs[3])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1], tArgs[2], tArgs[3])
     elseif sName == "driver_load" then
-        return fH(nCaller, tArgs[1])
+        return fSafeHandler(sName, fH, nCaller, sSynToken, tArgs[1])
     end
     return nil, "Unhandled"
 end

@@ -9,9 +9,25 @@ local S = {}
 local band  = bit32.band
 local bnot  = bit32.bnot
 local bxor  = bit32.bxor
-local rrot  = bit32.rrotate
 local rsh   = bit32.rshift
+local lsh   = bit32.lshift
+local bor   = bit32.bor
 local MOD   = 0x100000000
+
+-- Synthesize rrotate for Lua 5.3 architectures
+local rrot = bit32.rrotate
+if not rrot then
+    rrot = function(x, n)
+        n = n % 32
+        if n == 0 then return x end
+        return bor(rsh(x, n), lsh(x, 32 - n))
+    end
+end
+
+-- Strictly 3-argument XOR for synthesized bit32 compatibility
+local function xor3(a, b, c)
+    return bxor(bxor(a, b), c)
+end
 
 -- Round constants: first 32 bits of fractional parts of
 -- cube roots of first 64 primes (2..311)
@@ -75,8 +91,8 @@ function S.digest(msg)
     end
     for j = 17, 64 do
       local v15 = W[j-15]; local v2 = W[j-2]
-      local s0 = bxor(rrot(v15,7), rrot(v15,18), rsh(v15,3))
-      local s1 = bxor(rrot(v2,17), rrot(v2,19),  rsh(v2,10))
+      local s0 = xor3(rrot(v15,7), rrot(v15,18), rsh(v15,3))
+      local s1 = xor3(rrot(v2,17), rrot(v2,19),  rsh(v2,10))
       W[j] = (W[j-16] + s0 + W[j-7] + s1) % MOD
     end
 
@@ -85,11 +101,11 @@ function S.digest(msg)
 
     -- 64 compression rounds
     for j = 1, 64 do
-      local S1  = bxor(rrot(e,6), rrot(e,11), rrot(e,25))
+      local S1  = xor3(rrot(e,6), rrot(e,11), rrot(e,25))
       local ch  = bxor(band(e,f), band(bnot(e),gv))
       local t1  = (h + S1 + ch + K[j] + W[j]) % MOD
-      local S0  = bxor(rrot(a,2), rrot(a,13), rrot(a,22))
-      local maj = bxor(band(a,b), band(a,c), band(b,c))
+      local S0  = xor3(rrot(a,2), rrot(a,13), rrot(a,22))
+      local maj = xor3(band(a,b), band(a,c), band(b,c))
       local t2  = (S0 + maj) % MOD
       h=gv; gv=f; f=e; e=(d+t1)%MOD
       d=c; c=b; b=a; a=(t1+t2)%MOD

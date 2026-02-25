@@ -1,0 +1,115 @@
+=== VBL SESSION START ===
+[   7.1500] [ PROC ] PID=3   spawn image=/drivers/internet.sys.lua parent=3 pid=6 ring=2
+[   7.2500] [DEBUG ] PID=3   Loaded source bytes=27138 pid=6
+[   7.2500] [DEBUG ] PID=3   Creating sandbox pid=6 ring=2
+[   7.2500] [DEBUG ] PID=3   Process ready pid=6 token=SYN-3af3-e8f...
+[   7.2500] [ DEV  ] PID=3     PID 6 synapse token: SYN-3af3-e8f8-c7...
+[   7.2500] [ INFO ] PID=6   [DK] AxisNet v2.1: Initializing...
+[   7.2500] [ INFO ] PID=6   [DK] DkCreateDevice: \Device\Net0
+[   7.2500] [ INFO ] PID=3   [DKMS] Device '\Device\Net0' created.
+[   7.2500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_002
+[   7.2500] [ INFO ] PID=6   [DK] AxisNet: Card found. HTTP=true TCP=true
+[   7.2500] [ INFO ] PID=6   [DK] AxisNet: Time source check: fNow()=7.25
+[   7.2500] [ INFO ] PID=6   [DK] SymLink: /dev/net -> \Device\Net0
+[   7.2500] [ INFO ] PID=3   [DKMS] Symlink '/dev/net' -> '\Device\Net0' created.
+[   7.2500] [ INFO ] PID=6   [DK] AxisNet v2.1: Online at /dev/net
+[   7.2500] [ INFO ] PID=3   [DKMS] Loaded 'AxisNet' (PID 6)
+[   7.2500] [ INFO ] PID=3   [DKMS] Loading: /drivers/filesystem.sys.lua
+[   7.3000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   7.3000] [ INFO ] PID=3   Creating process 7 ('/drivers/filesystem.sys.lua') at Ring 2
+[   7.3000] [ PROC ] PID=3   spawn image=/drivers/filesystem.sys.lua parent=3 pid=7 ring=2
+[   7.3000] [DEBUG ] PID=3   Loaded source bytes=1058 pid=7
+[   7.3000] [DEBUG ] PID=3   Creating sandbox pid=7 ring=2
+[   7.3000] [DEBUG ] PID=3   Process ready pid=7 token=SYN-081a-31a...
+[   7.3000] [ DEV  ] PID=3     PID 7 synapse token: SYN-081a-31ab-59...
+[   7.3000] [ INFO ] PID=7   [DK] Filesystem Stub Driver loaded. Ready to mount future devices.
+[   7.3000] [ INFO ] PID=3   [DKMS] Loaded 'AxisFSStub' (PID 7)
+[   7.3000] [ INFO ] PID=3   [DKMS] Loading: /drivers/computer.sys.lua
+[   7.3500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   7.3500] [ INFO ] PID=3   Creating process 8 ('/drivers/computer.sys.lua') at Ring 2
+[   7.3500] [ PROC ] PID=3   spawn image=/drivers/computer.sys.lua parent=3 pid=8 ring=2
+[   7.4000] [DEBUG ] PID=3   Loaded source bytes=892 pid=8
+[   7.4000] [DEBUG ] PID=3   Creating sandbox pid=8 ring=2
+[   7.4000] [DEBUG ] PID=3   Process ready pid=8 token=SYN-be36-424...
+[   7.4000] [ DEV  ] PID=3     PID 8 synapse token: SYN-be36-4247-58...
+[   7.4000] [ INFO ] PID=8   [DK] Computer Stub Driver loaded. Exposes... the computer? Sure.
+[   7.4000] [ INFO ] PID=3   [DKMS] Loaded 'AxisComputerStub' (PID 8)
+[   7.4000] [ INFO ] PID=3   [DKMS] Loading: /drivers/drive.sys.lua
+[   7.4000] [ INFO ] PID=3   [DKMS] Loading: /drivers/eeprom.sys.lua
+[   7.4000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   7.4000] [ INFO ] PID=3   Creating process 9 ('/drivers/eeprom.sys.lua') at Ring 2
+[   7.4000] [ PROC ] PID=3   spawn image=/drivers/eeprom.sys.lua parent=3 pid=9 ring=2
+[   7.4500] [DEBUG ] PID=3   Loaded source bytes=870 pid=9
+[   7.4500] [DEBUG ] PID=3   Creating sandbox pid=9 ring=2
+[   7.4500] [DEBUG ] PID=3   Process ready pid=9 token=SYN-0376-598...
+[   7.4500] [ DEV  ] PID=3     PID 9 synapse token: SYN-0376-598f-07...
+[   7.4500] [ INFO ] PID=9   [DK] EEPROM Stub Driver loaded. Doing nothing.
+[   7.4500] [ INFO ] PID=3   [DKMS] Loaded 'AxisEEPROMStub' (PID 9)
+[   7.4500] [ INFO ] PID=2   [PM] Loading RingFS driver...
+[   7.4500] [ INFO ] PID=3   [DKMS] Loading: /drivers/ringfs.sys.lua
+[   7.5000] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   7.5000] [ INFO ] PID=3   Creating process 10 ('/drivers/ringfs.sys.lua') at Ring 2
+[   7.5000] [ PROC ] PID=3   spawn image=/drivers/ringfs.sys.lua parent=3 pid=10 ring=2
+[   7.5500] [DEBUG ] PID=3   Loaded source bytes=4600 pid=10
+[   7.5500] [DEBUG ] PID=3   Creating sandbox pid=10 ring=2
+[   7.5500] [DEBUG ] PID=3   Process ready pid=10 token=SYN-0458-9dd...
+[   7.5500] [ DEV  ] PID=3     PID 10 synapse token: SYN-0458-9ddb-28...
+[   7.5500] [ INFO ] PID=10  [DK] RingFS: Spinning up the memory donut.
+[   7.5500] [ INFO ] PID=10  [DK] DkCreateDevice: \Device\ringlog
+[   7.5500] [ INFO ] PID=3   [DKMS] Device '\Device\ringlog' created.
+[   7.5500] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\VIRT_003
+[   7.5500] [ INFO ] PID=10  [DK] SymLink: /dev/ringlog -> \Device\ringlog
+[   7.5500] [ INFO ] PID=3   [DKMS] Symlink '/dev/ringlog' -> '\Device\ringlog' created.
+[   7.5500] [ INFO ] PID=3   [DKMS] Loaded 'AxisRingFS' (PID 10)
+[   7.5500] [ INFO ] PID=2   [PM] Initializing log system on /dev/ringlog
+[   7.7500] [ INFO ] PID=2   [PM] Ringfs handle opened (persistent).[   7.8000] [ INFO ] PID=2   [PM] Log system initialized.
+[   7.8000] [ INFO ] PID=2   [PM] Processing driver autoload...
+[   7.8000] [ INFO ] PID=2   [PM] Loaded /boot/sys/drivers.cfg (2 entries)
+[   7.8000] [ INFO ] PID=2   [PM] Drivers: 2 enabled, 0 disabled
+[   7.8500] [ INFO ] PID=2   [PM] FAIL: 'RBMK' — file not found: /sys/drivers/hbm_rbmk.syss.lua
+[   7.8500] [ INFO ] PID=2   [PM] [2/2] Loading 'blkdev' (pri=200) /drivers/blkdev.sys.lua
+[   7.8500] [ INFO ] PID=2   [PM] Loading driver: /drivers/blkdev.sys.lua
+[   7.9000] [ INFO ] PID=3   [DKMS] Auto-discovery for type: drive
+[   7.9000] [ INFO ] PID=3   [DKMS] Loading: /drivers/blkdev.sys.lua
+[   7.9500] [ INFO ] PID=3   [SEC] WARN: Loading UNSIGNED driver
+[   7.9500] [ INFO ] PID=3   [HVCI] Driver 'AxisBlockDev' sandboxed with 1 capabilities: DISK_ACCESS
+[   7.9500] [ INFO ] PID=3   Creating process 11 ('/drivers/blkdev.sys.lua') at Ring 2
+[   7.9500] [ PROC ] PID=3   spawn image=/drivers/blkdev.sys.lua parent=3 pid=11 ring=2
+[   7.9500] [DEBUG ] PID=3   Loaded source bytes=4179 pid=11
+[   7.9500] [DEBUG ] PID=3   Creating sandbox pid=11 ring=2
+[   7.9500] [DEBUG ] PID=3   Process ready pid=11 token=SYN-271b-5cd...
+[   7.9500] [ DEV  ] PID=3     PID 11 synapse token: SYN-271b-5cd0-c4...
+[   7.9500] [ INFO ] PID=11  [DK] AxisBlockDev: Init
+[   7.9500] [ INFO ] PID=11  [DK] Auto-creating CMD Device: /dev/drive_256973_0
+[   8.0000] [ INFO ] PID=11  [DK] DkCreateDevice: \Device\drive_256973
+[   8.0000] [ INFO ] PID=3   [DKMS] Device '\Device\drive_256973' created.
+[   8.0000] [ INFO ] PID=3   [DKMS] Registered in @VT\DEV\PHYS_004
+[   8.0000] [ INFO ] PID=11  [DK] SymLink: /dev/drive_256973_0 -> \Device\drive_256973
+[   8.0000] [ INFO ] PID=3   [DKMS] Symlink '/dev/drive_256973_0' -> '\Device\drive_256973' created.
+[   8.0000] [ INFO ] PID=11  [DK] AxisBlockDev: 4096KB, 512-byte sectors
+[   8.0000] [ INFO ] PID=3   [DKMS] Loaded 'AxisBlockDev' (PID 11)
+[   8.0000] [ INFO ] PID=2   [PM] OK: Auto-loaded 1 instances of AxisBlockDev
+[   8.0000] [ INFO ] PID=2   [PM] Autoload complete: 1 loaded, 1 failed, 0 disabled
+[   8.0500] [ INFO ] PID=2   [PM] Waiting for system stabilization...
+[   9.0500] [ INFO ] PID=2   [IO_MGR] I/O Manager started (PID 2)
+[   9.0500] [ INFO ] PID=2   [SEC_MON] Security Monitor initialized
+[   9.0500] [ INFO ] PID=2   [SESS] Session Manager initialized
+[   9.0500] [ INFO ] PID=2   [PM] Silence on deck. Handing off to userspace.
+[   9.0500] [ INFO ] PID=2   [PM] Spawning /bin/init.lua...
+[   9.0500] [ INFO ] PID=2   Creating process 12 ('/bin/init.lua') at Ring 3
+[   9.0500] [ PROC ] PID=2   spawn image=/bin/init.lua parent=2 pid=12 ring=3
+[   9.1000] [DEBUG ] PID=2   Loaded source bytes=5104 pid=12
+[   9.1000] [SCHED ] PID=2   Instrumented checkpoints=33 image=/bin/init.lua pid=12
+[   9.1000] [ DEV  ] PID=2   Preempt: /bin/init.lua → 33 yield checkpoints injected
+[   9.1000] [DEBUG ] PID=2   Creating sandbox pid=12 ring=3
+[   9.1000] [DEBUG ] PID=2   Process ready pid=12 token=SYN-9e44-9f4...
+[   9.1000] [ DEV  ] PID=2     PID 12 synapse token: SYN-9e44-9f4d-4f...
+[   9.1000] [ INFO ] PID=2   [PM] Init spawned as PID 12[   9.2000] [ SEC  ] PID=1   PatchGuard auto-arming (post-boot, tick 300)...
+[   9.2000] [ SEC  ] PID=1   [PG] Taking snapshot...
+[   9.2000] [ SEC  ] PID=1   [PG] Tier1: syscall table, overrides, self, rings...
+[   9.2000] [ SEC  ] PID=1   [PG] Tier2: frozen libs, OB namespace...
+[   9.2000] [ SEC  ] PID=1   [PG] Tier3: SecureBoot, EEPROM...
+[   9.2000] [ SEC  ] PID=1   [PG] Tier3-files: reusing 22 cached hashes (fast re-arm)
+[   9.2000] [ SEC  ] PID=1   [PG] Snapshot: 182 syscalls, 17 overrides, 22 files, PM=PID 2, SB=inactive
+[   9.2000] [ SEC  ] PID=1   [PG] PatchGuard v3 ARMED — rotating checks, encrypted hashes, mtime scanning
+[   9.2000] [ SEC  ] PID=1   PatchGuard ARMED — all integrity monitoring active
