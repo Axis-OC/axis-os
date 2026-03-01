@@ -1,4 +1,3 @@
-```markdown
 <p align="center">
   <img src="./img/banner.jpg"  alt="AxisOS Logo">
 </p>
