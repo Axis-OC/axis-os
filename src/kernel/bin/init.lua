@@ -1,7 +1,13 @@
 --
 -- /bin/init.lua
 -- Paranoid Mode + Display Manager Support
+-- v2: Silent-death protection via pcall wrapper
 --
+
+-- Top-level error handler: ensures ANY crash in init is logged
+-- and visible, never silent.
+local function fSafeMain()
+
 local oFs = require("filesystem")
 local oSys = require("syscall")
 
@@ -9,8 +15,20 @@ local hStdin = oFs.open("/dev/tty", "r")
 local hStdout = oFs.open("/dev/tty", "w")
 
 if not hStdin or not hStdout then
-    syscall("kernel_log", "[INIT] FATAL: Could not open /dev/tty!")
+    syscall("kernel_log", "[INIT] FATAL: Could not open /dev/tty! stdin=" ..
+        tostring(hStdin) .. " stdout=" .. tostring(hStdout))
+    -- Cannot continue without a TTY — retry after a short delay
+    for _ = 1, 20 do syscall("process_yield") end
+    hStdin = oFs.open("/dev/tty", "r")
+    hStdout = oFs.open("/dev/tty", "w")
+    if not hStdin or not hStdout then
+        syscall("kernel_log", "[INIT] FATAL: TTY retry failed. Aborting init.")
+        return
+    end
+    syscall("kernel_log", "[INIT] TTY opened on retry.")
 end
+
+syscall("kernel_log", "[INIT] TTY handles acquired. Proceeding with boot.")
 
 local function readFileRaw(sPath)
     local h = oFs.open(sPath, "r")
@@ -138,14 +156,16 @@ if not bDmEnabled then
         oFs.deviceControl(hStdin, "leave_alt_screen", {})
     end)
 
+    syscall("kernel_log", "[INIT] Entering text-mode login loop.")
+
     while true do
         io.write("    _        _       ___   ____  \n", "   / \\  __ _(_)_____/ _ \\/ ___| \n",
             "  / _ \\ \\ \\/ / / __| | | \\___ \\ \n", " / ___ \\ >  <| \\__ \\ |_| |___) |\n",
             "/_/   \\_/_/\\_\\_|___/\\___/|____/ \n")
 
-        io.write("AxisOS v0.81-EX-beta\n")
+        io.write("AxisOS v0.82-DQA-beta\n")
         io.write("\n________________________________________________\n\n")
-        io.write("XEN XKA v0.81-EX-beta on " .. sHostname .. "\n\n")
+        io.write("XEN XKA v0.82-DQA-beta on " .. sHostname .. "\n\n")
 
         io.write(sHostname .. " login: ")
 
@@ -184,6 +204,8 @@ if not bDmEnabled then
                 if nPid then
                     oSys.wait(nPid)
                     io.write("\f")
+                else
+                    syscall("kernel_log", "[INIT] Failed to spawn shell for " .. sUsername)
                 end
             else
                 io.write("\nLogin incorrect\n")
@@ -193,5 +215,43 @@ if not bDmEnabled then
             syscall("kernel_log", "[INIT] Error reading stdin. Retrying...")
             syscall("process_yield")
         end
+    end
+end
+
+end -- fSafeMain
+
+-- =============================================
+-- SILENT DEATH PROTECTION
+-- Wrap the entire init in pcall. If ANYTHING crashes,
+-- the error is logged to kernel_log AND written to TTY
+-- so it's visible in VBL/log files AND on screen.
+-- =============================================
+
+local bOk, sErr = pcall(fSafeMain)
+
+if not bOk then
+    -- Phase 1: Log to kernel (always works, even if VFS is broken)
+    pcall(function()
+        syscall("kernel_log", "[INIT] !! UNHANDLED FATAL ERROR !!")
+        syscall("kernel_log", "[INIT] " .. tostring(sErr))
+    end)
+
+    -- Phase 2: Try to display on screen via TTY
+    pcall(function()
+        local oFs = require("filesystem")
+        local h = oFs.open("/dev/tty", "w")
+        if h then
+            oFs.write(h, "\n\n\27[31m[INIT] FATAL ERROR:\27[37m\n")
+            oFs.write(h, tostring(sErr) .. "\n\n")
+            oFs.write(h, "Check /vbl/ or /log/ for details.\n")
+            oFs.write(h, "The system cannot continue.\n")
+            oFs.close(h)
+        end
+    end)
+
+    -- Phase 3: Keep process alive so the error stays visible
+    -- (if we return, the process dies and the screen may clear)
+    while true do
+        syscall("process_yield")
     end
 end

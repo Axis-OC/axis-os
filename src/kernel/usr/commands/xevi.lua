@@ -1224,7 +1224,7 @@ local function renderEditor()
                     p = f + 1
                 end
             end
-            -- ── Tooltip overlay ──
+            -- Tooltip overlay
             if tTooltip and sMode == "normal" then
                 ctx:tooltip(tTooltip.x, tTooltip.y, tTooltip.tLines, {
                     fg = 0xDDDDEE,

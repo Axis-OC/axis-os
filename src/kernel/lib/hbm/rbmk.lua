@@ -6,11 +6,11 @@
 -- Users never touch device files or IPC directly.
 --
 -- Usage:
---  local rbmk = require("hbm.rbmk")
---  local reactor = rbmk.open()
---  reactor:az5()
---  for col in reactor:eachFuel() do print(col.enrichment) end
---  reactor:close()
+--   local rbmk = require("hbm.rbmk")
+--   local reactor = rbmk.open()
+--   reactor:az5()
+--   for col in reactor:eachFuel() do print(col.enrichment) end
+--   reactor:close()
 --
 --[[
 rbmk.open([addr])         → Reactor      Connect to console
@@ -184,19 +184,19 @@ function _R:address()
     return self._addr
 end
 
--- ── Reactor Position ───────────────────────
+-- Reactor Position─────────────────────
 
 function _R:pos()
     return ctl("console_pos", {self._addr})
 end
 
--- ── Emergency Shutdown ─────────────────────
+-- Emergency Shutdown───────────────────
 
 function _R:az5()
     return ctl("console_az5", {self._addr})
 end
 
--- ── Control Rod Level Setting ──────────────
+-- Control Rod Level Setting────────────
 
 function _R:setLevel(nLevel)
     return ctl("console_set_level", {nLevel, self._addr})
@@ -220,7 +220,7 @@ function _R:setColor(gx, gy, vColor)
     return ctl("console_set_color", {gx, gy, nColor, self._addr})
 end
 
--- ── Column Queries ─────────────────────────
+-- Column Queries───────────────────────
 
 function _R:column(gx, gy)
     return ctl("console_column", {gx, gy, self._addr})
@@ -233,7 +233,7 @@ function _R:grid()
     return tGrid or {}
 end
 
--- ── Iterators ──────────────────────────────
+-- Iterators────────────────────────────
 
 function _R:eachColumn(bRefresh)
     local tGrid = (bRefresh or not self._gridCache) and self:grid() or self._gridCache
@@ -294,7 +294,7 @@ function _R:eachBoiler(bRefresh)
     return self:eachType("BOILER", bRefresh)
 end
 
--- ── Summary Statistics ─────────────────────
+-- Summary Statistics───────────────────
 
 function _R:stats(bRefresh)
     local tGrid = (bRefresh or not self._gridCache) and self:grid() or self._gridCache
@@ -393,7 +393,7 @@ end
 
 function _Comp:address() return self._addr end
 
--- ── Fuel Rod ───────────────────────────────
+-- Fuel Rod─────────────────────────────
 
 local _FuelRod = setmetatable({}, {__index = _Comp})
 _FuelRod.__index = _FuelRod
@@ -416,7 +416,7 @@ function _FuelRod:rodType()    return self:invoke("getType") end
 function _FuelRod:moderated()  return self:invoke("getModerated") end
 function _FuelRod:coords()     return self:invoke("getCoordinates") end
 
--- ── Control Rod ────────────────────────────
+-- Control Rod──────────────────────────
 
 local _CtrlRod = setmetatable({}, {__index = _Comp})
 _CtrlRod.__index = _CtrlRod
@@ -434,7 +434,7 @@ function _CtrlRod:targetLevel() return self:invoke("getTargetLevel") end
 function _CtrlRod:setLevel(n)   return ctl("control_set_level", {n, self._addr}) end
 function _CtrlRod:coords()      return self:invoke("getCoordinates") end
 
--- ── Boiler ─────────────────────────────────
+-- Boiler───────────────────────────────
 
 local _Boiler = setmetatable({}, {__index = _Comp})
 _Boiler.__index = _Boiler
@@ -455,7 +455,7 @@ function _Boiler:steamType()       return self:invoke("getSteamType") end
 function _Boiler:setSteamType(n)   return ctl("boiler_set_steam_type", {n, self._addr}) end
 function _Boiler:coords()          return self:invoke("getCoordinates") end
 
--- ── Heater ─────────────────────────────────
+-- Heater───────────────────────────────
 
 local _Heater = setmetatable({}, {__index = _Comp})
 _Heater.__index = _Heater
@@ -476,7 +476,7 @@ function _Heater:coldType()   return self:invoke("getFillType") end
 function _Heater:hotType()    return self:invoke("getExportType") end
 function _Heater:coords()     return self:invoke("getCoordinates") end
 
--- ── Cooler ─────────────────────────────────
+-- Cooler───────────────────────────────
 
 local _Cooler = setmetatable({}, {__index = _Comp})
 _Cooler.__index = _Cooler
@@ -493,7 +493,7 @@ function _Cooler:cryo()    return self:invoke("getCryo") end
 function _Cooler:cryoMax() return self:invoke("getCryoMax") end
 function _Cooler:coords()  return self:invoke("getCoordinates") end
 
--- ── Outgasser ──────────────────────────────
+-- Outgasser────────────────────────────
 
 local _Outgasser = setmetatable({}, {__index = _Comp})
 _Outgasser.__index = _Outgasser
@@ -607,7 +607,7 @@ while running do
             rPos.rbmkCenterX or 0, rPos.rbmkCenterY or 0, rPos.rbmkCenterZ or 0)
     end
 
-    -- ── Left: 15x15 Grid Map ──
+    -- Left: 15x15 Grid Map
     ctx:text(2, 3, "Reactor Grid:", ctx:c("accent"))
     for _, col in ipairs(tGrid) do
         local gx = col._gx
@@ -636,7 +636,7 @@ while running do
         end
     end
 
-    -- ── Right: Statistics ──
+    -- Right: Statistics
     local rx = math.max(38, W / 2 + 2)
     ctx:text(rx, 3, "Statistics:", ctx:c("accent"))
     ctx:textf(rx, 4, ctx:c("fg"), nil, "Columns: %d", stats.nColumns)

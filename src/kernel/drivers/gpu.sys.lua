@@ -4,20 +4,20 @@
 --
 -- Vulkan-inspired resource management for OpenComputers text-mode GPUs.
 -- Provides: multi-adapter enumeration, swapchains, sync fences,
---          command buffers, pipeline state cache, buffer pools,
---          async I/O via IOCP, and fast-path TTY integration.
+--           command buffers, pipeline state cache, buffer pools,
+--           async I/O via IOCP, and fast-path TTY integration.
 --
 -- Extensions exposed:
---  GX_AX_multi_adapter    Multi-GPU enumeration and device creation
---  GX_AX_swapchain        Double-buffered swap chains with present
---  GX_AX_sync_fence       Operation synchronization fences (waitable)
---  GX_AX_cmd_buffer       Deferred command recording + batch submit
---  GX_AX_render_pass      Optimized state-sorted render pass
---  GX_AX_buffer_pool      Off-screen buffer management (Tier 3)
---  GX_AX_pipeline_state   Cached color/resolution state
---  GX_AX_async_submit     IOCP-based async operation submission
---  GX_AX_fast_tty         Fast-path TTY integration (no IRP overhead)
---  GX_AX_copy_engine      GPU-accelerated region copy/scroll
+--   GX_AX_multi_adapter    Multi-GPU enumeration and device creation
+--   GX_AX_swapchain        Double-buffered swap chains with present
+--   GX_AX_sync_fence       Operation synchronization fences (waitable)
+--   GX_AX_cmd_buffer       Deferred command recording + batch submit
+--   GX_AX_render_pass      Optimized state-sorted render pass
+--   GX_AX_buffer_pool      Off-screen buffer management (Tier 3)
+--   GX_AX_pipeline_state   Cached color/resolution state
+--   GX_AX_async_submit     IOCP-based async operation submission
+--   GX_AX_fast_tty         Fast-path TTY integration (no IRP overhead)
+--   GX_AX_copy_engine      GPU-accelerated region copy/scroll
 --
 
 local tStatus = require("errcheck")
@@ -122,7 +122,44 @@ local g_tStats = {
 }
 
 -- =============================================
--- 3. ADAPTER DISCOVERY
+-- 3. PIPELINE STATE CACHE
+-- Track last-set fg/bg per adapter to avoid
+-- redundant GPU color calls.  Each skipped call
+-- saves ~0.05ms of component invoke overhead.
+-- =============================================
+
+local function fSetFg(nIdx, nColor)
+    local tPS = g_tPipelineState[nIdx]
+    if not tPS then return end
+    if tPS.nLastFg == nColor then
+        g_tStats.nColorSkips = g_tStats.nColorSkips + 1
+        return
+    end
+    g_tAdapters[nIdx].oProxy.setForeground(nColor)
+    tPS.nLastFg = nColor
+    g_tStats.nColorChanges = g_tStats.nColorChanges + 1
+end
+
+local function fSetBg(nIdx, nColor)
+    local tPS = g_tPipelineState[nIdx]
+    if not tPS then return end
+    if tPS.nLastBg == nColor then
+        g_tStats.nColorSkips = g_tStats.nColorSkips + 1
+        return
+    end
+    g_tAdapters[nIdx].oProxy.setBackground(nColor)
+    tPS.nLastBg = nColor
+    g_tStats.nColorChanges = g_tStats.nColorChanges + 1
+end
+
+local function fInvalidatePipeline(nIdx)
+    local tPS = g_tPipelineState[nIdx]
+    if tPS then tPS.nLastFg = -1; tPS.nLastBg = -1 end
+end
+
+
+-- =============================================
+-- 4. ADAPTER DISCOVERY
 -- Enumerate all GPU components, determine tier,
 -- pair with available screens.
 -- =============================================
@@ -232,41 +269,6 @@ local function fDiscoverAdapters()
     end
 
     return g_nAdapterCount
-end
--- =============================================
--- 4. PIPELINE STATE CACHE
--- Track last-set fg/bg per adapter to avoid
--- redundant GPU color calls.  Each skipped call
--- saves ~0.05ms of component invoke overhead.
--- =============================================
-
-local function fSetFg(nIdx, nColor)
-    local tPS = g_tPipelineState[nIdx]
-    if not tPS then return end
-    if tPS.nLastFg == nColor then
-        g_tStats.nColorSkips = g_tStats.nColorSkips + 1
-        return
-    end
-    g_tAdapters[nIdx].oProxy.setForeground(nColor)
-    tPS.nLastFg = nColor
-    g_tStats.nColorChanges = g_tStats.nColorChanges + 1
-end
-
-local function fSetBg(nIdx, nColor)
-    local tPS = g_tPipelineState[nIdx]
-    if not tPS then return end
-    if tPS.nLastBg == nColor then
-        g_tStats.nColorSkips = g_tStats.nColorSkips + 1
-        return
-    end
-    g_tAdapters[nIdx].oProxy.setBackground(nColor)
-    tPS.nLastBg = nColor
-    g_tStats.nColorChanges = g_tStats.nColorChanges + 1
-end
-
-local function fInvalidatePipeline(nIdx)
-    local tPS = g_tPipelineState[nIdx]
-    if tPS then tPS.nLastFg = -1; tPS.nLastBg = -1 end
 end
 
 -- =============================================

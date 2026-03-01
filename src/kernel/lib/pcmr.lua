@@ -50,9 +50,9 @@ local oPcmr = {}
 -- =============================================
 
 local ENCLAVE_SOURCE = [==[
--- ────────────────────────────────────────────
+--──────────────────────────────────────────
 -- UPVALUE STATE (invisible outside this closure)
--- ────────────────────────────────────────────
+--──────────────────────────────────────────
 local tData = nil      -- number array: Data[1..nLen]
 local tMask = nil      -- number array: Mask[1..nLen]
 local nKeyLen = 0
@@ -75,10 +75,10 @@ local function prngByte()
     return prngNext() % 256
 end
 
--- ────────────────────────────────────────────
+--──────────────────────────────────────────
 -- EMBEDDED SHA-256 (operates on split arrays)
 -- Strictly 2-argument bxor.  Synthesized rrotate.
--- ────────────────────────────────────────────
+--──────────────────────────────────────────
 local band  = bit32.band
 local bnot  = bit32.bnot
 local bxor  = bit32.bxor
@@ -202,9 +202,9 @@ local function hmac_split_internal(sMessage)
     return sha256_str(sOpad .. sha256_str(sIpad .. sMessage))
 end
 
--- ────────────────────────────────────────────
+--──────────────────────────────────────────
 -- ENCLAVE ENTRY POINT
--- ────────────────────────────────────────────
+--──────────────────────────────────────────
 return function(sMethod, ...)
     if sMethod == "init" then
         -- arg1: table of key bytes (numbers 0-255)

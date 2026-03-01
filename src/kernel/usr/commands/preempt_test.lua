@@ -5,16 +5,16 @@
 -- Proves that the scheduler provides time-sliced preemption
 --
 -- Five tests:
---   1. Starvation prevention  — two tight busy loops, NO manual yields
---   2. Three-way fairness     — three identical hog threads
---   3. Main-thread liveness   — CPU hog vs. responsive main loop
---   4. Parallel wall-clock    — 3×0.5 s tasks sequential vs. parallel
---   5. Scheduler statistics   — confirms __pc() preemptions occurred
+--  1. Starvation prevention  — two tight busy loops, NO manual yields
+--  2. Three-way fairness     — three identical hog threads
+--  3. Main-thread liveness   — CPU hog vs. responsive main loop
+--  4. Parallel wall-clock    — 3×0.5 s tasks sequential vs. parallel
+--  5. Scheduler statistics   — confirms __pc() preemptions occurred
 --
 -- Usage:
---   preempt_test              Run full suite
---   preempt_test -v           Verbose (per-iteration detail)
---   preempt_test -h           Help
+--  preempt_test              Run full suite
+--  preempt_test -v           Verbose (per-iteration detail)
+--  preempt_test -h           Help
 --
 
 local thread   = require("thread")
@@ -326,8 +326,8 @@ end
 -- the same wall-clock moment.
 --
 -- Expected:
---   Sequential  ≈ 1.5 s
---   Parallel    ≈ 0.5 s   →  ~3× speedup
+--  Sequential  ≈ 1.5 s
+--  Parallel    ≈ 0.5 s   →  ~3× speedup
 --
 -- This speedup is ONLY possible with preemption; without it
 -- each thread would run to completion one at a time and the

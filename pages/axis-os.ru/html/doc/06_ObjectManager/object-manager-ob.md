@@ -121,10 +121,10 @@ When a process spawns a child, inheritable handles are **duplicated** with new t
 ```lua
 function ObInheritHandles(nParentPid, nChildPid, sChildSynapseToken)
     -- For each inheritable handle in parent:
-    --   1. Reference the object (refCount++)
-    --   2. Create new token for child
-    --   3. Bind to child's synapse token
-    --   4. Copy standard handle mappings
+    --  1. Reference the object (refCount++)
+    --  2. Create new token for child
+    --  3. Bind to child's synapse token
+    --  4. Copy standard handle mappings
 end
 ```
 

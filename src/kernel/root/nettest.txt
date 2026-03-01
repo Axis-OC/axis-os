@@ -1,0 +1,106 @@
+╔═══════════════════════════════════════════════════╗
+║  AxisOS Network Stack Test Suite                   ║
+║  ipproto · DNS · routing · ARP · checksums         ║
+╚═══════════════════════════════════════════════════╝
+
+=== 1. IP Address Operations ===
+  [PASS] parseAddr('10.0.0.1') = 4 bytes correct
+  [PASS] formatAddr roundtrip OK
+  [PASS] ADDR_ANY matches
+  [PASS] parseCIDR 192.168.1.0/24 OK
+  [PASS] networkAddr(192.168.1.42/24) = 192.168.1.0
+  [PASS] broadcastAddr = 192.168.1.255
+  [PASS] isInSubnet: 192.168.1.99 in 192.168.1.0/24
+  [PASS] isInSubnet: 10.0.0.1 NOT in 192.168.1.0/24
+
+=== 2. Internet Checksum (RFC 1071) ===
+  [PASS] checksum returns non-zero for zeroed-checksum header: 0xB861
+  [PASS] verifyChecksum: header with correct checksum = 0
+  [PASS] checksum('') = 0xFFFF (ones' complement)
+
+=== 3. IP Packet Assembly & Disassembly ===
+  [PASS] buildPacket: 36 bytes (20 hdr + 16 payload)
+  [PASS] parsePacket: IPv4
+  [PASS] TTL = 32
+  [PASS] ID = 0x1234
+  [PASS] Proto = UDP(17)
+  [PASS] Src = 10.0.0.1
+  [PASS] Dst = 10.0.0.2
+  [PASS] Payload intact
+
+=== 4. TCP Packet Build & Parse ===
+  [PASS] TCP SrcPort = 12345
+  [PASS] TCP DstPort = 80
+  [PASS] TCP Seq = 1000
+  [PASS] TCP SYN flag set
+  [PASS] TCP ACK flag not set
+
+=== 5. UDP Packet Build & Parse ===
+  [PASS] UDP SrcPort = 5353
+  [PASS] UDP DstPort = 53
+  [PASS] UDP payload intact
+
+=== 6. ICMP (Ping) Build & Parse ===
+  [PASS] ICMP type = Echo Request(8)
+  [PASS] ICMP id = 0x1234
+  [PASS] ICMP seq = 1
+  [PASS] ICMP checksum valid
+
+=== 7. ARP Pack & Unpack ===
+  [PASS] ARP pack: 88 bytes
+  [PASS] ARP opcode = REQUEST(1)
+  [PASS] ARP sender HW preserved
+  [PASS] ARP target IP = 10.0.0.2
+  [PASS] ARPTable set/get roundtrip
+  [PASS] ARPTable remove works
+
+=== 8. Routing Table (Longest-Prefix Match) ===
+  [PASS] LPM: 10.0.1.50 → /24 route (longest match)
+  [PASS] 10.99.0.1 → /8 route
+  [PASS] 8.8.8.8 → default route (0.0.0.0/0)
+  [PASS] After remove /24: falls back to /8
+  [PASS] Dump: 2 routes (removed 1)
+
+=== 9. IP Fragmentation & Reassembly ===
+  [PASS] Fragmented into 3 pieces (MTU=160)
+  [PASS] Frag 1: MF=1 offset=0
+  [PASS] Frag 2: MF=1 offset=17
+  [PASS] Frag 3: MF=0 offset=34
+  [PASS] Reassembly: 300B matches original payload
+
+=== 10. DNS Wire Format ===
+  [PASS] encodeName('www.example.com') format correct
+  [PASS] buildQuery: 29 bytes, ID=0x1234
+  [PASS] QDCOUNT = 1
+  [PASS] QR = 0 (query)
+  [PASS] RD = 1 (recursion desired)
+  [PASS] Response ID = 0x1234
+  [PASS] QR = 1 (response)
+  [PASS] RCODE = NOERROR
+  [PASS] ANCOUNT = 1
+  [PASS] Answer type = A(1)
+  [PASS] Answer RDATA = 93.184.216.34
+  [PASS] Answer TTL = 300
+  [PASS] DNS cache set/get roundtrip
+  [PASS] DNS cache miss returns nil
+  [PASS] DNS cache stats: 1 entry
+
+=== 11. Live DNS Resolution (via internet card) ===
+  [INFO] Internet card available — testing live DNS...
+  [SKIP] DNS resolve failed (network issue, not a code bug)
+
+=== 12. NIC Driver Device Check ===
+  [PASS] NIC device /dev/nic0 accessible
+  [INFO]   Modem:  none
+  [INFO]   Up:     true
+  [INFO]   MTU:    8000
+  [INFO]   VLAN:   access native=0
+  [INFO]   RxPkts: 0  TxPkts: 0
+
+═══════════════════════════════════════════════════
+  Passed:  63
+  Failed:  0
+  Skipped: 1
+
+  All network stack tests passed!
+═══════════════════════════════════════════════════

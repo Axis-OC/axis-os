@@ -57,9 +57,9 @@ When `insmod` or DKMS encounters a CMD driver with `sSupportedComponent`, it:
 ```lua
 -- Example: iter.sys.lua declares sSupportedComponent = "ntm_fusion"
 -- If 3 fusion reactors are connected:
---   → 3 driver processes spawned
---   → 3 device objects: \Device\iter_a1b2c3, \Device\iter_d4e5f6, etc.
---   → 3 symlinks: /dev/iter_a1b2c3_0, /dev/iter_d4e5f6_1, etc.
+--  → 3 driver processes spawned
+--  → 3 device objects: \Device\iter_a1b2c3, \Device\iter_d4e5f6, etc.
+--  → 3 symlinks: /dev/iter_a1b2c3_0, /dev/iter_d4e5f6_1, etc.
 ```
 
 ### 9.5 IRP Dispatch

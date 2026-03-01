@@ -701,6 +701,41 @@ else
     process_autoload()
 end
 
+-- ==========================================
+-- NETWORK INITIALIZATION
+-- ==========================================
+do
+    local bNetInitExists = false
+    pcall(function()
+        local bOk, hTest = syscall("raw_component_invoke",
+            vfs_state.oRootFs.address, "open", "/system/netinit.lua", "r")
+        if bOk and hTest then
+            syscall("raw_component_invoke", vfs_state.oRootFs.address, "close", hTest)
+            bNetInitExists = true
+        end
+    end)
+    
+    if bNetInitExists then
+        syscall("kernel_log", "[PM] Spawning network initialization service...")
+        local nNetPid = syscall("process_spawn", "/system/netinit.lua", 2, {
+            PWD = "/",
+            PATH = "/usr/commands",
+        })
+        if nNetPid then
+            -- CRITICAL: Do NOT process_wait() here!
+            -- netinit uses fs.open() which routes back to PM via
+            -- syscall override. Blocking here deadlocks the system:
+            --   PM sleeps (wait_pid) → netinit vfs_open signal queued
+            --   → netinit sleeps (syscall) → both stuck forever.
+            -- Let netinit run asynchronously. It will finish on its own.
+            syscall("kernel_log", "[PM] Network init spawned as PID " ..
+                tostring(nNetPid) .. " (async)")
+        else
+            syscall("kernel_log", "[PM] Warning: Failed to spawn netinit")
+        end
+    end
+end
+
 wait_with_throbber("Waiting for system stabilization...", 1.0)
 
 -- ==========================================

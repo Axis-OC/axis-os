@@ -70,13 +70,13 @@ function L.colorize(sLine, H)
     for i = math.max(1, nFrom), math.min(nTo, nLen) do tC[i] = nColor end
   end
 
-  -- ── Timestamp: [  9.1234] ──
+  -- Timestamp: [  9.1234]
   local tsS, tsE = sLine:find("^%[%s*%d+%.%d+%]")
   if tsS then
     paint(tsS, tsE, C_TIMESTAMP)
   end
 
-  -- ── Level tag: [  OK  ] [ FAIL ] [ INFO ] etc. ──
+  -- Level tag: [  OK  ] [ FAIL ] [ INFO ] etc.
   for sLevel, nColor in pairs(tLevelColors) do
     -- Match bracketed level tags like [  OK  ] or [ INFO ] or [DEBUG ]
     local lS, lE = sLine:find("%[%s*" .. sLevel .. "%s*%]")
@@ -86,7 +86,7 @@ function L.colorize(sLine, H)
     if lS then paint(lS, lE, nColor) end
   end
 
-  -- ── PID references: PID=5, P3, PID 12 ──
+  -- PID references: PID=5, P3, PID 12
   for pS, pE in sLine:gmatch("()PID[= ](%d+)") do
     -- pS is the position of 'P', find the digit end
   end
@@ -111,17 +111,17 @@ function L.colorize(sLine, H)
     end
   end
 
-  -- ── File paths: /lib/something.lua ──
+  -- File paths: /lib/something.lua
   for pS, pPath, pE in sLine:gmatch("()/[%w_%./-]+%.%w+()" ) do
     paint(pS, pE - 1, C_PATH)
   end
 
-  -- ── Hex numbers: 0xABCD ──
+  -- Hex numbers: 0xABCD
   for pS, pE in sLine:gmatch("()0x%x+()" ) do
     paint(pS, pE - 1, C_NUMBER)
   end
 
-  -- ── Plain numbers (not already colored) ──
+  -- Plain numbers (not already colored)
   for pS, pE in sLine:gmatch("()%d+()") do
     -- Only color if not already part of a colored region
     if tC[pS] == C_DEFAULT then
@@ -129,7 +129,7 @@ function L.colorize(sLine, H)
     end
   end
 
-  -- ── Quoted strings ──
+  -- Quoted strings
   for pS, pE in sLine:gmatch('()"[^"]*"()') do
     paint(pS, pE - 1, C_STRING)
   end
@@ -137,7 +137,7 @@ function L.colorize(sLine, H)
     paint(pS, pE - 1, C_STRING)
   end
 
-  -- ── Box-drawing borders: ╔═╗║╚╝ and +=-| ──
+  -- Box-drawing borders: ╔═╗║╚╝ and +=-|
   for i = 1, nLen do
     local ch = sLine:sub(i, i)
     if ch == "+" or ch == "|" then
@@ -149,7 +149,7 @@ function L.colorize(sLine, H)
     paint(pS, pE - 1, C_BORDER)
   end
 
-  -- ── Special markers ──
+  -- Special markers
   for pS, pE in sLine:gmatch("()PASS()") do paint(pS, pE-1, C_OK) end
   for pS, pE in sLine:gmatch("()FAIL()") do paint(pS, pE-1, C_FAIL) end
   for pS, pE in sLine:gmatch("()ERROR()") do paint(pS, pE-1, C_FAIL) end
@@ -160,7 +160,7 @@ function L.colorize(sLine, H)
   for pS, pE in sLine:gmatch("()ARMED()") do paint(pS, pE-1, C_OK) end
   for pS, pE in sLine:gmatch("()PANIC()") do paint(pS, pE-1, C_FAIL) end
 
-  -- ── Section headers: === ... === ──
+  -- Section headers: === ... ===
   if sLine:match("^=+$") or sLine:match("^%-%-%-") then
     paint(1, nLen, C_BORDER)
   end

@@ -117,7 +117,7 @@ local logo={
 
 local function splash()
  cl(CK); col(CK,CW)
- g.set(1,1,"AxisBIOS v0.4 PA"); g.set(1,2,"(C) 2025 Axis Corp")
+ g.set(1,1,"AxisBIOS v0.82-DQA PA"); g.set(1,2,"(C) 2026 Axis Corp")
  g.set(1,4,"Xen Microkernel - Tier 3")
  local tot=cm.totalMemory(); local cur=0; local st=math.ceil(tot/15)
  while cur<tot do

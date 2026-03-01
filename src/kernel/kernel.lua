@@ -1,6 +1,6 @@
 --
 -- /kernel.lua
--- AxisOS Xen XKA v0.81-EX-beta
+-- AxisOS Xen XKA v0.82-DQA-beta
 --
 local kernel = {
     tProcessTable = {},
@@ -30,13 +30,13 @@ local g_tGpuFastPath = nil
 -- Lua 5.3 compatibility: synthesize bit32 from native operators
 if not bit32 then
     bit32 = {}
-    bit32.band   = load("return function(a,b) return (a & b) & 0xFFFFFFFF end")()
-    bit32.bor    = load("return function(a,b) return (a | b) & 0xFFFFFFFF end")()
-    bit32.bxor   = load("return function(a,b) return (a ~ b) & 0xFFFFFFFF end")()
-    bit32.bnot   = load("return function(a) return (~a) & 0xFFFFFFFF end")()
-    bit32.rshift = load("return function(a,n) return (a >> n) & 0xFFFFFFFF end")()
-    bit32.lshift = load("return function(a,n) return (a << n) & 0xFFFFFFFF end")()
-    bit32.btest  = load("return function(a,b) return (a & b) ~= 0 end")()
+    bit32.band   = load("return function(a,b) return ((a or 0xFFFFFFFF) & (b or 0xFFFFFFFF)) & 0xFFFFFFFF end")()
+    bit32.bor    = load("return function(a,b) return ((a or 0) | (b or 0)) & 0xFFFFFFFF end")()
+    bit32.bxor   = load("return function(a,b) return ((a or 0) ~ (b or 0)) & 0xFFFFFFFF end")()
+    bit32.bnot   = load("return function(a) return (~(a or 0)) & 0xFFFFFFFF end")()
+    bit32.rshift = load("return function(a,n) return ((a or 0) >> (n or 0)) & 0xFFFFFFFF end")()
+    bit32.lshift = load("return function(a,n) return ((a or 0) << (n or 0)) & 0xFFFFFFFF end")()
+    bit32.btest  = load("return function(a,b) return ((a or 0) & (b or 0)) ~= 0 end")()
 end
 
 local g_nCurrentPid = 0
@@ -60,6 +60,9 @@ local g_tKernelDeviceTree = nil     -- ref to DKMS's g_tDeviceTree
 local g_tKernelSymlinks   = nil     -- ref to DKMS's g_tSymbolicLinks
 local g_oExsi = nil         -- EXSi enclave manager
 
+local g_nIdleSince    = nil    -- timestamp when all processes became idle
+local g_bIdleWarned   = false  -- have we already logged the idle warning?
+local IDLE_WARN_SEC   = 15     -- seconds of total idleness before warning
 local g_tSchedStats = {
     nTotalResumes = 0,
     nPreemptions = 0,
@@ -101,6 +104,16 @@ local g_oObManager = nil
 local g_oRegistry = nil
 local g_nBootTickCounter = 0
 local g_bPgAutoArmed = false
+
+-- =============================================
+-- PARANOIA MODE — Elevated Security Posture
+-- Activated when the profiler or PatchGuard
+-- detects sustained attack patterns.
+-- =============================================
+local g_bParanoiaMode         = false
+local g_nParanoiaActivatedAt  = 0
+local PARANOIA_ALERT_THRESHOLD = 8     -- profiler alerts to trigger
+local PARANOIA_DURATION        = 300   -- seconds before auto-deactivation
 
 -- Color constants
 local C_WHITE = 0xFFFFFF
@@ -233,6 +246,64 @@ local function fDmesgPush(sLevel, sMessage, nPid, sSource)
     return tEntry
 end
 
+
+local g_tVfsLocks = {}  -- [normalised_path] = { sType="W"|"E", tHolders={[key]=true} }
+
+local function fNormVfsPath(sPath)
+    return (sPath or ""):gsub("//", "/")
+end
+
+local function fVfsAcquireLock(sPath, sType, sHolderKey)
+    sPath = fNormVfsPath(sPath)
+    if sPath == "" then return true end
+    local tLock = g_tVfsLocks[sPath]
+    if not tLock then
+        -- No lock exists — create a new one
+        g_tVfsLocks[sPath] = { sType = sType, tHolders = { [sHolderKey] = true } }
+        return true
+    end
+    -- Lock exists — check compatibility
+    if tLock.sType == sType then
+        if sType == "E" then
+            -- E + E is fine (multiple executions of same binary)
+            tLock.tHolders[sHolderKey] = true
+            return true
+        else
+            -- W + W is NOT allowed (single writer)
+            return false, "STATUS_SHARING_VIOLATION: file already open for writing"
+        end
+    else
+        -- W vs E conflict — the W^X invariant
+        if sType == "W" then
+            return false, "STATUS_SHARING_VIOLATION: file is being executed — cannot open for writing"
+        else
+            return false, "STATUS_SHARING_VIOLATION: file is open for writing — cannot execute"
+        end
+    end
+end
+
+local function fVfsReleaseLock(sPath, sHolderKey)
+    sPath = fNormVfsPath(sPath)
+    local tLock = g_tVfsLocks[sPath]
+    if not tLock then return true end
+    tLock.tHolders[sHolderKey] = nil
+    -- If no holders remain, remove the lock entirely
+    if not next(tLock.tHolders) then
+        g_tVfsLocks[sPath] = nil
+    end
+    return true
+end
+
+local function fVfsReleaseAllLocksForHolder(sHolderKey)
+    for sPath, tLock in pairs(g_tVfsLocks) do
+        if tLock.tHolders[sHolderKey] then
+            tLock.tHolders[sHolderKey] = nil
+            if not next(tLock.tHolders) then
+                g_tVfsLocks[sPath] = nil
+            end
+        end
+    end
+end
 -------------------------------------------------
 -- sMLTR: SYNAPSE TOKEN GENERATION
 -------------------------------------------------
@@ -998,7 +1069,7 @@ do
     g_tFrozenOs = freeze_table(tUnfrozenOs)
 end
 
-kprint("info", "AxisOS Xen XKA v0.81-EX starting...")
+kprint("info", "AxisOS Xen XKA v0.82-DQA starting...")
 kprint("info", "Copyright (C) 2026 AxisOS")
 kprint("none", "")
 
@@ -1503,8 +1574,16 @@ function kernel.custom_require(sModulePath, nCallingPid)
         return tProc._moduleCache[sModulePath]
     end
 
-    -- Load from global cache or disk
-    if not kernel.tLoadedModules[sModulePath] then
+    local nRing = kernel.tRings[nCallingPid] or 3
+
+    -- Source code cache: avoids repeated disk I/O across all processes
+    if not kernel._tModuleSources then
+        kernel._tModuleSources = {}
+    end
+
+    -- Resolve source code (cached or from disk)
+    local tSrc = kernel._tModuleSources[sModulePath]
+    if not tSrc then
         local tPathsToTry = {"/lib/" .. sModulePath .. ".lua", "/usr/lib/" .. sModulePath .. ".lua",
                              "/drivers/" .. sModulePath .. ".lua", "/drivers/" .. sModulePath .. ".sys.lua",
                              "/system/" .. sModulePath .. ".lua", "/system/lib/dk/" .. sModulePath .. ".lua",
@@ -1513,15 +1592,38 @@ function kernel.custom_require(sModulePath, nCallingPid)
         for _, sPath in ipairs(tPathsToTry) do
             sCode = kernel.syscalls.vfs_read_file(nCallingPid, sPath)
             if sCode then
-                sFoundPath = sPath;
+                sFoundPath = sPath
                 break
             end
         end
         if not sCode then
             return nil, "Module not found: " .. sModulePath
         end
+        tSrc = { code = sCode, path = sFoundPath }
+        kernel._tModuleSources[sModulePath] = tSrc
+    end
 
-        local fFunc, sLoadErr = load(sCode, "@" .. sFoundPath, "t", tProc.env)
+    -- For Ring >= 2.5: ALWAYS compile with the process's own environment.
+    -- The global module cache stores results compiled with Ring 1's _ENV,
+    -- so the captured `syscall` upvalue bypasses ASLR token translation.
+    -- Recompiling ensures _ENV.syscall resolves through this process's
+    -- ASLR-aware sandbox.  Per-process cache prevents redundant reloads.
+    if nRing >= 2.5 then
+        local fFunc, sLoadErr = load(tSrc.code, "@" .. tSrc.path, "t", tProc.env)
+        if not fFunc then
+            return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr
+        end
+        local bOk, result = pcall(fFunc)
+        if not bOk then
+            return nil, "Failed to init module " .. sModulePath .. ": " .. result
+        end
+        tProc._moduleCache[sModulePath] = result
+        return result
+    end
+
+    -- Ring 0-2: use global compiled-result cache (trusted, no ASLR)
+    if not kernel.tLoadedModules[sModulePath] then
+        local fFunc, sLoadErr = load(tSrc.code, "@" .. tSrc.path, "t", tProc.env)
         if not fFunc then
             return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr
         end
@@ -1532,7 +1634,6 @@ function kernel.custom_require(sModulePath, nCallingPid)
         kernel.tLoadedModules[sModulePath] = result
     end
 
-    -- Give this process its own copy if it's a table
     local cached = kernel.tLoadedModules[sModulePath]
     if type(cached) == "table" then
         local tCopy = {}
@@ -1599,7 +1700,7 @@ function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
     local tUserGlobals = {}
     local tSandbox     = {}
 
-    -- ── vfork: CoW reads from parent, writes go local ──
+    -- vfork: CoW reads from parent, writes go local
     if tVforkParentEnv then
         setmetatable(tUserGlobals, { __index = tVforkParentEnv })
     end
@@ -1646,7 +1747,7 @@ function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
     local fRealCreate = coroutine.create
     local fRealStatus = coroutine.status
 
-    -- ── Standard safe builtins ──
+    -- Standard safe builtins
     tProtected.assert      = assert
     tProtected.error       = error
     tProtected.next        = next
@@ -1696,11 +1797,11 @@ function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
     end
     tProtected.getmetatable = getmetatable
 
-    -- ────────────────────────────────────────
+    --──────────────────────────────────────
     -- ASLR-aware syscall dispatcher closure
     -- For Ring ≥ 2.5 all outgoing names are translated
     -- to per-boot random tokens.  Ring 0-2 pass raw names.
-    -- ────────────────────────────────────────
+    --──────────────────────────────────────
     local fSandboxSyscall
     if nRing >= 2.5 then
         fEnsureAslrTable()
@@ -1725,7 +1826,7 @@ function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
         return mod
     end
 
-    -- ── Preemptive checkpoint __pc() ──
+    -- Preemptive checkpoint __pc()
     if g_oPreempt and nRing >= 2.5 then
         local nPcCounter   = 0
         local nPcLastYield = fRealUptime()
@@ -1823,7 +1924,7 @@ function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
         tProtected.load       = load
     end
 
-    -- ── print / io (ASLR-aware) ──
+    -- print / io (ASLR-aware)
     tProtected.print = function(...)
         local tP = {}
         for i = 1, select("#", ...) do tP[i] = tostring(select(i, ...)) end
@@ -1848,7 +1949,7 @@ function kernel.create_sandbox(nPid, nRing, tVforkParentEnv)
         end,
     }
 
-    -- ── Safe platform globals (ring-gated) ──
+    -- Safe platform globals (ring-gated)
     local tSafeGlobals = {
         computer = tSafeComputer,
         unicode  = unicode,
@@ -2186,7 +2287,7 @@ function kernel.syscall_dispatch(sName, ...)
 
     g_nCurrentPid = nPid
 
-    -- ── Rate-limiting (FIX: use nPid which is now defined) ──
+    -- Rate-limiting (FIX: use nPid which is now defined)
     local tProc = kernel.tProcessTable[nPid]
     if tProc then
         tProc._nSyscallCount = (tProc._nSyscallCount or 0) + 1
@@ -2206,7 +2307,7 @@ function kernel.syscall_dispatch(sName, ...)
         end
     end
 
-    -- ── Syscall behavior profiler ──
+    -- Syscall behavior profiler
     if g_tSyscallProfiler and nPid >= 2 then
         local tSP = g_tSyscallProfiler
         if not tSP.bLocked then
@@ -2232,6 +2333,15 @@ function kernel.syscall_dispatch(sName, ...)
                 }
                 tSP.tAlerts[#tSP.tAlerts + 1] = tAlert
                 if #tSP.tAlerts > 50 then table.remove(tSP.tAlerts, 1) end
+                -- Paranoia mode trigger: too many anomalies
+                if #tSP.tAlerts >= PARANOIA_ALERT_THRESHOLD and not g_bParanoiaMode then
+                    g_bParanoiaMode = true
+                    g_nParanoiaActivatedAt = raw_computer.uptime()
+                    kprint("sec", "╔══════════════════════════════════════╗")
+                    kprint("sec", "║  PARANOIA MODE ACTIVATED              ║")
+                    kprint("sec", "║  Profiler detected sustained anomaly  ║")
+                    kprint("sec", "╚══════════════════════════════════════╝")
+                end
                 kprint("sec", string.format(
                     "[PROFILER] ANOMALY: PID %d (Ring %s) used '%s' outside baseline",
                     nPid, tostring(nRing), sName))
@@ -2259,6 +2369,20 @@ function kernel.syscall_dispatch(sName, ...)
             return nil, "Invalid syscall identifier"
         end
         -- Ring 0-2: raw names still accepted
+    end
+
+    -- ═══════════════════════════════════════
+    -- SECCOMP FILTER CHECK
+    -- If the process has installed a seccomp filter,
+    -- only whitelisted syscalls are allowed.
+    -- ═══════════════════════════════════════
+    if tProc and tProc.tSeccompFilter then
+        if not tProc.tSeccompFilter[sName] then
+            kprint("sec", string.format(
+                "SECCOMP BLOCKED: PID %d (Ring %s) tried '%s'",
+                nPid, tostring(nRing), sName))
+            return nil, "Blocked by seccomp filter: " .. sName
+        end
     end
 
     -- PIPE FAST PATH
@@ -2579,6 +2703,30 @@ kernel.tSyscallTable["critical_file_modified"] = {
             end
         end
         return true
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["vfs_revert_critical_file"] = {
+    func = function(nPid, sPath)
+        if not g_oGoldenImage then
+            return false, "Golden image subsystem not available"
+        end
+        if not g_oGoldenImage.HasGolden(sPath) then
+            return false, "No golden snapshot for: " .. sPath
+        end
+        kprint("sec", "REVERTING critical file: " .. sPath)
+        local bOk, sErr = g_oGoldenImage.Revert(sPath)
+        if bOk then
+            kprint("ok", "File reverted successfully: " .. sPath)
+
+            -- Publish D-Bus event for audit trail
+            pcall(fDbusPublish, "system.security.file_reverted",
+                { path = sPath, revertedBy = nPid }, 0)
+        else
+            kprint("fail", "Revert FAILED: " .. sPath .. " — " .. tostring(sErr))
+        end
+        return bOk, sErr
     end,
     allowed_rings = {0, 1}
 }
@@ -4496,6 +4644,112 @@ kernel.tSyscallTable["gpu_register_fast_path"] = {
     allowed_rings = {1, 2},
 }
 
+
+kernel.tSyscallTable["vfs_lock_acquire"] = {
+    func = function(nPid, sPath, sType, sHolderKey)
+        return fVfsAcquireLock(sPath, sType, sHolderKey)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["vfs_lock_release"] = {
+    func = function(nPid, sPath, sHolderKey)
+        return fVfsReleaseLock(sPath, sHolderKey)
+    end,
+    allowed_rings = {0, 1}
+}
+
+kernel.tSyscallTable["vfs_lock_release_all"] = {
+    func = function(nPid, sHolderKey)
+        fVfsReleaseAllLocksForHolder(sHolderKey)
+        return true
+    end,
+    allowed_rings = {0, 1}
+}
+
+-- ==========================================
+-- SECCOMP SYSCALL
+-- ==========================================
+
+kernel.tSyscallTable["seccomp_set_filter"] = {
+    func = function(nPid, tAllowedSyscalls)
+        if type(tAllowedSyscalls) ~= "table" then
+            return nil, "Filter must be a table of syscall name strings"
+        end
+        local tProc = kernel.tProcessTable[nPid]
+        if not tProc then return nil, "No such process" end
+
+        local tNewFilter = {}
+        for _, sName in ipairs(tAllowedSyscalls) do
+            if type(sName) == "string" then
+                tNewFilter[sName] = true
+            end
+        end
+
+        -- Always allow these minimal syscalls so the process can
+        -- yield, read its own PID, and further restrict itself.
+        tNewFilter["process_yield"]       = true
+        tNewFilter["kernel_yield"]        = true
+        tNewFilter["process_get_pid"]     = true
+        tNewFilter["seccomp_set_filter"]  = true
+
+        if tProc.tSeccompFilter then
+            -- Filter already installed — can only INTERSECT (restrict further)
+            local tIntersected = {}
+            for sName in pairs(tNewFilter) do
+                if tProc.tSeccompFilter[sName] then
+                    tIntersected[sName] = true
+                end
+            end
+            tProc.tSeccompFilter = tIntersected
+            kprint("sec", string.format(
+                "SECCOMP: PID %d filter RESTRICTED (now %d syscalls)",
+                nPid, (function() local n=0; for _ in pairs(tIntersected) do n=n+1 end; return n end)()))
+        else
+            tProc.tSeccompFilter = tNewFilter
+            kprint("sec", string.format(
+                "SECCOMP: PID %d filter INSTALLED (%d syscalls allowed)",
+                nPid, (function() local n=0; for _ in pairs(tNewFilter) do n=n+1 end; return n end)()))
+        end
+        return true
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+-- ==========================================
+-- PARANOIA MODE SYSCALLS
+-- ==========================================
+
+kernel.tSyscallTable["paranoia_status"] = {
+    func = function(nPid)
+        return {
+            bActive      = g_bParanoiaMode,
+            nActivatedAt = g_nParanoiaActivatedAt,
+            nDuration    = PARANOIA_DURATION,
+            nRemaining   = g_bParanoiaMode
+                and math.max(0, PARANOIA_DURATION - (raw_computer.uptime() - g_nParanoiaActivatedAt))
+                or 0,
+        }
+    end,
+    allowed_rings = {0, 1, 2, 2.5, 3}
+}
+
+kernel.tSyscallTable["paranoia_activate"] = {
+    func = function(nPid)
+        if not g_bParanoiaMode then
+            g_bParanoiaMode        = true
+            g_nParanoiaActivatedAt = raw_computer.uptime()
+            kprint("sec", "╔══════════════════════════════════════╗")
+            kprint("sec", "║  PARANOIA MODE ACTIVATED              ║")
+            kprint("sec", "║  Spawn restrictions in effect         ║")
+            kprint("sec", "║  PatchGuard interval halved           ║")
+            kprint("sec", "╚══════════════════════════════════════╝")
+        end
+        return true
+    end,
+    allowed_rings = {0, 1}
+}
+
 -------------------------------------------------
 -- KERNEL INITIALIZATION
 -------------------------------------------------
@@ -4902,6 +5156,7 @@ kernel.nPipelinePid = nPipelinePid
 kprint("ok", "Ring 1 Pipeline Manager started as PID", nPipelinePid)
 
 
+
 -- Syscall Behavior Profiler (Feature 5)
 local g_tSyscallProfiler = {
     tProfiles       = {},      -- [pid] -> {[syscall_name] = true}
@@ -4911,6 +5166,111 @@ local g_tSyscallProfiler = {
     tBaselines      = {},      -- [pid] -> frozen set after lock
     tAlerts         = {},      -- recent anomaly alerts
 }
+
+-- =============================================
+-- GOLDEN IMAGE + KIQGR INITIALIZATION
+-- =============================================
+
+local g_oGoldenImage = nil
+local g_oKiqgr       = nil
+
+do
+    -- Load Golden Image subsystem
+    local sGiCode = primitive_load("/lib/golden_image.lua")
+    if sGiCode then
+        local tGiEnv = {
+            string = string, math = math, table = table,
+            pairs = pairs, ipairs = ipairs, type = type,
+            tostring = tostring, tonumber = tonumber,
+            pcall = pcall, next = next,
+        }
+        local fGi = load(sGiCode, "@golden_image", "t", tGiEnv)
+        if fGi then
+            local bOk, oGI = pcall(fGi)
+            if bOk and type(oGI) == "table" then
+                oGI.Initialize({
+                    bAxfsRoot    = g_bAxfsRoot,
+                    oAxfsVol     = g_oAxfsVol,
+                    oPrimitiveFs = g_oPrimitiveFs,
+                    fLog         = function(s) kprint("sec", s) end,
+                })
+
+                -- Snapshot all critical files at boot
+                local tAllCritical = {
+                    "/kernel.lua",
+                    "/lib/pipeline_manager.lua",
+                    "/bin/init.lua",
+                    "/etc/passwd.lua",
+                    "/system/dkms.lua",
+                    "/lib/ob_manager.lua",
+                    "/lib/ke_ipc.lua",
+                    "/lib/preempt.lua",
+                    "/sys/security/patchguard.lua",
+                    "/sys/security/hvci.lua",
+                    "/drivers/tty.sys.lua",
+                    "/bin/sh.lua",
+                }
+                oGI.SnapshotAll(tAllCritical)
+                g_oGoldenImage = oGI
+                kprint("ok", "Golden Image subsystem initialized (" ..
+                    (g_bAxfsRoot and "AXFS inode" or "managed shadow") .. " mode)")
+            end
+        end
+    else
+        kprint("warn", "Golden Image not available (/lib/golden_image.lua missing)")
+    end
+
+    -- Load KIQGR enclave
+    if g_oExsi and g_oSha256Lib then
+        local sKiqgrCode = primitive_load("/lib/kiqgr.lua")
+        if sKiqgrCode then
+            local tKiqgrEnv = {
+                string = string, math = math, table = table,
+                pairs = pairs, ipairs = ipairs, type = type,
+                tostring = tostring, tonumber = tonumber,
+                pcall = pcall, next = next, select = select,
+            }
+            local fKiqgr = load(sKiqgrCode, "@kiqgr", "t", tKiqgrEnv)
+            if fKiqgr then
+                local bOk, oKIQGR = pcall(fKiqgr)
+                if bOk and type(oKIQGR) == "table" then
+                    oKIQGR.Initialize({
+                        fLog = function(s) kprint("sec", s) end,
+                        fCreateEnclave = function(sCode)
+                            return g_oExsi.CreateEnclave(0, sCode)
+                        end,
+                    })
+
+                    -- Hash all critical files and load into enclave
+                    local tHashes = {}
+                    local tCritFiles = {
+                        "/kernel.lua", "/lib/pipeline_manager.lua",
+                        "/bin/init.lua", "/etc/passwd.lua",
+                        "/system/dkms.lua", "/lib/ob_manager.lua",
+                        "/sys/security/patchguard.lua",
+                        "/drivers/tty.sys.lua", "/bin/sh.lua",
+                    }
+                    for _, sPath in ipairs(tCritFiles) do
+                        local sContent = primitive_load(sPath)
+                        if sContent then
+                            tHashes[sPath] = g_oSha256Lib.digest(sContent)
+                        end
+                    end
+
+                    local fCall = function(hEnc, sMethod, ...)
+                        return g_oExsi.CallEnclave(0, hEnc, sMethod, ...)
+                    end
+                    oKIQGR.LoadHashes(tHashes, fCall)
+
+                    g_oKiqgr = oKIQGR
+                    kprint("ok", "KIQGR enclave ACTIVE — hashes sealed in enclave upvalues")
+                end
+            end
+        end
+    else
+        kprint("warn", "KIQGR unavailable (needs EXSi + SHA-256)")
+    end
+end
 
 -- Initialize PatchGuard with FULL monitoring data
 if g_oPatchGuard then
@@ -5017,10 +5377,18 @@ if g_oPatchGuard then
         oSha256           = g_oSha256Lib,
         sXorKey           = sPgXorKey,
         tSyscallProfiler  = g_tSyscallProfiler,
+        oKiqgr         = g_oKiqgr,
+        hKiqgrEnclave  = g_oKiqgr and g_oKiqgr.GetHandle() or nil,
+        fCallEnclave   = g_oExsi and function(hEnc, sMethod, ...)
+            return g_oExsi.CallEnclave(0, hEnc, sMethod, ...)
+        end or nil,
+        oGoldenImage   = g_oGoldenImage,
+        fRevertFile    = g_oGoldenImage and function(sPath)
+            return g_oGoldenImage.Revert(sPath)
+        end or nil,
     })
     kprint("ok", "PatchGuard v3 snapshot taken — arming deferred to post-boot")
 end
-
 
 
 -- =============================================
@@ -5420,6 +5788,55 @@ do
         g_sSwapKey = g_oSha256Lib.digest(sS)
         kprint("ok", "Swap space HMAC key derived (per-boot)")
     end
+    -- Create PCMR enclave for swap encryption
+    if g_oExsi then
+        local sPcmrSwapCode = primitive_load("/lib/pcmr.lua")
+        if sPcmrSwapCode then
+            -- Use the pcmr module's enclave source for the swap key
+            local bPcmrOk, oPcmrMod = pcall(function()
+                local tPcmrEnv = {
+                    string = string, math = math, table = table,
+                    pairs = pairs, ipairs = ipairs, type = type,
+                    tostring = tostring, tonumber = tonumber,
+                    pcall = pcall, select = select, bit32 = bit32,
+                    syscall = function(sName, ...)
+                        return kernel.syscall_dispatch(sName, ...)
+                    end,
+                }
+                local fPcmr = load(sPcmrSwapCode, "@pcmr_swap", "t", tPcmrEnv)
+                return fPcmr()
+            end)
+            if bPcmrOk and oPcmrMod and oPcmrMod.getEnclaveSource then
+                -- Create a dedicated swap PCMR key from hardware entropy
+                local tSwapKeyBytes = {}
+                local sSwapSeed = tostring(raw_computer.uptime())
+                    .. tostring(math.random(0, 0x7FFFFFFF))
+                    .. tostring(raw_computer.freeMemory())
+                if g_oSha256Lib then
+                    local sH = g_oSha256Lib.digest(sSwapSeed)
+                    for i = 1, 32 do
+                        tSwapKeyBytes[i] = sH:byte(i)
+                    end
+                else
+                    for i = 1, 32 do
+                        tSwapKeyBytes[i] = math.random(0, 255)
+                    end
+                end
+
+                local hSwap = g_oExsi.CreateEnclave(0, oPcmrMod.getEnclaveSource())
+                if hSwap then
+                    local bInit = g_oExsi.CallEnclave(0, hSwap, "init",
+                        tSwapKeyBytes, sSwapSeed)
+                    if bInit then
+                        g_hSwapPcmr = hSwap
+                        kprint("ok", "Swap encryption PCMR enclave ACTIVE")
+                    else
+                        g_oExsi.DestroyEnclave(0, 0, hSwap)
+                    end
+                end
+            end
+        end
+    end
 end
 
 -- Simple table serialiser (strings, numbers, booleans only)
@@ -5457,10 +5874,39 @@ function kernel.fSwapOut(nPid)
     -- Serialise ONLY the module key list
     local sPayload = "return " .. fSerializeBasic(tModKeys)
 
-    -- HMAC integrity tag
-    local sHmac = string.rep("\0", 32)
-    if g_oSha256Lib and g_sSwapKey then
-        sHmac = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
+    -- ════════════════════════════════════════
+    -- SWAP ENCRYPTION VIA PCMR ENCLAVE
+    -- If a PCMR swap key handle exists, encrypt the payload
+    -- through the enclave so plaintext never sits in RAM.
+    -- ════════════════════════════════════════
+    local sWriteData
+    if g_hSwapPcmr and g_oExsi then
+        -- Compute HMAC as encryption key stream seed
+        local sHmac = g_oExsi.CallEnclave(0, g_hSwapPcmr, "hmac", sPayload)
+        if sHmac and #sHmac == 32 then
+            -- XOR the payload with the HMAC keystream
+            -- (simple but effective for swap — key never in RAM)
+            local tEnc = {}
+            for i = 1, #sPayload do
+                local kb = sHmac:byte(((i - 1) % 32) + 1)
+                tEnc[i] = string.char(bit32.bxor(sPayload:byte(i), kb))
+            end
+            sWriteData = SWAP_MAGIC .. sHmac .. table.concat(tEnc)
+        else
+            -- Fallback: HMAC integrity only (no encryption)
+            local sHmacFallback = string.rep("\0", 32)
+            if g_oSha256Lib and g_sSwapKey then
+                sHmacFallback = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
+            end
+            sWriteData = SWAP_MAGIC .. sHmacFallback .. sPayload
+        end
+    else
+        -- Original path: HMAC integrity only
+        local sHmac = string.rep("\0", 32)
+        if g_oSha256Lib and g_sSwapKey then
+            sHmac = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
+        end
+        sWriteData = SWAP_MAGIC .. sHmac .. sPayload
     end
 
     pcall(function() g_oPrimitiveFs.makeDirectory("/tmp") end)
@@ -5469,16 +5915,18 @@ function kernel.fSwapOut(nPid)
     local sPath = SWAP_DIR .. "/p" .. nPid .. ".swp"
     local h = g_oPrimitiveFs.open(sPath, "w")
     if not h then return false end
-    g_oPrimitiveFs.write(h, SWAP_MAGIC .. sHmac .. sPayload)
+    g_oPrimitiveFs.write(h, sWriteData)
     g_oPrimitiveFs.close(h)
 
     -- Free per-process module cache → GC reclaims memory
     tProc._moduleCache = nil
     tProc._swapped     = true
     tProc._swapPath    = sPath
+    tProc._swapEncrypted = (g_hSwapPcmr ~= nil)
 
     kprint("mem", string.format(
-        "Swap OUT PID %d (%d modules freed)", nPid, #tModKeys))
+        "Swap OUT PID %d (%d modules freed, encrypted=%s)",
+        nPid, #tModKeys, tostring(tProc._swapEncrypted)))
     return true
 end
 
@@ -5510,25 +5958,52 @@ function kernel.fSwapIn(nPid)
         return false, "Swap file corrupt"
     end
 
-    local sStored  = sData:sub(5, 36)
-    local sPayload = sData:sub(37)
+    local sStoredHmac = sData:sub(5, 36)
+    local sEncPayload = sData:sub(37)
 
-    if g_oSha256Lib and g_sSwapKey then
-        local sExpect = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
-        if not g_oSha256Lib.constEq(sStored, sExpect) then
-            kprint("sec", "SWAP HMAC MISMATCH PID " .. nPid ..
+    -- ════════════════════════════════════════
+    -- SWAP DECRYPTION VIA PCMR ENCLAVE
+    -- ════════════════════════════════════════
+    local sPayload
+    if tProc._swapEncrypted and g_hSwapPcmr and g_oExsi then
+        -- Decrypt: XOR with the stored HMAC (same keystream)
+        local tDec = {}
+        for i = 1, #sEncPayload do
+            local kb = sStoredHmac:byte(((i - 1) % 32) + 1)
+            tDec[i] = string.char(bit32.bxor(sEncPayload:byte(i), kb))
+        end
+        sPayload = table.concat(tDec)
+
+        -- Verify integrity: recompute HMAC of decrypted payload
+        local sVerify = g_oExsi.CallEnclave(0, g_hSwapPcmr, "hmac", sPayload)
+        if not sVerify or not g_oSha256Lib.constEq(sVerify, sStoredHmac) then
+            kprint("sec", "SWAP HMAC MISMATCH (encrypted) PID " .. nPid ..
                 " — TAMPERED, killing process")
             pcall(g_oPrimitiveFs.remove, sPath)
             tProc._swapped = false
             tProc.status = "dead"
-            return false, "Swap integrity failure"
+            return false, "Swap integrity failure (encrypted)"
+        end
+    else
+        -- Original path: plaintext with HMAC verification
+        sPayload = sEncPayload
+        if g_oSha256Lib and g_sSwapKey then
+            local sExpect = g_oSha256Lib.hmac(g_sSwapKey, sPayload)
+            if not g_oSha256Lib.constEq(sStoredHmac, sExpect) then
+                kprint("sec", "SWAP HMAC MISMATCH PID " .. nPid ..
+                    " — TAMPERED, killing process")
+                pcall(g_oPrimitiveFs.remove, sPath)
+                tProc._swapped = false
+                tProc.status = "dead"
+                return false, "Swap integrity failure"
+            end
         end
     end
 
     pcall(g_oPrimitiveFs.remove, sPath)
-    tProc._swapped  = false
-    tProc._swapPath = nil
-    -- Module cache is nil; require() will reload on demand
+    tProc._swapped      = false
+    tProc._swapPath      = nil
+    tProc._swapEncrypted = false
     kprint("mem", "Swap IN PID " .. nPid)
     return true
 end
@@ -5567,6 +6042,13 @@ while true do
             g_oPatchGuard.TakeSnapshot(false)  -- re-snapshot with PM overrides now registered
             g_oPatchGuard.Arm()
             kprint("sec", "PatchGuard ARMED — all integrity monitoring active")
+        end
+    end
+
+    if g_bParanoiaMode then
+        if raw_computer.uptime() - g_nParanoiaActivatedAt > PARANOIA_DURATION then
+            g_bParanoiaMode = false
+            kprint("sec", "Paranoia mode DEACTIVATED (timeout expired)")
         end
     end
 
@@ -5708,6 +6190,7 @@ while true do
                     end
                 end
 
+                -- fVfsReleaseAllLocksForHolder("pid:" .. nPid)
                 kernel.tPidMap[tProcess.co] = nil
                 kernel.tRings[nPid] = nil
                 kernel.tProcessTable[nPid] = nil
@@ -5754,6 +6237,48 @@ while true do
 
         end -- if status == "ready"
     end -- for each process
+
+    if nWorkDone == 0 then
+    if not g_nIdleSince then
+        g_nIdleSince = raw_computer.uptime()
+        else
+            local nIdleTime = raw_computer.uptime() - g_nIdleSince
+            if nIdleTime > IDLE_WARN_SEC and not g_bIdleWarned then
+                g_bIdleWarned = true
+                kprint("warn", string.format(
+                    "SCHEDULER: System idle for %.1fs — possible deadlock!", nIdleTime))
+                kprint("warn", "Process states:")
+                local nAlive = 0
+                for nDPid, tDProc in pairs(kernel.tProcessTable) do
+                    if tDProc.status ~= "dead" then
+                        nAlive = nAlive + 1
+                        local sImage = "?"
+                        pcall(function()
+                            if tDProc.env and tDProc.env.env and tDProc.env.env.arg then
+                                sImage = tDProc.env.env.arg[0] or "?"
+                            end
+                        end)
+                        kprint("warn", string.format(
+                            "  PID %-3d: status=%-10s reason=%-12s ring=%-3s  %s",
+                            nDPid, tDProc.status or "?",
+                            tDProc.wait_reason or "none",
+                            tostring(tDProc.ring or "?"),
+                            sImage))
+                        -- Check for signal queue buildup (sign of deadlock)
+                        if tDProc.signal_queue and #tDProc.signal_queue > 0 then
+                            kprint("warn", string.format(
+                                "         ^ has %d queued signal(s) (stuck!)",
+                                #tDProc.signal_queue))
+                        end
+                    end
+                end
+                kprint("warn", string.format("  %d alive process(es), 0 doing work", nAlive))
+            end
+        end
+    else
+        g_nIdleSince = nil
+        g_bIdleWarned = false
+    end
 
     -- ====== IPC TICK: process DPCs and timers ONCE per iteration ======
     -- This runs AFTER all ready processes have had their turn,

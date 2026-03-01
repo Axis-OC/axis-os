@@ -183,7 +183,7 @@ local function run_setup()
   while true do
     clear(C_BLUE)
     color(C_GREY, C_BLACK); gpu.fill(1, 1, w, 1, " ")
-    center(1, "CMOS Setup Utility - Copyright (C) 2025 Nyanity Memetic Software")
+    center(1, "CMOS Setup Utility - Copyright (C) 2026 Nyanity Memetic Software")
     color(C_BLUE, C_WHITE)
     draw_border_box(col1_x, 3, col_w, main_h)
     draw_border_box(col2_x, 3, col_w, main_h)
@@ -250,7 +250,7 @@ local function splash(bSkipMemTest)
   color(C_BLACK, C_WHITE)
   
   gpu.set(1, 1, "BIOS v0.3, An Energy Star Ally")
-  gpu.set(1, 2, "Copyright (C) 2025, Axis")
+  gpu.set(1, 2, "Copyright (C) 2026, Axis")
   gpu.set(1, 4, "AxisOS Kernel Processor - Tier 3 (APU)")
   
   -- MEMORY TEST LOGIC
@@ -288,7 +288,7 @@ local function splash(bSkipMemTest)
   color(C_BLACK, C_WHITE)
   
   gpu.set(1, h-2, "Press DEL to enter SETUP")
-  gpu.set(1, h-1, "01/01/2025-AxisOS-0.21-2A69K")
+  gpu.set(1, h-1, "01/01/2026-AxisOS-0.21-2A69K")
   return nil
 end
 

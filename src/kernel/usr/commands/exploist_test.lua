@@ -3,8 +3,8 @@
 -- AxisOS Preemption Exploit Stress-Tester
 --
 -- Validates fixes for two scheduler bypass vectors:
---   CVE-AXIS-001: Tail-call recursion via return / and-or ternary
---   CVE-AXIS-002: Sub-coroutine depth amplification via coroutine.resume
+--  CVE-AXIS-001: Tail-call recursion via return / and-or ternary
+--  CVE-AXIS-002: Sub-coroutine depth amplification via coroutine.resume
 --
 -- Each test spawns an "attacker" thread running the exploit pattern
 -- alongside a "victim" counter thread.  If preemption works, the
@@ -12,9 +12,9 @@
 -- exploit bypassed the scheduler.
 --
 -- Usage:
---   exploit_test          Run full suite
---   exploit_test -v       Verbose (step-by-step detail)
---   exploit_test -h       Help
+--  exploit_test          Run full suite
+--  exploit_test -v       Verbose (step-by-step detail)
+--  exploit_test -h       Help
 --
 
 local thread   = require("thread")
@@ -553,7 +553,7 @@ end
 -- TEST 10: GOTO LOOP INSIDE SUB-COROUTINE
 --
 -- A coroutine whose body is a dynamically loaded goto loop:
---   ::L:: goto L
+--  ::L:: goto L
 -- The goto instrumentation injects __pc before goto.
 -- The coroutine wrapper must still force a process yield.
 -- =============================================================
