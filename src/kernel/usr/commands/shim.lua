@@ -3,10 +3,10 @@
 -- Link machine to site, derive keys from PGP + server + hardware
 --
 -- Usage:
---  secureboot register       Register machine with pki.axis-os.ru
---  secureboot status         Show current attestation state
---  secureboot verify         Run remote attestation check
---  secureboot revoke         Unregister machine from site
+--   secureboot register       Register machine with pki.axis-os.ru
+--   secureboot status         Show current attestation state
+--   secureboot verify         Run remote attestation check
+--   secureboot revoke         Unregister machine from site
 --
 
 local fs   = require("filesystem")

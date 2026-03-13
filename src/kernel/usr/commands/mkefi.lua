@@ -23,7 +23,7 @@ end
 
 if not cmd or cmd=="help" then usage(); return end
 
--- Load SHA-256 
+--  Load SHA-256 
 local ok, shaLib = pcall(require, "sha256")
 if ok then sha = shaLib
 else
@@ -38,7 +38,7 @@ else
 end
 if not sha then print("Error: Cannot load SHA-256 library"); return end
 
--- Find drive 
+--  Find drive 
 local driveAddr = args[2]
 if not driveAddr then
   local bOk, tList = syscall("disk_list_drives", "drive")
@@ -53,7 +53,7 @@ local ss = drv.getSectorSize()
 local cap = drv.getCapacity()
 local totalSec = math.floor(cap / ss)
 
--- Helpers 
+--  Helpers 
 local function r16(s,o) return s:byte(o)*256+s:byte(o+1) end
 local function r32(s,o)
   return s:byte(o)*0x1000000+s:byte(o+1)*0x10000
@@ -81,7 +81,7 @@ local function crc32(s) local c=0xFFFFFFFF for i=1,#s do
   c=bit32.bxor(bit32.rshift(c,8),ct[bit32.band(bit32.bxor(c,s:byte(i)),0xFF)])
 end return bit32.bxor(c,0xFFFFFFFF) end
 
--- RDB helpers 
+--  RDB helpers 
 local function readRDB()
   local s=rs(0)
   if not s or s:sub(1,4)~="ARDB" then return nil end
@@ -209,7 +209,7 @@ elseif cmd=="setup" then
     return
   end
 
-  -- Write EFI header (sector 0 of EFI partition) 
+  --  Write EFI header (sector 0 of EFI partition) 
   print("Writing EFI header...")
   local ehData = "AEFI" .. string.char(1)     -- [1-5] magic+ver
     .. w16(#bootCode)                           -- [6-7] boot code size
@@ -221,7 +221,7 @@ elseif cmd=="setup" then
   ehData = ehData .. w32(crc32(ehData))         -- [53-56] header CRC
   ws(efi.offset, pad(ehData, ss))
 
-  -- Write key block (sector 1 of EFI partition) 
+  --  Write key block (sector 1 of EFI partition) 
   print("Writing key block...")
   local kbData = "AKEY" .. string.char(1, 32)  -- [1-6] magic+type+len
     .. hmacKey                                   -- [7-38] HMAC key
@@ -231,7 +231,7 @@ elseif cmd=="setup" then
   ws(efi.offset + 1, pad(kbData, ss))
   ws(efi.offset + 2, pad("", ss))  -- reserved
 
-  -- Write boot code (sectors 3+ of EFI partition) 
+  --  Write boot code (sectors 3+ of EFI partition) 
   print("Writing boot code ("..bcSecCount.." sectors)...")
   for i=0, bcSecCount-1 do
     local chunk = bootCode:sub(i*ss+1, (i+1)*ss)

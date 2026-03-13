@@ -2,17 +2,17 @@
 -- AxisOS Secure Boot Provisioning Tool
 --
 -- This tool:
---  1. Generates or imports Platform Key
---  2. Computes machine binding
---  3. Hashes the current kernel
---  4. Writes EEPROM boot code with embedded constants
---  5. Optionally SEALS the EEPROM (PERMANENT, IRREVERSIBLE)
+--   1. Generates or imports Platform Key
+--   2. Computes machine binding
+--   3. Hashes the current kernel
+--   4. Writes EEPROM boot code with embedded constants
+--   5. Optionally SEALS the EEPROM (PERMANENT, IRREVERSIBLE)
 --
 -- Usage:
---  provision                 Interactive provisioning
---  provision --status        Show current security state
---  provision --seal          Seal after provisioning (PERMANENT)
---  provision --update-hash   Update kernel hash only (before sealing)
+--   provision                 Interactive provisioning
+--   provision --status        Show current security state
+--   provision --seal          Seal after provisioning (PERMANENT)
+--   provision --update-hash   Update kernel hash only (before sealing)
 --
 
 local fs = require("filesystem")

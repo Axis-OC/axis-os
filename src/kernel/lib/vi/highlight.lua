@@ -65,7 +65,7 @@ function H.detect(sPath)
 end
 
 -- =============================================
--- BLOCK COMMENT STATE  (unchanged)
+-- BLOCK COMMENT STATE
 -- =============================================
 
 function H.computeState(tLines, tLang)
@@ -298,7 +298,7 @@ function H.colorize(sLine, tLang, bInBlock)
 end
 
 -- =============================================
--- VISIBLE SEGMENTS  (unchanged API)
+-- VISIBLE SEGMENTS
 -- =============================================
 
 function H.segments(sLine, nLeft, nW, tLang, bInBlock)

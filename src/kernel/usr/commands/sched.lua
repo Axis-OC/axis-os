@@ -3,9 +3,9 @@
 -- AxisOS Preemptive Scheduler Diagnostics
 --
 -- Usage:
---  sched              Show global scheduler stats
---  sched -p           Include per-process CPU stats
---  sched -v           Verbose (include instrumentation info)
+--   sched              Show global scheduler stats
+--   sched -p           Include per-process CPU stats
+--   sched -v           Verbose (include instrumentation info)
 --
 
 local tArgs = env.ARGS or {}

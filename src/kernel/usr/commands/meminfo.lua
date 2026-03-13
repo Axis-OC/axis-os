@@ -3,9 +3,9 @@
 -- Per-process memory diagnostics
 --
 -- Usage:
---  meminfo          Overview
---  meminfo -p       Per-process details
---  meminfo -v       Verbose (include module list)
+--   meminfo          Overview
+--   meminfo -p       Per-process details
+--   meminfo -v       Verbose (include module list)
 --
 
 local tArgs = env.ARGS or {}

@@ -3,15 +3,15 @@
 -- AxisOS Driver Autoload Configuration Tool
 --
 -- Usage:
---  drvconf                    List configured drivers
---  drvconf list               Same as above
---  drvconf enable <name>      Enable a driver
---  drvconf disable <name>     Disable a driver
---  drvconf add <name> <path>  Add a new driver entry
---  drvconf remove <name>      Remove a driver entry
---  drvconf check              Validate dependencies
---  drvconf order              Show resolved boot load order
---  drvconf set <name> <k> <v> Set a field (priority, description)
+--   drvconf                    List configured drivers
+--   drvconf list               Same as above
+--   drvconf enable <name>      Enable a driver
+--   drvconf disable <name>     Disable a driver
+--   drvconf add <name> <path>  Add a new driver entry
+--   drvconf remove <name>      Remove a driver entry
+--   drvconf check              Validate dependencies
+--   drvconf order              Show resolved boot load order
+--   drvconf set <name> <k> <v> Set a field (priority, description)
 --
 
 local fs = require("filesystem")

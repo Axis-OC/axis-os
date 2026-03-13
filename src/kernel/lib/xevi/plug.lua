@@ -5,21 +5,21 @@
 -- Plugins are Lua files stored in /etc/xevi/plug/<name>.lua
 -- Each returns a table with hooks:
 --
---  name            string   Plugin identifier
---  version         string   Semver
---  description     string   One-line description
---  on_load(api, opts)       Called at startup (setup keymaps, state)
---  on_key(api, buf, mode, key) → bool   Intercept keys (return true = consumed)
---  on_insert_char(api, buf, ch) → string|nil   Transform/add chars in insert mode
---  on_save(api, buf)        Called after :w
---  on_open(api, buf)        Called when buffer opens
---  on_cursor(api, buf)      Called on cursor move (throttled)
---  on_status(api, buf) → string   Extra status bar text
---  on_render(api, buf, cy, ch)    Custom rendering pass (below editor)
---  commands = {{cmd=, desc=, func=}, ...}   Extra : commands
---  colors = {}              Color overrides (merged into CLR)
---  highlights = {}          Syntax token color overrides
---  filetypes = {ext = {tabSize=4, ...}}   Per-filetype config
+--   name            string   Plugin identifier
+--   version         string   Semver
+--   description     string   One-line description
+--   on_load(api, opts)       Called at startup (setup keymaps, state)
+--   on_key(api, buf, mode, key) → bool   Intercept keys (return true = consumed)
+--   on_insert_char(api, buf, ch) → string|nil   Transform/add chars in insert mode
+--   on_save(api, buf)        Called after :w
+--   on_open(api, buf)        Called when buffer opens
+--   on_cursor(api, buf)      Called on cursor move (throttled)
+--   on_status(api, buf) → string   Extra status bar text
+--   on_render(api, buf, cy, ch)    Custom rendering pass (below editor)
+--   commands = {{cmd=, desc=, func=}, ...}   Extra : commands
+--   colors = {}              Color overrides (merged into CLR)
+--   highlights = {}          Syntax token color overrides
+--   filetypes = {ext = {tabSize=4, ...}}   Per-filetype config
 --
 
 local fs   = require("filesystem")

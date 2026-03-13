@@ -81,6 +81,32 @@ end
 fLoadPasswd()
 
 -- =============================================
+-- OLR (OWNER LOCK REGION) CHECK
+-- =============================================
+
+local bOlrLocked = false
+local sOlrOwnerUser = nil
+
+pcall(function()
+    local tOlrStatus = syscall("olr_get_status")
+    if tOlrStatus and tOlrStatus.bLocked then
+        bOlrLocked = true
+        syscall("kernel_log", "[INIT] OLR: Owner lock is ACTIVE")
+        if not tOlrStatus.bIntegrity then
+            syscall("kernel_log", "[INIT] OLR: WARNING — integrity check failed!")
+        end
+    end
+end)
+
+-- Helper: verify OLR before allowing login
+local function fOlrCheck(sUsername, sPassword)
+    if not bOlrLocked then return true end
+    local bOk, sErr = syscall("olr_verify", sUsername, fHash(sPassword))
+    if bOk then return true end
+    return false, sErr or "Owner lock: access denied"
+end
+
+-- =============================================
 -- CHECK DISPLAY MANAGER CONFIGURATION
 -- =============================================
 
@@ -184,33 +210,42 @@ if not bDmEnabled then
             end
 
             if tUserEntry and tUserEntry.hash == fHash(sPassword or "") then
-                io.write("\nAccess Granted.\n")
-
-                local nTargetRing = tUserEntry.ring or 3
-
-                if nTargetRing == 0 then
-                    io.write("\27[31mWARNING: SPAWNING IN RING 0 (KERNEL MODE)\27[37m\n")
-                end
-
-                local nPid = oSys.spawn(tUserEntry.shell, nTargetRing, {
-                    USER = sUsername,
-                    UID = tUserEntry.uid,
-                    HOME = tUserEntry.home,
-                    PWD = tUserEntry.home,
-                    PATH = "/usr/commands",
-                    HOSTNAME = sHostname
-                })
-
-                if nPid then
-                    oSys.wait(nPid)
-                    io.write("\f")
+                -- OLR verification
+                local bOlrOk, sOlrErr = fOlrCheck(sUsername, sPassword or "")
+                if not bOlrOk then
+                    io.write("\n\27[31mOwner Lock: " .. (sOlrErr or "Access denied") .. "\27[37m\n")
+                    syscall("kernel_log", "[INIT] OLR DENIED: " .. sUsername .. " — " .. tostring(sOlrErr))
+                    syscall("process_yield")
                 else
-                    syscall("kernel_log", "[INIT] Failed to spawn shell for " .. sUsername)
+                    io.write("\nAccess Granted.\n")
+
+                    local nTargetRing = tUserEntry.ring or 3
+
+                    if nTargetRing == 0 then
+                        io.write("\27[31mWARNING: SPAWNING IN RING 0 (KERNEL MODE)\27[37m\n")
+                    end
+
+                    local nPid = oSys.spawn(tUserEntry.shell, nTargetRing, {
+                        USER = sUsername,
+                        UID = tUserEntry.uid,
+                        HOME = tUserEntry.home,
+                        PWD = tUserEntry.home,
+                        PATH = "/usr/commands",
+                        HOSTNAME = sHostname
+                    })
+
+                    if nPid then
+                        oSys.wait(nPid)
+                        io.write("\f")
+                    else
+                        syscall("kernel_log", "[INIT] Failed to spawn shell for " .. sUsername)
+                    end
                 end
             else
                 io.write("\nLogin incorrect\n")
                 syscall("process_yield")
             end
+            
         else
             syscall("kernel_log", "[INIT] Error reading stdin. Retrying...")
             syscall("process_yield")

@@ -5,10 +5,10 @@
 -- No 4KB limit — this runs from the filesystem.
 --
 -- Features:
---  - Boot entry selection & editing
---  - Driver autoload configuration
---  - EEPROM parameter management
---  - SecureBoot enable/disable/provision
+--   - Boot entry selection & editing
+--   - Driver autoload configuration
+--   - EEPROM parameter management
+--   - SecureBoot enable/disable/provision
 --
 
 local a = component
@@ -803,6 +803,7 @@ local function mainMenu()
             {label = "> Driver Configuration",    value = loaderCfg.drivers_cfg or ""},
             {label = "> EEPROM Parameters",       value = "NVRAM Settings"},
             {label = "> SecureBoot & PKI",         value = ({"Off","Warn","Enforce"})[(loaderCfg.secureboot or {}).mode + 1] or "?"},
+            {label = "> Owner Lock (OLR)",        value = ""},
             {label = "", value = ""},
             {label = "Save & Exit",               value = "Write loader.cfg"},
             {label = "Exit Without Saving",       value = ""},
@@ -823,6 +824,72 @@ local function mainMenu()
         elseif idx == 2 then editDrivers(loaderCfg)
         elseif idx == 3 then editEepromParams()
         elseif idx == 4 then secureBootSetup(loaderCfg)
+        elseif idx == 5 then  -- Owner Lock
+            cls(BLUE, GRAY)
+            center(1, "OWNER LOCK REGION", WHITE)
+
+            -- Check OLR status
+            local tOlrStatus = nil
+            pcall(function()
+                -- In BIOS setup context we read the OLR file directly
+                if rootFs then
+                    local h = rootFs.open("/etc/.olr.dat", "r")
+                    if h then
+                        local d = rootFs.read(h, 256)
+                        rootFs.close(h)
+                        if d and #d >= 6 and d:sub(1,4) == "AXOL" then
+                            tOlrStatus = { bLocked = (d:byte(6) == 1) }
+                        end
+                    end
+                end
+            end)
+
+            local sStatus = (tOlrStatus and tOlrStatus.bLocked) and "LOCKED" or "Not set"
+            center(4, "Current Status: " .. sStatus,
+                tOlrStatus and tOlrStatus.bLocked and YELLOW or GREEN)
+
+            if tOlrStatus and tOlrStatus.bLocked then
+                center(6, ">> Clear Owner Lock <<", RED)
+                center(8, "This will remove the owner lock.", GRAY)
+                center(9, "The next user to set up will become the new owner.", GRAY)
+                center(11, "Type 'CLEAR' to confirm:", WHITE)
+
+                local input = ""
+                local ix = math.floor(W/2) - 4
+                while true do
+                    gpu.fill(ix, 12, 20, 1, " ")
+                    gpu.set(ix, 12, "> " .. input .. "_")
+                    local ch, code = pullKey()
+                    if code == 28 then break
+                    elseif code == 1 then input = ""; break
+                    elseif code == 14 and #input > 0 then input = input:sub(1, -2)
+                    elseif ch > 32 and ch < 127 then input = input .. string.char(ch) end
+                end
+
+                if input == "CLEAR" then
+                    -- Force clear OLR (write empty record to file)
+                    pcall(function()
+                        if rootFs then
+                            local h = rootFs.open("/etc/.olr.dat", "w")
+                            if h then
+                                -- Write cleared OLR record
+                                local sCleared = "AXOL" .. string.char(1, 2, 0, 0)
+                                    .. string.rep("\0", 248)
+                                rootFs.write(h, sCleared)
+                                rootFs.close(h)
+                            end
+                        end
+                    end)
+                    cls(BLACK, GREEN)
+                    center(H/2, "Owner Lock CLEARED.", GREEN)
+                    center(H/2 + 1, "Next boot will allow new owner setup.", YELLOW)
+                end
+            else
+                center(6, "No owner lock is set.", GRAY)
+                center(7, "Set one from the OS: olr --setup", GRAY)
+            end
+            center(H/2 + 3, "Press any key...", GRAY)
+            pullKey()
         end
     end
 end

@@ -154,7 +154,6 @@ local function ccPut(cc, n, data)
   local hand = cc._hand
   for _ = 1, cc._max * 3 do
     if cc._frq[hand] <= 0 then
-      -- Evict this slot
       cc._map[cc._sec[hand]] = nil
       cc._sec[hand] = n
       cc._dat[hand] = data
@@ -166,7 +165,6 @@ local function ccPut(cc, n, data)
     cc._frq[hand] = cc._frq[hand] - 1
     hand = (hand % cc._max) + 1
   end
-  -- Fallback: force evict current hand
   cc._map[cc._sec[cc._hand]] = nil
   cc._sec[cc._hand] = n
   cc._dat[cc._hand] = data
@@ -414,7 +412,7 @@ end
 
 function AX.mount(tD, tMountOpts)
   tMountOpts = tMountOpts or {}
-  local CACHE_MAX = tMountOpts.cacheSize or 128
+  local CACHE_MAX = tMountOpts.cacheSize or 48  -- was 128, saves ~40KB RAM
 
   --  CLOCK sector cache wrapping raw I/O 
   local cc = newClockCache(CACHE_MAX)
@@ -430,7 +428,7 @@ function AX.mount(tD, tMountOpts)
     return d
   end
   tD.writeSector = function(n, d)
-    ccInvalidate(cc, n)
+    ccPut(cc, n, d)
     return fRawWrite(n, d)
   end
   -- Batch read: check cache first, batch-read only misses
@@ -511,8 +509,8 @@ function AX.mount(tD, tMountOpts)
     dirty=false, allocHint=0,
     -- Caches
     _cc=cc,
-    _icache={}, _icacheN=0, _icacheMax=128,
-    _pcache={}, _pcacheN=0, _pcacheMax=256,
+    _icache={}, _icacheN=0, _icacheMax=48,
+    _pcache={}, _pcacheN=0, _pcacheMax=64,
     _dhcache={},  -- [dirIno] → {[name]=inode}
     -- Checksums
     _ck=tCkTable, _bCk=bHasChecksums,
@@ -548,28 +546,17 @@ end
 -- =============================================
 
 function AX._V:purgeCache()
-  -- Flush dirty state to disk FIRST (bitmaps, superblock).
-  -- If flush encounters write errors, retry the critical sectors.
-  local bFlushOk = true
+  -- Flush dirty state to disk FIRST
   if self.dirty then
-    -- Bitmap writes are CRITICAL — a failed bitmap write causes
-    -- stale-data corruption after cache clear.  Retry once.
     local function safeWrite(n, d)
       local r = self.d.writeSector(n, d)
-      if not r then
-        -- Yield to let IPC pipeline drain, then retry
-        pcall(function() coroutine.yield() end)
-        r = self.d.writeSector(n, d)
-      end
-      if not r then bFlushOk = false end
+      if not r then r = self.d.writeSector(n, d) end
       return r
     end
-
     safeWrite(self.L.ibmpSec, self.ib)
     for i = 0, self.L.bbmpSec - 1 do
       safeWrite(self.L.bbmpStart + i, self.tBbmp[i])
     end
-    -- Flush dirty checksum sectors
     if self._bCk then
       local ss = self.d.sectorSize
       local nPerSec = math.floor(ss / 4)
@@ -585,30 +572,55 @@ function AX._V:purgeCache()
     end
     self.su.mt = os.time and os.time() or 0
     self.su.gen = (self.su.gen or 0) + 1
-    self.su.nTotalWrites = (self.su.nTotalWrites or 0) + self._nWrites
-    self.su.nTotalReads = (self.su.nTotalReads or 0) + self._nReads
     local sSup = psuper(self.su, self.d.sectorSize)
     safeWrite(0, sSup); safeWrite(1, sSup)
     self.dirty = false
   end
 
-  -- Phase 1: Nil sector data strings explicitly.
-  -- These are the largest objects (cacheSize × sectorSize bytes).
-  -- Nilling them makes them eligible for incremental GC immediately,
-  -- even before the table objects themselves are collected.
+  -- GRADUATED EVICTION: evict bottom 50% by frequency, keep hot entries
   local cc = self._cc
+  if cc._n <= 4 then return true end  -- nothing worth evicting
+
+  -- Find median frequency
+  local tFreqs = {}
+  for i = 1, cc._n do tFreqs[i] = cc._frq[i] or 0 end
+  table.sort(tFreqs)
+  local nMedian = tFreqs[math.floor(#tFreqs / 2)] or 0
+
+  -- Evict entries at or below median
+  local nEvicted = 0
   for i = 1, cc._n do
-    cc._dat[i] = nil
+    if cc._frq[i] <= nMedian then
+      if cc._sec[i] then cc._map[cc._sec[i]] = nil end
+      cc._sec[i] = nil
+      cc._dat[i] = nil
+      cc._frq[i] = 0
+      nEvicted = nEvicted + 1
+    end
   end
-  -- Phase 2: Replace all cache tables with fresh empty ones.
-  -- Old tables (with grown internal hash arrays) become garbage.
-  cc._map = {}; cc._sec = {}; cc._dat = {}; cc._frq = {}
-  cc._n = 0; cc._hand = 1
+
+  -- Compact: rebuild arrays without gaps
+  local tNewSec, tNewDat, tNewFrq = {}, {}, {}
+  local nNew = 0
+  cc._map = {}
+  for i = 1, cc._n do
+    if cc._sec[i] then
+      nNew = nNew + 1
+      tNewSec[nNew] = cc._sec[i]
+      tNewDat[nNew] = cc._dat[i]
+      tNewFrq[nNew] = math.max(1, math.floor((cc._frq[i] or 1) / 2))
+      cc._map[cc._sec[i]] = nNew
+    end
+  end
+  cc._sec = tNewSec; cc._dat = tNewDat; cc._frq = tNewFrq
+  cc._n = nNew; cc._hand = 1
+
+  -- Clear higher-level caches (path/inode are small, always safe to reset)
   self._icache = {}; self._icacheN = 0
   self._pcache = {}; self._pcacheN = 0
   self._dhcache = {}
 
-  return bFlushOk
+  return true
 end
 
 -- =============================================

@@ -3,8 +3,8 @@
 -- Switch User — spawns an authenticated shell as the target user.
 --
 -- Usage:
---  su              Switch to root (UID 0)
---  su <username>   Switch to a specific user
+--   su              Switch to root (UID 0)
+--   su <username>   Switch to a specific user
 --
 
 local oFs  = require("filesystem")

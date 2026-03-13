@@ -1,6 +1,5 @@
 --
--- /kernel.lua
--- AxisOS Xen XKA v0.82-DQA-beta
+-- FORCEFULLY BROKEN KERNEL
 --
 local kernel = {
     tProcessTable = {},
@@ -28,7 +27,7 @@ local kernel = {
 local g_tGpuFastPath = nil
 
 -- Lua 5.3 compatibility: synthesize bit32 from native operators
-if not bit32 then
+if not bit2 then
     bit32 = {}
     bit32.band   = load("return function(a,b) return ((a or 0xFFFFFFFF) & (b or 0xFFFFFFFF)) & 0xFFFFFFFF end")()
     bit32.bor    = load("return function(a,b) return ((a or 0) | (b or 0)) & 0xFFFFFFFF end")()
@@ -46,30 +45,19 @@ local g_oGpu = nil
 local g_nWidth, g_nHeight = 80, 25
 local g_nCurrentLine = 0
 local tBootArgs = boot_args or {}
-local g_tDKStructsFastPath = nil
+local g_tDKSructsFastPath = nil
 
 local g_bAxfsRoot = false
-local g_oAxfsVol = nil
+local g_oAxfsol = nil
 
-local g_oPreempt = nil -- loaded from /lib/preempt.lua at boot
-local g_oIpc = nil -- Kernel IPC subsystem
+local g_oPrempt = nil -- loaded from /lib/preempt.lua at boot
+local g_oIc = nil -- Kernel IPC subsystem
 
-local g_oPatchGuard = nil   -- Kernel integrity monitor
+local g_oPatchGurd = nil   -- Kernel integrity monitor
 local g_oHypervisor = nil   -- Metatable protection primitives
 local g_tKernelDeviceTree = nil     -- ref to DKMS's g_tDeviceTree
 local g_tKernelSymlinks   = nil     -- ref to DKMS's g_tSymbolicLinks
 local g_oExsi = nil         -- EXSi enclave manager
-
--- Partition Guard: sector-level access control for boot drive
-local g_oPartitionGuard  = nil
-local g_sBootDriveAddr   = nil
-local g_tProtectedRanges = {}
-
--- AXVB: Verified Boot partition
-local g_nAxvbOffset      = nil  -- 0-indexed sector offset
-local g_nAxvbSize        = nil
-local g_oVerifiedBoot    = nil  -- verified_boot module reference
-local g_tAxvbHdrCache    = nil  -- cached AXVB header
 
 local g_nIdleSince    = nil    -- timestamp when all processes became idle
 local g_bIdleWarned   = false  -- have we already logged the idle warning?
@@ -85,18 +73,18 @@ local g_tSchedStats = {
 -- =============================================
 -- SYSCALL ASLR (per-boot randomized dispatch names)
 -- =============================================
-local g_tAslrForward  = {}   -- real_name → token  (used by sandbox)
-local g_tAslrReverse  = {}   -- token → real_name  (used by dispatch)
-local g_bAslrGenerated = false
+local g_tAslrForwar  = {}   -- real_name → token  (used by sandbox)
+local g_tAslrRevers  = {}   -- token → real_name  (used by dispatch)
+local g_bAslrGenerate = false
 
 -- =============================================
 -- SWAP SPACE (serialize sleeping Ring 3 state to disk)
 -- =============================================
-local g_sSwapKey        = nil           -- HMAC key for swap file integrity
+local g_sSwapKey       = nil           -- HMAC key for swap file integrity
 local SWAP_DIR          = "/tmp/.kswap"
-local SWAP_MAGIC        = "AXSW"
+local SWAP_MAGC        = "AXSW"
 local SWAP_IDLE_SEC     = 30            -- swap out after this many seconds sleeping
-local SWAP_MEM_FLOOR    = 32768         -- only swap when free mem is below this
+local SWAP_MEM_FLOOR   = 32768         -- only swap when free mem is below this
 
 -- =============================================
 -- D-BUS KERNEL MESSAGE BUS
@@ -129,16 +117,12 @@ local PARANOIA_DURATION        = 300   -- seconds before auto-deactivation
 -- Color constants
 local C_WHITE = 0xFFFFFF
 local C_GRAY = 0xAAAAAA
-local C_GREEN = 0x55FF55
+local C_EN = 0x55FF55
 local C_RED = 0xFF5555
 local C_YELLOW = 0xFFFF55
 local C_CYAN = 0x55FFFF
 local C_BLUE = 0x5555FF
 
-local tLogLevels = {
-    ok = {
-        text = "[  OK  ]",
-        color = C_GREEN,
         pri = 3
     },
     fail = {
@@ -1563,44 +1547,6 @@ local function __load_exsi()
     return nil
 end
 
-local function __load_partition_guard()
-    local sCode, sErr = primitive_load("/lib/partition_guard.lua")
-    if not sCode then
-        kprint("warn", "Partition Guard not found: " .. tostring(sErr))
-        return nil
-    end
-    local tEnv = {
-        string = string, math = math, table = table,
-        bit32 = bit32, pairs = pairs, ipairs = ipairs,
-        type = type, tostring = tostring, error = error,
-        setmetatable = setmetatable,
-    }
-    local fChunk = load(sCode, "@partition_guard", "t", tEnv)
-    if not fChunk then return nil end
-    local bOk, oResult = pcall(fChunk)
-    return (bOk and type(oResult) == "table") and oResult or nil
-end
-
-local function __load_verified_boot()
-    local sCode, sErr = primitive_load("/lib/verified_boot.lua")
-    if not sCode then
-        kprint("warn", "Verified Boot not found: " .. tostring(sErr))
-        return nil
-    end
-    local tEnv = {
-        string = string, math = math, table = table,
-        bit32 = bit32, os = os, pairs = pairs, ipairs = ipairs,
-        type = type, tostring = tostring, tonumber = tonumber,
-        require = function(m)
-            if m == "bpack" then return kernel.custom_require("bpack", 0) end
-        end,
-    }
-    local fChunk = load(sCode, "@verified_boot", "t", tEnv)
-    if not fChunk then return nil end
-    local bOk, oResult = pcall(fChunk)
-    return (bOk and type(oResult) == "table") and oResult or nil
-end
-
 pcall(function()
     local sCode = primitive_load("/system/lib/dk/shared_structs.lua")
     if sCode then
@@ -1615,44 +1561,89 @@ end)
 
 function kernel.custom_require(sModulePath, nCallingPid)
     local tProc = kernel.tProcessTable[nCallingPid]
-    if not tProc then return nil, "No such process" end
-    if not tProc._moduleCache then tProc._moduleCache = {} end
+    if not tProc then
+        return nil, "No such process"
+    end
+
+    -- Per-process cache
+    if not tProc._moduleCache then
+        tProc._moduleCache = {}
+    end
     if tProc._moduleCache[sModulePath] then
         return tProc._moduleCache[sModulePath]
     end
 
     local nRing = kernel.tRings[nCallingPid] or 3
 
-    -- NO SOURCE CODE CACHING: saves ~200KB RAM on busy systems.
-    -- Each require() re-reads from disk. The compiled result is
-    -- cached per-process in _moduleCache (cheap: just table refs).
-    local tPathsToTry = {
-        "/lib/" .. sModulePath .. ".lua",
-        "/usr/lib/" .. sModulePath .. ".lua",
-        "/drivers/" .. sModulePath .. ".lua",
-        "/drivers/" .. sModulePath .. ".sys.lua",
-        "/system/" .. sModulePath .. ".lua",
-        "/system/lib/dk/" .. sModulePath .. ".lua",
-        "/sys/security/" .. sModulePath .. ".lua",
-    }
-    local sCode, sFoundPath
-    for _, sPath in ipairs(tPathsToTry) do
-        sCode = kernel.syscalls.vfs_read_file(nCallingPid, sPath)
-        if sCode then sFoundPath = sPath; break end
+    -- Source code cache: avoids repeated disk I/O across all processes
+    if not kernel._tModuleSources then
+        kernel._tModuleSources = {}
     end
-    if not sCode then return nil, "Module not found: " .. sModulePath end
 
-    -- Always compile with the calling process's environment
-    local fFunc, sLoadErr = load(sCode, "@" .. sFoundPath, "t", tProc.env)
-    if not fFunc then
-        return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr
+    -- Resolve source code (cached or from disk)
+    local tSrc = kernel._tModuleSources[sModulePath]
+    if not tSrc then
+        local tPathsToTry = {"/lib/" .. sModulePath .. ".lua", "/usr/lib/" .. sModulePath .. ".lua",
+                             "/drivers/" .. sModulePath .. ".lua", "/drivers/" .. sModulePath .. ".sys.lua",
+                             "/system/" .. sModulePath .. ".lua", "/system/lib/dk/" .. sModulePath .. ".lua",
+                             "/sys/security/" .. sModulePath .. ".lua"}
+        local sCode, sFoundPath
+        for _, sPath in ipairs(tPathsToTry) do
+            sCode = kernel.syscalls.vfs_read_file(nCallingPid, sPath)
+            if sCode then
+                sFoundPath = sPath
+                break
+            end
+        end
+        if not sCode then
+            return nil, "Module not found: " .. sModulePath
+        end
+        tSrc = { code = sCode, path = sFoundPath }
+        kernel._tModuleSources[sModulePath] = tSrc
     end
-    local bOk, result = pcall(fFunc)
-    if not bOk then
-        return nil, "Failed to init module " .. sModulePath .. ": " .. result
+
+    -- For Ring >= 2.5: ALWAYS compile with the process's own environment.
+    -- The global module cache stores results compiled with Ring 1's _ENV,
+    -- so the captured `syscall` upvalue bypasses ASLR token translation.
+    -- Recompiling ensures _ENV.syscall resolves through this process's
+    -- ASLR-aware sandbox.  Per-process cache prevents redundant reloads.
+    if nRing >= 2.5 then
+        local fFunc, sLoadErr = load(tSrc.code, "@" .. tSrc.path, "t", tProc.env)
+        if not fFunc then
+            return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr
+        end
+        local bOk, result = pcall(fFunc)
+        if not bOk then
+            return nil, "Failed to init module " .. sModulePath .. ": " .. result
+        end
+        tProc._moduleCache[sModulePath] = result
+        return result
     end
-    tProc._moduleCache[sModulePath] = result
-    return result
+
+    -- Ring 0-2: use global compiled-result cache (trusted, no ASLR)
+    if not kernel.tLoadedModules[sModulePath] then
+        local fFunc, sLoadErr = load(tSrc.code, "@" .. tSrc.path, "t", tProc.env)
+        if not fFunc then
+            return nil, "Failed to load module " .. sModulePath .. ": " .. sLoadErr
+        end
+        local bOk, result = pcall(fFunc)
+        if not bOk then
+            return nil, "Failed to init module " .. sModulePath .. ": " .. result
+        end
+        kernel.tLoadedModules[sModulePath] = result
+    end
+
+    local cached = kernel.tLoadedModules[sModulePath]
+    if type(cached) == "table" then
+        local tCopy = {}
+        for k, v in pairs(cached) do
+            tCopy[k] = v
+        end
+        tProc._moduleCache[sModulePath] = tCopy
+        return tCopy
+    end
+    tProc._moduleCache[sModulePath] = cached
+    return cached
 end
 
 -- ANSI escape code stripper for NO_COLOR support
@@ -4420,21 +4411,16 @@ kernel.tSyscallTable["raw_component_invoke"] = {
 
 kernel.tSyscallTable["raw_component_proxy"] = {
     func = function(nPid, sAddress)
-        -- AXFS root fast-path
+        -- AXFS root: return the proxy table directly
         if g_bAxfsRoot and g_oPrimitiveFs and sAddress == g_oPrimitiveFs.address then
             return g_oPrimitiveFs
         end
         local bIsOk, oProxy = pcall(raw_component.proxy, sAddress)
-        if not bIsOk then return nil, "Invalid component address" end
-
-        -- PARTITION GUARD: Filter boot drive proxy for Ring > 0
-        if g_oPartitionGuard and g_sBootDriveAddr
-           and sAddress == g_sBootDriveAddr
-           and (kernel.tRings[nPid] or 0) > 0 then
-            return g_oPartitionGuard.WrapProxy(oProxy)
+        if bIsOk then
+            return oProxy
+        else
+            return nil, "Invalid component address"
         end
-
-        return oProxy
     end,
     allowed_rings = {0, 1, 2}
 }
@@ -5091,342 +5077,6 @@ kernel.tVfs.tMounts["/"] = {
 kprint("ok", "Mounted root filesystem on", kernel.tVfs.sRootUuid:sub(1, 13) .. "...")
 
 -- =============================================
--- PARTITION GUARD + AXVB INITIALIZATION
--- =============================================
-
-
--- =============================================
--- KBL AUTO-PROVISIONING (Ring 0, pre-PM)
---
--- Detects an empty/uninitialized KBL partition and writes
--- stage2_boot.lua, kbl_shell.lua, and loader.cfg from the
--- trusted AXFS root directly to raw sectors.
---
--- Security guarantees:
---   • Runs before Pipeline Manager spawn (no user processes)
---   • Uses primitive_load() (kernel-only AXFS read)
---   • Uses raw_component.proxy() (hardware-level write)
---   • No syscall overrides registered yet
---   • Source files share trust boundary with kernel itself
---   • No syscall exposed — cannot be called from user-space
--- =============================================
-
-local function fKblAutoProvision()
-    if not g_bAxfsRoot or not boot_drive_addr then return end
-
-    -- Inline binary helpers (loaded before bpack is available via require)
-    local function _u16(n)
-        n = math.floor(n)
-        return string.char(math.floor(n / 256) % 256, n % 256)
-    end
-    local function _u32(n)
-        n = math.floor(n)
-        return string.char(
-            math.floor(n / 16777216) % 256, math.floor(n / 65536) % 256,
-            math.floor(n / 256) % 256, n % 256)
-    end
-    local function _r16(s, o)
-        return s:byte(o) * 256 + s:byte(o + 1)
-    end
-    local function _r32(s, o)
-        return s:byte(o) * 16777216 + s:byte(o + 1) * 65536
-             + s:byte(o + 2) * 256 + s:byte(o + 3)
-    end
-    local function _ri32(s, o)
-        local u = _r32(s, o)
-        if u >= 2147483648 then return u - 4294967296 end
-        return u
-    end
-    local function _pad(s, n)
-        if #s >= n then return s:sub(1, n) end
-        return s .. string.rep("\0", n - #s)
-    end
-
-    -- CRC32 (IEEE 802.3)
-    local _tCrc = {}
-    for i = 0, 255 do
-        local c = i
-        for _ = 0, 7 do
-            if c % 2 == 1 then c = bit32.bxor(bit32.rshift(c, 1), 0xEDB88320)
-            else c = bit32.rshift(c, 1) end
-        end
-        _tCrc[i] = c
-    end
-    local function _crc32(s)
-        local c = 0xFFFFFFFF
-        for i = 1, #s do
-            c = bit32.bxor(bit32.rshift(c, 8),
-                _tCrc[bit32.band(bit32.bxor(c, s:byte(i)), 0xFF)])
-        end
-        return bit32.bxor(c, 0xFFFFFFFF)
-    end
-
-    -- ═══ 1. Get raw drive proxy (hardware-level, no driver layer) ═══
-    local oDrv = raw_component.proxy(boot_drive_addr)
-    if not oDrv then return end
-    local ss = oDrv.getSectorSize()
-
-    -- ═══ 2. Walk RDB to find KBL partition ═══
-    local sRdb = oDrv.readSector(1)  -- OC 1-indexed = sector 0
-    if not sRdb or sRdb:sub(1, 4) ~= "RDSK" then return end
-
-    local nKblOff, nKblSize = nil, nil
-    local ns = _ri32(sRdb, 25)
-    for _ = 1, 16 do
-        if ns < 0 then break end
-        local q = oDrv.readSector(ns + 1)
-        if not q or q:sub(1, 4) ~= "PART" then break end
-        if _r32(q, 65) == 0x41584B42 then  -- AXKBL fsType
-            nKblOff  = _r32(q, 57)
-            nKblSize = _r32(q, 61)
-            break
-        end
-        ns = _ri32(q, 17)
-    end
-
-    if not nKblOff then return end  -- no KBL partition
-
-    -- ═══ 3. Check if KBL needs provisioning ═══
-    local sKblSec0 = oDrv.readSector(nKblOff + 1)  -- OC 1-indexed
-    if not sKblSec0 then return end
-
-    local bNeedsProvision = false
-    if sKblSec0:sub(1, 4) ~= "AXKB" then
-        bNeedsProvision = true  -- no valid header
-    else
-        local nStage2Size = _r16(sKblSec0, 7)
-        if nStage2Size == 0 then
-            bNeedsProvision = true  -- header exists but stage2 is empty
-        end
-    end
-
-    if not bNeedsProvision then
-        kprint("ok", "[KBL] Partition already provisioned (stage2 present)")
-        return
-    end
-
-    kprint("sec", "╔══════════════════════════════════════════╗")
-    kprint("sec", "║  KBL AUTO-PROVISION (Ring 0, pre-PM)     ║")
-    kprint("sec", "╚══════════════════════════════════════════╝")
-    kprint("info", "[KBL] Empty KBL detected — writing from trusted AXFS root...")
-
-    -- ═══ 4. Read source files using primitive_load (kernel-only) ═══
-    --    These reads go through g_oPrimitiveFs which is the kernel's
-    --    direct AXFS proxy. No PM, no VFS hooks, no user interception.
-
-    local sStage2 = primitive_load("/boot/sys/stage2_boot.lua")
-    if not sStage2 then sStage2 = primitive_load("/boot/stage2_boot.lua") end
-    if not sStage2 then sStage2 = primitive_load("/system/stage2_boot.lua") end
-
-    local sShell = primitive_load("/boot/kbl_shell.lua")
-    if not sShell then sShell = primitive_load("/lib/kbl_shell.lua") end
-    if not sShell then sShell = primitive_load("/system/kbl_shell.lua") end
-    if not sShell then sShell = primitive_load("/boot/sys/kbl_shell.lua") end
-
-    local sLoaderCfg = primitive_load("/boot/loader.cfg")
-
-    if not sStage2 or #sStage2 == 0 then
-        kprint("fail", "[KBL] stage2_boot.lua NOT FOUND on AXFS — cannot provision KBL")
-        kprint("fail", "[KBL] System will boot but KBL recovery will be unavailable")
-        kprint("fail", "[KBL] Searched: /boot/sys/, /boot/, /system/")
-        return
-    end
-
-    -- ═══ 5. Layout constants (must match kbl.lua and EEPROM stage1) ═══
-    local L_LOADER_START = 1
-    local L_LOADER_COUNT = 3
-    local L_STAGE2_START = 4
-    local L_STAGE2_COUNT = 47
-    local L_SHELL_START  = 51
-    local L_SHELL_COUNT  = 70   -- was 50
-    local L_VAR_START    = 121  -- was 101
-    local L_VAR_COUNT    = 4    -- was 244
-
-    -- Helper: write one sector at partition-relative offset
-    local function ws(nRel, sData)
-        oDrv.writeSector(nKblOff + nRel + 1, _pad(sData or "", ss):sub(1, ss))
-    end
-
-    -- ═══ 6. Zero-fill entire KBL partition ═══
-    kprint("info", "[KBL] Zero-filling " .. nKblSize .. " sectors...")
-    for i = 0, nKblSize - 1 do
-        ws(i, "")
-        if i % 16 == 0 then raw_computer.pullSignal(0) end  -- OC yield
-    end
-
-    -- ═══ 7. Write loader.cfg ═══
-    if sLoaderCfg and #sLoaderCfg > 0 then
-        local nLcSectors = math.ceil(#sLoaderCfg / ss)
-        for i = 0, math.min(nLcSectors, L_LOADER_COUNT) - 1 do
-            ws(L_LOADER_START + i, sLoaderCfg:sub(i * ss + 1, (i + 1) * ss))
-        end
-        kprint("info", "[KBL]   loader.cfg: " .. #sLoaderCfg .. " bytes")
-    else
-        kprint("warn", "[KBL]   loader.cfg not found — default boot config will be used")
-    end
-
-    -- ═══ 8. Write stage2 boot code ═══
-    local nS2Secs = math.ceil(#sStage2 / ss)
-    if nS2Secs > L_STAGE2_COUNT then
-        kprint("fail", "[KBL] Stage2 too large (" .. #sStage2 ..
-            " bytes > " .. (L_STAGE2_COUNT * ss) .. " max)")
-        return
-    end
-    for i = 0, nS2Secs - 1 do
-        ws(L_STAGE2_START + i, sStage2:sub(i * ss + 1, (i + 1) * ss))
-        if i % 8 == 0 then raw_computer.pullSignal(0) end
-    end
-    kprint("info", "[KBL]   stage2: " .. #sStage2 .. " bytes (" .. nS2Secs .. " sectors)")
-
-    -- ═══ 9. Write KBL shell code ═══
-    local nShSecs = 0
-    if sShell and #sShell > 0 then
-        nShSecs = math.ceil(#sShell / ss)
-        if nShSecs > L_SHELL_COUNT then
-            kprint("warn", "[KBL] Shell truncated: " .. #sShell ..
-                " bytes > " .. (L_SHELL_COUNT * ss) .. " max")
-            nShSecs = L_SHELL_COUNT
-            sShell = sShell:sub(1, nShSecs * ss)
-        end
-        for i = 0, nShSecs - 1 do
-            ws(L_SHELL_START + i, sShell:sub(i * ss + 1, (i + 1) * ss))
-            if i % 8 == 0 then raw_computer.pullSignal(0) end
-        end
-        kprint("info", "[KBL]   shell: " .. #sShell .. " bytes (" .. nShSecs .. " sectors)")
-    else
-        kprint("warn", "[KBL]   kbl_shell.lua not found — recovery console unavailable")
-    end
-
-    -- ═══ 10. Build and write KBL header (sector 0) ═══
-    local sHdr = "AXKB"
-        .. string.char(2)       -- version 2
-        .. string.char(0x12)    -- CFG_FALLBACK | CFG_AUTO_CLEAR
-        -- Stage2 descriptor
-        .. _u16(#sStage2)
-        .. _u32(_crc32(sStage2))
-        .. _u16(L_STAGE2_START)
-        .. _u16(nS2Secs)
-        -- Shell descriptor
-        .. _u16(L_SHELL_START)
-        .. _u16(nShSecs)
-        .. _u16(sShell and #sShell or 0)
-        .. _u32(sShell and #sShell > 0 and _crc32(sShell) or 0)
-        -- Loader.cfg descriptor
-        .. _u16(L_LOADER_START)
-        .. _u16(L_LOADER_COUNT)
-        .. _u16(sLoaderCfg and #sLoaderCfg or 0)
-        -- Label (32 bytes)
-        .. _pad("KBL", 32)
-        -- Counters (boot attempts, last enter, kernel fails)
-        .. _u32(0) .. _u32(0) .. _u32(0)
-        -- Var layout
-        .. _u16(L_VAR_START) .. _u16(L_VAR_COUNT)
-        -- Loader CRC
-        .. _u32(sLoaderCfg and #sLoaderCfg > 0 and _crc32(sLoaderCfg) or 0)
-
-    -- Pad header to 96 bytes
-    sHdr = _pad(sHdr, 96)
-    -- Inline variables area (144 bytes, empty)
-    local sInlineVars = _pad("", 144)
-    sHdr = sHdr .. sInlineVars
-    -- Inline var CRC
-    sHdr = sHdr .. _u32(_crc32(sInlineVars))
-    -- Header CRC (covers everything before this point)
-    sHdr = sHdr .. _u32(_crc32(sHdr))
-    sHdr = _pad(sHdr, 256)
-
-    -- EEPROM offload block (second 256 bytes of sector 0)
-    local sOffload = "AXEO"
-        .. string.char(0, 0, 3, 0, 2)  -- SB=0, entry=0, timeout=3, quick=0, loglevel=2
-        .. _pad("", 3)       -- reserved
-        .. _pad("", 64)      -- machine binding (empty = unbound)
-        .. _pad("", 64)      -- kernel hash
-        .. _pad("", 64)      -- manifest hash
-        .. _pad("", 32)      -- PK fingerprint
-        .. _u32(0)            -- boot counter
-        .. _u32(0)            -- last good boot
-    sOffload = sOffload .. _u32(_crc32(sOffload))
-    sOffload = _pad(sOffload, 256)
-
-    -- Write combined header sector
-    ws(0, sHdr .. sOffload)
-
-    kprint("ok", "[KBL] Auto-provisioning COMPLETE")
-    kprint("ok", string.format(
-        "[KBL]   Stage2=%dB(CRC %08X)  Shell=%dB  Loader=%dB",
-        #sStage2, _crc32(sStage2),
-        sShell and #sShell or 0,
-        sLoaderCfg and #sLoaderCfg or 0))
-end
-
-if g_bAxfsRoot and boot_drive_addr then
-    g_sBootDriveAddr = boot_drive_addr
-    g_oPartitionGuard = __load_partition_guard()
-
-    if g_oPartitionGuard then
-        g_oPartitionGuard.Initialize({
-            fLog     = function(s) kprint("sec", s) end,
-            nMaxParts = 16,
-        })
-
-        -- Read RDB and scan for protected partitions
-        pcall(function()
-            local sRdbCode = primitive_load("/lib/rdb.lua")
-            if sRdbCode then
-                local tRdbEnv = {
-                    string = string, math = math, table = table,
-                    bit32 = bit32, type = type, tostring = tostring,
-                    pairs = pairs, ipairs = ipairs,
-                    setmetatable = setmetatable,
-                    require = function(m)
-                        if m == "bpack" then
-                            return kernel.custom_require("bpack", 0)
-                        end
-                    end,
-                }
-                local fRdb = load(sRdbCode, "@rdb_guard", "t", tRdbEnv)
-                local oRDB = fRdb()
-
-                local oDrv = raw_component.proxy(boot_drive_addr)
-                local ss = oDrv.getSectorSize()
-                local tTempDisk = {
-                    sectorSize = ss,
-                    readSector = function(n) return oDrv.readSector(n + 1) end,
-                }
-                local tRdb = oRDB.read(tTempDisk)
-                if tRdb then
-                    g_oPartitionGuard.ScanRdb(tRdb)
-
-                    -- Validate KBL + KSR presence
-                    local tMissing = oRDB.validateBootRequirements(tRdb)
-                    if tMissing then
-                        kprint("fail", "╔═══════════════════════════════════╗")
-                        kprint("fail", "║ MISSING REQUIRED BOOT PARTITIONS  ║")
-                        kprint("fail", "╚═══════════════════════════════════╝")
-                        for _, s in ipairs(tMissing) do
-                            kprint("fail", "  • " .. s)
-                        end
-                        kprint("warn", "System will boot but is NOT fully secure.")
-                        kprint("warn", "Use xparted wizard to create missing partitions.")
-                    end
-
-                    -- Find AXVB partition
-                    local nVbIdx, tVbPart = oRDB.findByType(tRdb, oRDB.FS_AXVB)
-                    if tVbPart then
-                        g_nAxvbOffset = tVbPart.startSector
-                        g_nAxvbSize   = tVbPart.sizeSectors
-                        kprint("ok", "[AXVB] Verified Boot partition found at sector " .. g_nAxvbOffset)
-                    else
-                        kprint("warn", "[AXVB] No Verified Boot partition — using in-RAM hashes")
-                    end
-                end
-            end
-        end)
-    end
-    fKblAutoProvision()
-end
-
--- =============================================
 -- CHECK FOR PREVIOUS CRASH
 -- =============================================
 do
@@ -5548,7 +5198,6 @@ local g_tSyscallProfiler = {
 local g_oGoldenImage = nil
 local g_oKiqgr       = nil
 
---[[
 do
     -- Load Golden Image subsystem
     local sGiCode = primitive_load("/lib/golden_image.lua")
@@ -5646,7 +5295,6 @@ do
         kprint("warn", "KIQGR unavailable (needs EXSi + SHA-256)")
     end
 end
---]]
 
 -- Initialize PatchGuard with FULL monitoring data
 if g_oPatchGuard then
@@ -5722,34 +5370,6 @@ if g_oPatchGuard then
         end
     end
 
-    local fPgAxvbVerify = nil
-    if g_nAxvbOffset and g_oSha256Lib then
-        g_oVerifiedBoot = __load_verified_boot()
-        if g_oVerifiedBoot then
-            local oDrv = raw_component.proxy(boot_drive_addr)
-            local ss = oDrv.getSectorSize()
-            local tVbDisk = {
-                sectorSize = ss,
-                readSector = function(n) return oDrv.readSector(g_nAxvbOffset + n + 1) end,
-            }
-            -- Read and cache AXVB header once (512 bytes)
-            g_tAxvbHdrCache = g_oVerifiedBoot.ReadHeader(tVbDisk, 0)
-
-            -- Compute machine binding for FPE decryption
-            local sVbBinding = ""
-            pcall(function()
-                sVbBinding = g_oSha256Lib.digest(raw_computer.address())
-            end)
-
-            fPgAxvbVerify = function(sPath, sContent)
-                return g_oVerifiedBoot.Verify(
-                    tVbDisk, 0, sPath, sContent,
-                    g_oSha256Lib, sVbBinding, g_tAxvbHdrCache)
-            end
-            kprint("ok", "[PG] AXVB file verification function ready (zero-RAM hashes)")
-        end
-    end
-
     g_oPatchGuard.Initialize({
         tSyscallTable     = kernel.tSyscallTable,
         tSyscallOverrides = kernel.tSyscallOverrides,
@@ -5777,21 +5397,23 @@ if g_oPatchGuard then
             local bOk, nMtime = pcall(g_oPrimitiveFs.lastModified, sPath)
             return bOk and nMtime or nil
         end,
+        -- v3 additions:
         oSha256           = g_oSha256Lib,
         sXorKey           = sPgXorKey,
         tSyscallProfiler  = g_tSyscallProfiler,
-        fAxvbVerify       = fPgAxvbVerify,
-        -- DISABLED (for v0.83 only): KIQGR and golden image
-        oKiqgr            = nil,
-        hKiqgrEnclave     = nil,
-        fCallEnclave      = nil,
-        oGoldenImage      = nil,
-        fRevertFile       = nil,
+        oKiqgr         = g_oKiqgr,
+        hKiqgrEnclave  = g_oKiqgr and g_oKiqgr.GetHandle() or nil,
+        fCallEnclave   = g_oExsi and function(hEnc, sMethod, ...)
+            return g_oExsi.CallEnclave(0, hEnc, sMethod, ...)
+        end or nil,
+        oGoldenImage   = g_oGoldenImage,
+        fRevertFile    = g_oGoldenImage and function(sPath)
+            return g_oGoldenImage.Revert(sPath)
+        end or nil,
     })
-    kprint("ok", "PatchGuard initialized (" ..
-        (fPgAxvbVerify and "AXVB disk-based" or "in-RAM fallback") ..
-        " verification)")
+    kprint("ok", "PatchGuard v3 snapshot taken — arming deferred to post-boot")
 end
+
 
 -- =============================================
 -- COMPREHENSIVE SECURITY AUDIT AT BOOT
@@ -5989,128 +5611,6 @@ do
         end
     end)
 end
-
-kernel.tSyscallTable["ab_mark_good"] = {
-    func = function(nPid)
-        if not boot_ab_present or not boot_bc_offset then
-            return true  -- single-slot, always good
-        end
-        local oDrv = raw_component.proxy(boot_drive_addr)
-        if not oDrv then return false, "no drive" end
-        local sBC = oDrv.readSector(boot_bc_offset + 1)
-        if not sBC or sBC:sub(1, 4) ~= "AXBC" then return false, "bad AXBC" end
-
-        local nSlot = sBC:byte(6) or 0
-        -- Mark active slot as good (0), reset attempt counter
-        local nNewA = (nSlot == 0) and 0 or sBC:byte(7)
-        local nNewB = (nSlot == 1) and 0 or sBC:byte(8)
-        local sNew = sBC:sub(1, 6)
-            .. string.char(nNewA)
-            .. string.char(nNewB)
-            .. w32(0)          -- reset boot attempts
-            .. sBC:sub(13)
-        oDrv.writeSector(boot_bc_offset + 1, sNew)
-        kprint("ok", "[A/B] Slot " .. (nSlot == 0 and "a" or "b") ..
-            " marked GOOD (boot verified)")
-        return true
-    end,
-    allowed_rings = {0, 1},
-}
-
-kernel.tSyscallTable["ab_get_slot"] = {
-    func = function(nPid)
-        if not boot_ab_present then return nil end
-        return boot_slot  -- "a" or "b"
-    end,
-    allowed_rings = {0, 1, 2, 2.5, 3},
-}
-
-kernel.tSyscallTable["ab_set_slot_state"] = {
-    func = function(nPid, sSlot, nState)
-        if not boot_ab_present or not boot_bc_offset then
-            return false, "no AXBC"
-        end
-        local oDrv = raw_component.proxy(boot_drive_addr)
-        local sBC = oDrv.readSector(boot_bc_offset + 1)
-        if not sBC or sBC:sub(1, 4) ~= "AXBC" then return false end
-        local nOff = (sSlot == "a") and 7 or 8
-        sBC = sBC:sub(1, nOff - 1) .. string.char(nState) .. sBC:sub(nOff + 1)
-        oDrv.writeSector(boot_bc_offset + 1, sBC)
-        return true
-    end,
-    allowed_rings = {0, 1},
-}
-
-kernel.tSyscallTable["ab_switch_slot"] = {
-    func = function(nPid)
-        if not boot_ab_present or not boot_bc_offset then
-            return false, "no AXBC"
-        end
-        local oDrv = raw_component.proxy(boot_drive_addr)
-        local sBC = oDrv.readSector(boot_bc_offset + 1)
-        if not sBC or sBC:sub(1, 4) ~= "AXBC" then return false end
-        local nCur = sBC:byte(6) or 0
-        local nNew = 1 - nCur
-        sBC = sBC:sub(1, 5) .. string.char(nNew) .. sBC:sub(7)
-        -- Reset boot attempts
-        sBC = sBC:sub(1, 8) .. "\0\0\0\0" .. sBC:sub(13)
-        oDrv.writeSector(boot_bc_offset + 1, sBC)
-        kprint("ok", "[A/B] Switched to slot " .. (nNew == 0 and "a" or "b"))
-        return true
-    end,
-    allowed_rings = {0, 1},
-}
-
-kernel.tSyscallTable["axvb_rebuild"] = {
-    func = function(nPid)
-        if not g_bAxfsRoot or not g_nAxvbOffset or not g_oSha256Lib then
-            return nil, "AXVB not available"
-        end
-        local oDrv = raw_component.proxy(boot_drive_addr)
-        local ss = oDrv.getSectorSize()
-        local tVbDisk = {
-            sectorSize = ss,
-            readSector = function(n) return oDrv.readSector(g_nAxvbOffset + n + 1) end,
-            writeSector = function(n, d)
-                d = d or ""; if #d < ss then d = d .. string.rep("\0", ss - #d) end
-                return oDrv.writeSector(g_nAxvbOffset + n + 1, d:sub(1, ss))
-            end,
-        }
-        local sBinding = g_oSha256Lib.digest(raw_computer.address())
-
-        -- Hash all critical files
-        local tCritical = {
-            "/kernel.lua", "/lib/pipeline_manager.lua",
-            "/bin/init.lua", "/etc/passwd.lua",
-            "/system/dkms.lua", "/lib/ob_manager.lua",
-            "/lib/ke_ipc.lua", "/lib/preempt.lua",
-            "/sys/security/patchguard.lua", "/sys/security/hvci.lua",
-            "/drivers/tty.sys.lua", "/bin/sh.lua",
-        }
-        local tFiles = {}
-        for _, sPath in ipairs(tCritical) do
-            local sContent = primitive_load(sPath)
-            if sContent and #sContent > 0 then
-                tFiles[#tFiles + 1] = {
-                    sPath = sPath,
-                    sContentHash = g_oSha256Lib.digest(sContent),
-                    nSize = #sContent,
-                }
-            end
-        end
-
-        local oVB = __load_verified_boot()
-        if not oVB then return nil, "Cannot load verified_boot module" end
-
-        local bOk, tInfo = oVB.Build(tVbDisk, 0, g_nAxvbSize, tFiles, g_oSha256Lib, sBinding)
-        if bOk then
-            g_tAxvbHdrCache = oVB.ReadHeader(tVbDisk, 0)
-            kprint("ok", "[AXVB] Rebuilt: " .. tInfo.nEntries .. " files hashed")
-        end
-        return bOk, tInfo
-    end,
-    allowed_rings = {0, 1},
-}
 
 -- ==========================================
 -- OLR SYSCALLS

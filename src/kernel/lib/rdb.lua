@@ -6,8 +6,8 @@
 -- Self-describing, checksummed, linked-list partitions.
 -- Extended fields in bytes 96-255 of each partition block
 -- are marked with "AXPX" magic and carry:
---  visibility, encryption state, boot chain role,
---  content hash, machine binding, encrypted key material.
+--   visibility, encryption state, boot chain role,
+--   content hash, machine binding, encrypted key material.
 --
 -- Standard Amiga RDB parsers ignore bytes 96+, so these
 -- extensions are transparent to non-AxisOS tools.
@@ -35,6 +35,15 @@ RDB.FS_RAW       = 0x00000000
 RDB.FS_AXFS1     = 0x41584631  -- "AXF1"
 RDB.FS_AXFS2     = 0x41584632  -- "AXF2"
 RDB.FS_AXEFI     = 0x41584546  -- "AXEF"
+RDB.FS_AXOLR     = 0x41584F4C  -- "AXOL" Owner Lock Region
+RDB.FS_AXKSR     = 0x41584B53  -- "AXKS" Kernel State Region
+RDB.FS_AXKBL     = 0x41584B42  -- "AXKB" Kernel Bootloader
+RDB.FS_AXVB      = 0x41585642  -- "AXVB" Verified Boot
+RDB.FS_AXBC      = 0x41584243  -- "AXBC" Boot Control
+RDB.FS_AXSN      = 0x4158534E  -- "AXSN" Snapshot Store
+RDB.FS_AXRC      = 0x41585243  -- "AXRC" Recovery Environment
+RDB.FS_AXMD      = 0x41584D44  -- "AXMD" Metadata Store
+
 RDB.FS_FAT       = 0x46415400  -- "FAT\0"
 RDB.FS_SWAP      = 0x53575000  -- "SWP\0"
 
@@ -59,11 +68,17 @@ RDB.ENC_XOR_HMAC   = 1   -- XOR with HMAC-SHA256 keystream
 RDB.ENC_DATA_CARD  = 2   -- OC data card encrypt() (Tier 2+)
 
 -- @RDB::Partition boot chain roles
-RDB.ROLE_DATA      = 0
+RDB.ROLE_DATA       = 0
 RDB.ROLE_EFI_STAGE3 = 1
-RDB.ROLE_RECOVERY  = 2
-RDB.ROLE_SWAP      = 3
-RDB.ROLE_AXFS_ROOT = 4
+RDB.ROLE_RECOVERY   = 2
+RDB.ROLE_SWAP       = 3
+RDB.ROLE_AXFS_ROOT  = 4
+RDB.ROLE_KBL        = 5   -- Kernel Bootloader (fastboot-like recovery shell)
+RDB.ROLE_VERIFIED_BOOT = 6
+RDB.ROLE_BOOT_CONTROL  = 7
+RDB.ROLE_SNAPSHOT      = 8
+RDB.ROLE_RECOVERY_ENV  = 9
+RDB.ROLE_METADATA      = 10
 
 -- @RDB::Partition integrity modes
 RDB.INTEGRITY_NONE     = 0
@@ -288,7 +303,7 @@ local function _unpackPart(s)
 end
 
 -- =============================================
--- PUBLIC: WRITE / READ (unchanged API, extended internals)
+-- PUBLIC: WRITE / READ
 -- =============================================
 
 function RDB.write(tDisk, tRdb)
@@ -495,7 +510,61 @@ function RDB.fsTypeName(nType)
   elseif nType == RDB.FS_FAT then return "FAT"
   elseif nType == RDB.FS_SWAP then return "Swap"
   elseif nType == RDB.FS_RAW then return "Raw"
+  elseif nType == RDB.FS_AXKBL then return "AXKBL"
+  elseif nType == RDB.FS_AXKSR then return "AXKSR"
+  elseif nType == RDB.FS_AXOLR then return "AXOLR"
+  elseif nType == RDB.FS_AXVB then return "AXVB"
+  elseif nType == RDB.FS_AXBC then return "AXBC"
+  elseif nType == RDB.FS_AXSN then return "AXSN"
+  elseif nType == RDB.FS_AXRC then return "AXRC"
+  elseif nType == RDB.FS_AXMD then return "AXMD"
   else return string.format("0x%08X", nType) end
+end
+
+function RDB.validateBootRequirements(tRdb)
+    if not tRdb or not tRdb.partitions then
+        return {"RDB_MISSING"}
+    end
+
+    local bHasKbl = false
+    local bHasKsr = false
+    local nKblSize = 0
+    local nKsrSize = 0
+
+    for _, p in ipairs(tRdb.partitions) do
+        if p.fsType == RDB.FS_AXKBL then
+            bHasKbl = true
+            nKblSize = p.sizeSectors
+        end
+        if p.fsType == RDB.FS_AXKSR then
+            bHasKsr = true
+            nKsrSize = p.sizeSectors
+        end
+    end
+
+    local tMissing = {}
+    if not bHasKbl then
+        tMissing[#tMissing + 1] = "KBL (Kernel Bootloader)"
+    elseif nKblSize < 128 then
+        tMissing[#tMissing + 1] = "KBL too small (" .. nKblSize .. " < 128 sectors)"
+    end
+    if not bHasKsr then
+        tMissing[#tMissing + 1] = "KSR (Kernel State Region)"
+    elseif nKsrSize < 32 then
+        tMissing[#tMissing + 1] = "KSR too small (" .. nKsrSize .. " < 32 sectors)"
+    end
+
+    if #tMissing > 0 then return tMissing end
+    return nil
+end
+
+--- Find partition by fsType
+function RDB.findByType(tRdb, nFsType)
+    if not tRdb then return nil end
+    for i, p in ipairs(tRdb.partitions) do
+        if p.fsType == nFsType then return i, p end
+    end
+    return nil
 end
 
 return RDB

@@ -17,7 +17,7 @@ local hWin = oWm.createWindow(sUser .. "@" .. sHost .. " — Terminal",
     W_CW, W_CH, { nX = 3, nY = 2, nZ = 200 })
 if not hWin then return end
 
--- State 
+--  State 
 
 local tLines    = {}
 local nScrollY  = 0
@@ -63,7 +63,7 @@ local function printOut(s, fg)
     end
 end
 
--- Command resolution 
+--  Command resolution 
 
 local function findCmd(cmd)
     for sDir in sPath:gmatch("[^:]+") do
@@ -74,7 +74,7 @@ local function findCmd(cmd)
     return nil
 end
 
--- Built-in commands 
+--  Built-in commands 
 
 local tBuiltins = {}
 
@@ -112,7 +112,7 @@ function tBuiltins.cat(args)
     else printOut("cat: " .. sP .. ": not found", C_ERR) end
 end
 
--- Execute external command 
+--  Execute external command 
 
 local function execCmd(sCmd, tArgs)
     local sExecPath = findCmd(sCmd)
@@ -138,7 +138,7 @@ local function execCmd(sCmd, tArgs)
     end
 end
 
--- Parse and run 
+--  Parse and run 
 
 local function parseLine(sLine)
     local tA = {}
@@ -165,7 +165,7 @@ local function runCommand(sLine)
     end
 end
 
--- Welcome 
+--  Welcome 
 
 addLine("AxisOS Terminal", C_CMD)
 addLine("Type 'help' for commands, 'exit' to close.", 0x555577)
@@ -178,7 +178,7 @@ end
 
 render()
 
--- Main loop 
+--  Main loop 
 
 while bRunning do
     local evt = oWm.pollEvent(hWin)

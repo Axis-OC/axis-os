@@ -10,9 +10,9 @@ local oHvci = nil
 
 -- Signature block format embedded in driver files:
 -- Last lines of the file contain:
---  --@SIGNATURE:base64_encoded_ecdsa_signature
---  --@SIGNER:fingerprint_of_signing_key
---  --@HASH:sha256_of_code_without_signature_block
+--   --@SIGNATURE:base64_encoded_ecdsa_signature
+--   --@SIGNER:fingerprint_of_signing_key
+--   --@HASH:sha256_of_code_without_signature_block
 
 local g_oCrypto = nil
 local g_tApprovedKeys = {}

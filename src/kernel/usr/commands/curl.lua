@@ -3,13 +3,13 @@
 -- HTTP client tool
 --
 -- Usage:
---  curl <url>                     GET request
---  curl -X POST -d 'data' <url>  POST with body
---  curl -H "Key: Val" <url>      Custom header
---  curl -v <url>                 Verbose (show headers)
---  curl -o file.txt <url>        Save to file
---  curl -s <url>                 Silent (body only)
---  curl -I <url>                 Headers only (HEAD)
+--   curl <url>                     GET request
+--   curl -X POST -d 'data' <url>  POST with body
+--   curl -H "Key: Val" <url>      Custom header
+--   curl -v <url>                 Verbose (show headers)
+--   curl -o file.txt <url>        Save to file
+--   curl -s <url>                 Silent (body only)
+--   curl -I <url>                 Headers only (HEAD)
 --
 
 local http = require("http")

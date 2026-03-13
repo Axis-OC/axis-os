@@ -98,7 +98,7 @@ local function fDeviceControl(d, i)
     local sMethod = i.tParameters.sMethod
     local tArgs   = i.tParameters.tArgs or {}
 
-    -- Discovery 
+    --  Discovery 
 
     if sMethod == "scan" then
         scanAll()
@@ -136,7 +136,7 @@ local function fDeviceControl(d, i)
         oKMD.DkCompleteRequest(i, tStatus.STATUS_SUCCESS, g_tFirst[tArgs[1]])
         return
 
-    -- Console Operations 
+    --  Console Operations 
 
     elseif sMethod == "console_column" then
         local proxy = getProxy("rbmk_console", tArgs[3])
@@ -197,7 +197,7 @@ local function fDeviceControl(d, i)
         oKMD.DkCompleteRequest(i, tStatus.STATUS_SUCCESS, safeInvoke(proxy, "pressAZ5"))
         return
 
-    -- Crane Operations 
+    --  Crane Operations 
 
     elseif sMethod == "crane_move" then
         local proxy = getProxy("rbmk_crane", tArgs[2])
@@ -229,7 +229,7 @@ local function fDeviceControl(d, i)
         oKMD.DkCompleteRequest(i, tStatus.STATUS_SUCCESS, safeInvoke(proxy, "getXenonPoison"))
         return
 
-    -- Generic Component Invoke 
+    --  Generic Component Invoke 
 
     elseif sMethod == "comp_invoke" then
         local sType = tArgs[1]
@@ -247,7 +247,7 @@ local function fDeviceControl(d, i)
         oKMD.DkCompleteRequest(i, tStatus.STATUS_SUCCESS, r1)
         return
 
-    -- Shorthand Info Queries 
+    --  Shorthand Info Queries 
 
     elseif sMethod == "fuel_info" then
         local proxy = getProxy("rbmk_fuel_rod", tArgs[1])

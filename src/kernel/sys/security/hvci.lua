@@ -413,6 +413,11 @@ function oHvci.QuarantineDriver(sDriverName)
         syscall("reg_flush_hive", "DRV")
     end)
 
+    -- Write quarantine to KSR (tamper-resistant, survives registry edit)
+    pcall(function()
+        syscall("ksr_extend_quarantine", sDriverName, 3)
+    end)
+
     syscall("kernel_log", string.format(
         "[HVCI] ╔══ DRIVER QUARANTINED ══╗"))
     syscall("kernel_log", string.format(
@@ -434,6 +439,12 @@ function oHvci.IsQuarantined(sDriverName)
             "@VT\\DRV\\" .. sDriverName, "Quarantined")
         bQ = (v == true or v == "true")
     end)
+    
+    if not bQ then
+        pcall(function()
+            bQ = syscall("ksr_is_quarantined", sDriverName)
+        end)
+    end
     return bQ
 end
 

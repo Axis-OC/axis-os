@@ -12,7 +12,7 @@ local oCrypto = require("crypto")
 local oAttest = {}
 
 -- ══════════════════════════════════════════
--- MACHINE BINDING (hardware fingerprint)
+--  MACHINE BINDING (hardware fingerprint)
 -- ══════════════════════════════════════════
 function oAttest.computeBinding()
     -- Deterministic fingerprint from hardware components
@@ -35,7 +35,7 @@ function oAttest.computeBinding()
 end
 
 -- ══════════════════════════════════════════
--- KERNEL HASH
+--  KERNEL HASH
 -- ══════════════════════════════════════════
 function oAttest.hashKernel(sKernelPath)
     sKernelPath = sKernelPath or "/init.lua"
@@ -47,7 +47,7 @@ function oAttest.hashKernel(sKernelPath)
 end
 
 -- ══════════════════════════════════════════
--- MANIFEST (hash all critical files)
+--  MANIFEST (hash all critical files)
 -- ══════════════════════════════════════════
 function oAttest.generateManifest(tPaths)
     -- Default critical paths if none specified
@@ -135,7 +135,7 @@ function oAttest.verifyManifest(manifest)
 end
 
 -- ══════════════════════════════════════════
--- REMOTE ATTESTATION (talk to server)
+--  REMOTE ATTESTATION (talk to server)
 -- ══════════════════════════════════════════
 function oAttest.attest(oPkiCfg)
     local inet = component.internet
@@ -252,7 +252,7 @@ function oAttest.attest(oPkiCfg)
 end
 
 -- ══════════════════════════════════════════
--- SAVE/LOAD ATTESTATION STATE
+--  SAVE/LOAD ATTESTATION STATE
 -- ══════════════════════════════════════════
 function oAttest.saveState(tState)
     local f = io.open("/etc/attestation.state", "w")

@@ -4,9 +4,9 @@
 -- v2: @RDB::Partition extension display
 --
 -- Usage:
---  parted                       Scan for drives
---  parted <device>              Open device interactively
---  parted <device> install <p>  Direct install (non-interactive)
+--   parted                       Scan for drives
+--   parted <device>              Open device interactively
+--   parted <device> install <p>  Direct install (non-interactive)
 --
 
 local fs  = require("filesystem")
@@ -956,7 +956,7 @@ local function cmdInstall(sPart)
         ["/tmp"]=true, ["/log"]=true, ["/vbl"]=true, ["/dev"]=true,
     }
 
-    -- Phase 1: Enumerate 
+    --  Phase 1: Enumerate 
     print(C.C .. "  Scanning filesystem..." .. C.R)
     yieldFlush()
 
@@ -998,7 +998,7 @@ local function cmdInstall(sPart)
     if not sConf or sConf:lower() ~= "y" then print("  Aborted."); return end
     print("")
 
-    -- Phase 2: Pre-create directories 
+    --  Phase 2: Pre-create directories 
     for _, sDir in ipairs({
         "/bin", "/etc", "/lib", "/drivers", "/system",
         "/usr", "/usr/commands", "/home", "/tmp", "/boot",
@@ -1016,7 +1016,7 @@ local function cmdInstall(sPart)
     yieldFlush()
     yieldFlush()
 
-    -- Phase 3: Copy files 
+    --  Phase 3: Copy files 
     local nBarW = 30
     local nStartTime = computer.uptime()
 
@@ -1027,7 +1027,7 @@ local function cmdInstall(sPart)
     local nProgressUpdate = 0
 
     for i, ent in ipairs(tEntries) do
-        -- Progress bar (every 3rd entry to reduce TTY IPC) 
+        --  Progress bar (every 3rd entry to reduce TTY IPC) 
         nProgressUpdate = nProgressUpdate + 1
         if nProgressUpdate >= 3 or i == nTotal then
             nProgressUpdate = 0
@@ -1103,7 +1103,7 @@ local function cmdInstall(sPart)
             nFilesSincePurge = nFilesSincePurge + 1
         end
 
-        -- Memory management 
+        --  Memory management 
         if nFilesSincePurge >= PURGE_EVERY then
             nFilesSincePurge = 0
             -- purgeCache: flush dirty data, then clear all caches.
@@ -1145,7 +1145,7 @@ local function cmdInstall(sPart)
     end
     print(C.C .. "  " .. string.rep("=", 46) .. C.R)
 
-    -- Show ALL failed files at the end 
+    --  Show ALL failed files at the end 
     if #tFailedFiles > 0 then
         print("")
         print(C.E .. "  Failed files (" .. #tFailedFiles .. "):" .. C.R)

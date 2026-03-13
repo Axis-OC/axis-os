@@ -4,10 +4,10 @@
 -- "insmod - because hot-plugging drivers at runtime is totally safe"
 --
 -- Usage:
---  insmod <path>              Load a driver from explicit path
---  insmod -s <component>      Scan and load driver for component type
---  insmod -v <path>           Verbose mode (extra debug output)
---  insmod -i <path>           Info-only mode (inspect without loading)
+--   insmod <path>              Load a driver from explicit path
+--   insmod -s <component>      Scan and load driver for component type
+--   insmod -v <path>           Verbose mode (extra debug output)
+--   insmod -i <path>           Info-only mode (inspect without loading)
 --
 
 local fs = require("filesystem")

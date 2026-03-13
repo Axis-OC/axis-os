@@ -2,7 +2,7 @@
 -- /lib/thread.lua
 -- Multithreading library for AxisOS Ring 3.
 -- v2: Proper join, kill, status, and detach.
---    Threads run cooperatively in user-space via the kernel scheduler.
+--     Threads run cooperatively in user-space via the kernel scheduler.
 --
 
 local oSys = require("syscall")

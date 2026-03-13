@@ -4,10 +4,10 @@
 -- v2: Persistent hive files on disk, lazy writeback, transaction logging.
 --
 -- Hive files stored in /etc/registry/:
---  SYS.hive   — @VT\SYS  (system config, boot params)
---  DEV.hive   — @VT\DEV  (device metadata)
---  DRV.hive   — @VT\DRV  (driver configuration)
---  USER.hive  — @VT\USER (user preferences)
+--   SYS.hive   — @VT\SYS  (system config, boot params)
+--   DEV.hive   — @VT\DEV  (device metadata)
+--   DRV.hive   — @VT\DRV  (driver configuration)
+--   USER.hive  — @VT\USER (user preferences)
 --
 -- Changes are written lazily: only on explicit flush or shutdown.
 -- A dirty flag per hive tracks whether disk write is needed.
@@ -49,7 +49,7 @@ end
 local g_tRoot = fNewNode("@VT")
 
 -- =============================================
--- PATH NAVIGATION (unchanged)
+-- PATH NAVIGATION
 -- =============================================
 
 local function fParsePath(sPath)

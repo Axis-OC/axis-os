@@ -193,7 +193,6 @@ while bRunning do
                 end
 
             elseif c == "c" then
-                -- New pane (full width, split from bottom)
                 splitHorizontal()
 
             elseif c == "d" then

@@ -3,23 +3,23 @@
 -- AXFS v2 multi-tool: partition, format, mount, read/write, install, flash
 --
 -- Usage:
---  axfs scan                              List block devices
---  axfs init <dev>                        Write empty RDB
---  axfs parts <dev>                       Show partitions
---  axfs addpart <dev> <name> [sectors]    Create partition (0/omit = all free)
---  axfs rmpart <dev> <index>              Remove partition
---  axfs format <dev> <part> [label]       Format with AXFS v2
---  axfs info <dev> <part>                 FS info
---  axfs ls <dev> <part> [path]            List directory
---  axfs cat <dev> <part> <path>           Read file
---  axfs write <dev> <part> <path> <data>  Write file
---  axfs mkdir <dev> <part> <path>         Create directory
---  axfs rm <dev> <part> <path>            Remove file/dir
---  axfs stat <dev> <part> <path>          Inode info
---  axfs import <dev> <part> <src> <dst>   Managed FS -> AXFS
---  axfs export <dev> <part> <src> <dst>   AXFS -> Managed FS
---  axfs install <dev> <part>              Copy full OS tree to AXFS
---  axfs flash [boot_file]                 Flash EEPROM (Ring 0-2 only)
+--   axfs scan                              List block devices
+--   axfs init <dev>                        Write empty RDB
+--   axfs parts <dev>                       Show partitions
+--   axfs addpart <dev> <name> [sectors]    Create partition (0/omit = all free)
+--   axfs rmpart <dev> <index>              Remove partition
+--   axfs format <dev> <part> [label]       Format with AXFS v2
+--   axfs info <dev> <part>                 FS info
+--   axfs ls <dev> <part> [path]            List directory
+--   axfs cat <dev> <part> <path>           Read file
+--   axfs write <dev> <part> <path> <data>  Write file
+--   axfs mkdir <dev> <part> <path>         Create directory
+--   axfs rm <dev> <part> <path>            Remove file/dir
+--   axfs stat <dev> <part> <path>          Inode info
+--   axfs import <dev> <part> <src> <dst>   Managed FS -> AXFS
+--   axfs export <dev> <part> <src> <dst>   AXFS -> Managed FS
+--   axfs install <dev> <part>              Copy full OS tree to AXFS
+--   axfs flash [boot_file]                 Flash EEPROM (Ring 0-2 only)
 --
 -- <part> can be a numeric index (0,1,2..) or a partition name (DH0, SYSTEM..)
 --

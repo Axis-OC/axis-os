@@ -3,10 +3,10 @@
 -- Read system logs (ringfs live buffer or .vbl files)
 --
 -- Usage:
---  logread               Live ring buffer
---  logread -f <file>     Read a .vbl/.log file
---  logread -l            List available log files
---  logread -a            All .vbl files concatenated
+--   logread               Live ring buffer
+--   logread -f <file>     Read a .vbl/.log file
+--   logread -l            List available log files
+--   logread -a            All .vbl files concatenated
 --
 
 local fs = require("filesystem")

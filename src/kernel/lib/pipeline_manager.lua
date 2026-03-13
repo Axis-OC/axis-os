@@ -701,6 +701,8 @@ else
     process_autoload()
 end
 
+pcall(function() syscall("ab_mark_good") end)
+
 -- ==========================================
 -- NETWORK INITIALIZATION
 -- ==========================================

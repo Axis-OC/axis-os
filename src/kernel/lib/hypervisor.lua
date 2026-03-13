@@ -5,20 +5,20 @@
 -- Provides tamper-evident, read-only protection for kernel data structures.
 --
 -- Protection model:
---  1. freeze(t)   → empty proxy; __index reads from sealed copy,
---                    __newindex blocks writes, __metatable hides the real mt
---  2. snapshot(t)  → structural fingerprint (function identities + key sets)
---  3. verify(t, s) → compare current state against snapshot
+--   1. freeze(t)   → empty proxy; __index reads from sealed copy,
+--                     __newindex blocks writes, __metatable hides the real mt
+--   2. snapshot(t)  → structural fingerprint (function identities + key sets)
+--   3. verify(t, s) → compare current state against snapshot
 --
 -- Why this works:
---  - Ring 2.5+ sandboxes have NO rawset/rawget (removed from sandbox)
---  - Ring 2 HAS rawset, but rawset(proxy, k, v) only adds to the proxy
---    table, NOT to the sealed backing copy — reads still go through
---    __index → frozen data.  PatchGuard detects proxy pollution.
---  - __metatable = "hypervisor_sealed" blocks getmetatable(proxy)
---    and makes setmetatable(proxy, ...) error.
---  - The frozen data lives in a closure upvalue — no code path
---    reaches it without the original table reference (held only by Ring 0).
+--   - Ring 2.5+ sandboxes have NO rawset/rawget (removed from sandbox)
+--   - Ring 2 HAS rawset, but rawset(proxy, k, v) only adds to the proxy
+--     table, NOT to the sealed backing copy — reads still go through
+--     __index → frozen data.  PatchGuard detects proxy pollution.
+--   - __metatable = "hypervisor_sealed" blocks getmetatable(proxy)
+--     and makes setmetatable(proxy, ...) error.
+--   - The frozen data lives in a closure upvalue — no code path
+--     reaches it without the original table reference (held only by Ring 0).
 --
 
 local HV = {}

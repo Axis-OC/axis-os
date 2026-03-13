@@ -4,8 +4,8 @@
 -- v2: --efi-prebuild creates encrypted EFI + AXFS partitions.
 --
 -- Usage:
---  axfs-switch <device>                     AXFS only
---  axfs-switch <device> --efi-prebuild      EFI + AXFS (SecureBoot ready)
+--   axfs-switch <device>                     AXFS only
+--   axfs-switch <device> --efi-prebuild      EFI + AXFS (SecureBoot ready)
 --
 
 local fs  = require("filesystem")
@@ -221,7 +221,7 @@ if bEfiPrebuild then
   -- EFI MODE: Create AXEFI + AXFS partitions
   -- =============================================
 
-  local EFI_SECTORS = 32  -- 32 sectors for EFI (16KB at 512B/sector)
+  local EFI_SECTORS = 48  -- 32 sectors for EFI (16KB at 512B/sector)
   local nEfiStart   = nPartStart
   local nAxfsStart  = nEfiStart + EFI_SECTORS
   local nAxfsSize   = tI.sectorCount - nAxfsStart
@@ -448,7 +448,7 @@ if bEfiPrebuild then
 
 else
   -- =============================================
-  -- STANDARD MODE: Single AXFS partition (unchanged logic)
+  -- STANDARD MODE: Single AXFS partition
   -- =============================================
 
   local nPartSize = tI.sectorCount - nPartStart

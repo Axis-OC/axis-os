@@ -152,6 +152,8 @@ local g_fCallEnclave      = nil   -- function(hEnc, sMethod, ...) wrapper
 local g_oGoldenImage      = nil
 local g_fRevertFile       = nil   -- function(sPath) → bOk, sErr
 
+local g_fAxvbVerify       = nil   -- function(sPath, sContent) → true/false/nil
+
 -- =============================================
 -- HELPERS
 -- =============================================
@@ -405,11 +407,78 @@ local function fCheckOneFile(sPath, bSupercritical)
     if not g_fReadFile or not (g_oSha256 or g_fSha256) then return {} end
     local tV = {}
     local sExpHash = g_tFileHashSnap[sPath]
+
+    -- ════════════════════════════════════════════════
+    -- AXVB DISK-BASED VERIFICATION (preferred path)
+    -- Zero RAM cost: reads one sector from AXVB partition,
+    -- decrypts, compares. Hash never stored in memory.
+    -- ════════════════════════════════════════════════
+    if g_fAxvbVerify then
+        g_nTotalFileChecks = g_nTotalFileChecks + 1
+
+        -- Fast mtime check first
+        if g_fLastModified then
+            local nMtime = g_fLastModified(sPath)
+            if not nMtime then
+                tV[#tV + 1] = {
+                    t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
+                        or "KERNEL_MODULES_INTEGRITY_FAIL",
+                    d = sPath, e = "(tracked)", a = "(file missing)"
+                }
+                g_nTotalFileFails = g_nTotalFileFails + 1
+                return tV
+            end
+            if g_tMtimeCache[sPath] == nMtime then
+                g_nTotalFilePasses = g_nTotalFilePasses + 1
+                g_tFileLastChecked[sPath] = g_fUptime()
+                return tV
+            end
+        end
+
+        -- Full verification via AXVB partition
+        local sContent = g_fReadFile(sPath)
+        if not sContent then
+            tV[#tV + 1] = {
+                t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
+                    or "KERNEL_MODULES_INTEGRITY_FAIL",
+                d = sPath, e = "(tracked)", a = "(read failed)"
+            }
+            g_nTotalFileFails = g_nTotalFileFails + 1
+            return tV
+        end
+
+        g_fFlush()
+        local bMatch, sErr = g_fAxvbVerify(sPath, sContent)
+
+        if bMatch == nil and sErr == "not_tracked" then
+            -- File not in AXVB — skip
+            return tV
+        elseif bMatch == true then
+            g_nTotalFilePasses = g_nTotalFilePasses + 1
+            g_tFileLastChecked[sPath] = g_fUptime()
+            if g_fLastModified then
+                g_tMtimeCache[sPath] = g_fLastModified(sPath)
+            end
+        else
+            tV[#tV + 1] = {
+                t = bSupercritical and "KERNEL_INTEGRITY_HASH_FAIL"
+                    or "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
+                d = sPath, e = "(AXVB)", a = tostring(sErr)
+            }
+            g_nTotalFileFails = g_nTotalFileFails + 1
+        end
+
+        return tV
+    end
+
+    -- ════════════════════════════════════════════════
+    -- FALLBACK: In-RAM hash comparison (original path)
+    -- Used when AXVB partition is not available.
+    -- ════════════════════════════════════════════════
     if not sExpHash then return tV end
 
     g_nTotalFileChecks = g_nTotalFileChecks + 1
 
-    -- MTIME FAST PATH (unchanged)
     if g_fLastModified then
         local nMtime = g_fLastModified(sPath)
         if not nMtime then
@@ -429,106 +498,32 @@ local function fCheckOneFile(sPath, bSupercritical)
         end
     end
 
-    -- SLOW PATH: read + hash
     local sContent = g_fReadFile(sPath)
     if not sContent then
         tV[#tV + 1] = {
             t = bSupercritical and "KERNEL_INTEGRITY_UNRECOVERABLE_FAIL"
                 or "KERNEL_MODULES_INTEGRITY_FAIL",
-            d = sPath, e = sExpHash:sub(1, 24), a = "(file missing)"
+            d = sPath, e = sExpHash:sub(1, 24), a = "(read failed)"
         }
         g_nTotalFileFails = g_nTotalFileFails + 1
         return tV
     end
 
     g_fFlush()
-
-    -- ════════════════════════════════════════════════
-    -- KIQGR ENCLAVE VERIFICATION (preferred path)
-    -- Pass the file content to the enclave.  The enclave hashes
-    -- it internally and compares against its sealed upvalue hashes.
-    -- We never see the expected hash — only true/false.
-    -- ════════════════════════════════════════════════
-    local bKiqgrResult = nil
-    if g_oKiqgr and g_fCallEnclave and g_hKiqgrEnclave then
-        local bOk, sKiqgrErr = pcall(function()
-            bKiqgrResult = g_fCallEnclave(g_hKiqgrEnclave, "verify", sPath, sContent)
-        end)
-        if not bOk then bKiqgrResult = nil end  -- enclave error → fall through
-    end
-
-    local bHashMatch
-    if bKiqgrResult ~= nil then
-        -- Enclave gave us a definitive answer
-        bHashMatch = (bKiqgrResult == true)
-    else
-        -- Fallback: XOR-encrypted hash comparison (original mechanism)
-        local sCurHash = protectedHash(sContent)
-        bHashMatch = (sCurHash == sExpHash)
-    end
-
-    if not bHashMatch then
-        -- ════════════════════════════════════════════════
-        -- AUTO-REVERT: Attempt to restore from golden image
-        -- before reporting the violation.
-        -- ════════════════════════════════════════════════
-        local bReverted = false
-        if g_oGoldenImage and g_fRevertFile then
-            g_fLog(string.format(
-                "[PG] HASH MISMATCH detected: %s — attempting auto-revert...",
-                sPath))
-            local bRevOk, sRevErr = pcall(g_fRevertFile, sPath)
-            if bRevOk and sRevErr ~= false then
-                -- Re-verify after reversion
-                local sRevertedContent = g_fReadFile(sPath)
-                if sRevertedContent then
-                    local bReCheck
-                    if g_oKiqgr and g_fCallEnclave and g_hKiqgrEnclave then
-                        bReCheck = g_fCallEnclave(g_hKiqgrEnclave,
-                            "verify", sPath, sRevertedContent)
-                    else
-                        local sReHash = protectedHash(sRevertedContent)
-                        bReCheck = (sReHash == sExpHash)
-                    end
-                    if bReCheck then
-                        bReverted = true
-                        g_fLog(string.format(
-                            "[PG] AUTO-REVERT SUCCESS: %s restored to golden image",
-                            sPath))
-                        g_nTotalFilePasses = g_nTotalFilePasses + 1
-                        g_tFileLastChecked[sPath] = g_fUptime()
-                        if g_fLastModified then
-                            g_tMtimeCache[sPath] = g_fLastModified(sPath)
-                        end
-                    else
-                        g_fLog(string.format(
-                            "[PG] AUTO-REVERT FAILED: %s still mismatches after revert",
-                            sPath))
-                    end
-                end
-            else
-                g_fLog(string.format(
-                    "[PG] AUTO-REVERT ERROR: %s — %s",
-                    sPath, tostring(sRevErr)))
-            end
-        end
-
-        if not bReverted then
-            tV[#tV + 1] = {
-                t = bSupercritical and "KERNEL_INTEGRITY_HASH_FAIL"
-                    or "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
-                d = sPath, e = sExpHash:sub(1, 24),
-                a = "(mismatch" ..
-                    (bKiqgrResult ~= nil and ", KIQGR verified" or "") .. ")"
-            }
-            g_nTotalFileFails = g_nTotalFileFails + 1
-        end
-    else
+    local sCurHash = protectedHash(sContent)
+    if sCurHash == sExpHash then
         g_nTotalFilePasses = g_nTotalFilePasses + 1
         g_tFileLastChecked[sPath] = g_fUptime()
         if g_fLastModified then
             g_tMtimeCache[sPath] = g_fLastModified(sPath)
         end
+    else
+        tV[#tV + 1] = {
+            t = bSupercritical and "KERNEL_INTEGRITY_HASH_FAIL"
+                or "KERNEL_MODULES_INTEGRITY_HASH_FAIL",
+            d = sPath, e = sExpHash:sub(1, 24), a = sCurHash:sub(1, 24)
+        }
+        g_nTotalFileFails = g_nTotalFileFails + 1
     end
     return tV
 end
@@ -1029,131 +1024,15 @@ end
 local function handleViolations(tViolations)
     if #tViolations == 0 then return true end
 
-    -- ════════════════════════════════════════════════
-    -- PHASE 1: Classify violations as HEALABLE (file-based)
-    -- or CRITICAL (in-memory structures).
-    -- ════════════════════════════════════════════════
-
-    local tFileViols = {}
-    local tCritViols = {}
-
-    local tFileViolTypes = {
-        KERNEL_INTEGRITY_HASH_FAIL              = true,
-        KERNEL_MODULES_INTEGRITY_HASH_FAIL      = true,
-        KERNEL_INTEGRITY_UNRECOVERABLE_FAIL     = true,
-        KERNEL_MODULES_INTEGRITY_FAIL           = true,
-    }
-
-    for _, v in ipairs(tViolations) do
-        if tFileViolTypes[v.t] and v.d then
-            tFileViols[#tFileViols + 1] = v
-        else
-            tCritViols[#tCritViols + 1] = v
-        end
-    end
-
-    -- ════════════════════════════════════════════════
-    -- PHASE 2: Attempt to HEAL file violations via
-    -- golden image reversion.  Each file that reverts
-    -- successfully is removed from the violation list.
-    -- ════════════════════════════════════════════════
-
-    local nHealed = 0
-    if g_oGoldenImage and g_fRevertFile and #tFileViols > 0 then
-        g_fLog(string.format(
-            "[PG] Attempting to heal %d file violation(s) via golden image...",
-            #tFileViols))
-
-        for _, v in ipairs(tFileViols) do
-            local sPath = v.d
-            if sPath and g_oGoldenImage.HasGolden(sPath) then
-                local bRevOk, sRevErr = pcall(g_fRevertFile, sPath)
-                if bRevOk and sRevErr ~= false then
-                    -- Verify the revert actually fixed the hash
-                    local sContent = g_fReadFile(sPath)
-                    local bHashOk = false
-                    if sContent then
-                        if g_oKiqgr and g_fCallEnclave and g_hKiqgrEnclave then
-                            bHashOk = g_fCallEnclave(g_hKiqgrEnclave,
-                                "verify", sPath, sContent) == true
-                        else
-                            local sExpHash = g_tFileHashSnap[sPath]
-                            if sExpHash then
-                                bHashOk = (protectedHash(sContent) == sExpHash)
-                            end
-                        end
-                    end
-                    if bHashOk then
-                        nHealed = nHealed + 1
-                        g_fLog(string.format(
-                            "[PG] HEALED: %s reverted to golden image ✓", sPath))
-                        -- Update mtime cache so next check doesn't re-trigger
-                        if g_fLastModified then
-                            g_tMtimeCache[sPath] = g_fLastModified(sPath)
-                        end
-                    else
-                        g_fLog(string.format(
-                            "[PG] HEAL FAILED: %s revert did not fix hash", sPath))
-                    end
-                else
-                    g_fLog(string.format(
-                        "[PG] HEAL FAILED: %s — %s", sPath, tostring(sRevErr)))
-                end
-            else
-                g_fLog(string.format(
-                    "[PG] NO GOLDEN IMAGE for %s — cannot heal", sPath or "?"))
-            end
-        end
-    end
-
-    local nUnhealedFiles = #tFileViols - nHealed
-
-    -- ════════════════════════════════════════════════
-    -- PHASE 3: Determine outcome.
-    -- If ALL violations were healed, log and continue.
-    -- If any critical or unhealed violations remain, panic.
-    -- ════════════════════════════════════════════════
-
-    if #tCritViols == 0 and nUnhealedFiles == 0 then
-        g_fLog(string.format(
-            "[PG] ╔══ SELF-HEALING SUCCESS ══╗"))
-        g_fLog(string.format(
-            "[PG] ║  %d violation(s) healed    ║", nHealed))
-        g_fLog(string.format(
-            "[PG] ╚══════════════════════════╝"))
-        -- Do NOT increment g_nViolations — these were transient and fixed
-        return true
-    end
-
-    -- ════════════════════════════════════════════════
-    -- PHASE 4: Unrecoverable violations — PANIC
-    -- ════════════════════════════════════════════════
-
-    g_nViolations = g_nViolations + #tCritViols + nUnhealedFiles
+    g_nViolations = g_nViolations + #tViolations
 
     g_fLog("[PG] ╔══ INTEGRITY VIOLATION DETECTED ══╗")
-    g_fLog(string.format("[PG] ║  %d critical + %d unhealed file    ║",
-        #tCritViols, nUnhealedFiles))
-    g_fLog(string.format("[PG] ║  (%d healed, %d total)             ║",
-        nHealed, #tViolations))
+    g_fLog(string.format("[PG] ║  %d violation(s)                  ║", #tViolations))
     g_fLog("[PG] ╚══════════════════════════════════╝")
 
-    -- Build the combined violation list for the panic report
-    local tFinalViols = {}
-    for _, v in ipairs(tCritViols) do tFinalViols[#tFinalViols + 1] = v end
-    -- Add only the UNHEALED file violations
-    local nFileIdx = 0
-    for _, v in ipairs(tFileViols) do
-        nFileIdx = nFileIdx + 1
-        if nFileIdx > nHealed then
-            -- This one was NOT healed
-            tFinalViols[#tFinalViols + 1] = v
-        end
-    end
-
-    for i, v in ipairs(tFinalViols) do
+    for i, v in ipairs(tViolations) do
         g_fLog(string.format("[PG] VIOLATION [%d/%d] type=%s",
-            i, #tFinalViols, v.t))
+            i, #tViolations, v.t))
         g_fLog(string.format("[PG]   detail:   %s", v.d or "(none)"))
         g_fLog(string.format("[PG]   expected: %s", v.e or "N/A"))
         g_fLog(string.format("[PG]   actual:   %s", v.a or "N/A"))
@@ -1161,18 +1040,18 @@ local function handleViolations(tViolations)
 
     local tLines = {
         "CRITICAL_STRUCTURE_CORRUPTION",
-        string.format("PatchGuard: %d violation(s) at %.4f (%d healed, %d unrecoverable)",
-            #tFinalViols, g_fUptime(), nHealed, #tFinalViols),
+        string.format("PatchGuard: %d violation(s) at %.4f",
+            #tViolations, g_fUptime()),
     }
-    for i, v in ipairs(tFinalViols) do
+    for i, v in ipairs(tViolations) do
         if i > 8 then
-            tLines[#tLines + 1] = string.format("  ... and %d more", #tFinalViols - 8)
+            tLines[#tLines + 1] = string.format("  ... and %d more", #tViolations - 8)
             break
         end
         tLines[#tLines + 1] = string.format("  [%d] %s: %s", i, v.t, v.d or "?")
     end
 
-    g_fPanic(table.concat(tLines, "\n"), nil, tFinalViols)
+    g_fPanic(table.concat(tLines, "\n"), nil, tViolations)
     return false
 end
 
@@ -1218,6 +1097,7 @@ function PG.Initialize(tCfg)
     -- Golden Image reversion
     g_oGoldenImage  = tCfg.oGoldenImage
     g_fRevertFile   = tCfg.fRevertFile
+    g_fAxvbVerify   = tCfg.fAxvbVerify
 
     if g_oKiqgr and g_hKiqgrEnclave then
         g_fLog("[PG] KIQGR enclave attached — hash verification runs inside enclave")

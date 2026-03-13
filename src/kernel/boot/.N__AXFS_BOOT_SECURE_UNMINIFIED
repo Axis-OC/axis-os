@@ -2,7 +2,7 @@
 -- Three-stage: EEPROM → /boot/setup.lua → @RDB::EFI
 -- Fits 4KB after minification.
 
--- Synthesize bit32 if missing (Lua 5.3 without compat) 
+--  Synthesize bit32 if missing (Lua 5.3 without compat) 
 if not bit32 then
   bit32={}
   local s,f

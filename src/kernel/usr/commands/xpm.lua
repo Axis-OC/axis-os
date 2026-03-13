@@ -3,25 +3,25 @@
 -- xpm — Xen Package Manager for AxisOS
 --
 -- Syntax (Void/Arch hybrid):
---  xpm init                  Initialize local database
---  xpm config [key] [val]    View/edit configuration
---  xpm sync                  Sync package database
---  xpm install <pkg> [...]   Install package(s)
---  xpm remove <pkg> [...]    Remove package(s)
---  xpm search <term>         Search available packages
---  xpm list                  List installed packages
---  xpm info <pkg>            Show package details
---  xpm update                Re-download all installed packages
---  xpm sign <file>           Sign a package file (requires APPROVED key)
+--   xpm init                  Initialize local database
+--   xpm config [key] [val]    View/edit configuration
+--   xpm sync                  Sync package database
+--   xpm install <pkg> [...]   Install package(s)
+--   xpm remove <pkg> [...]    Remove package(s)
+--   xpm search <term>         Search available packages
+--   xpm list                  List installed packages
+--   xpm info <pkg>            Show package details
+--   xpm update                Re-download all installed packages
+--   xpm sign <file>           Sign a package file (requires APPROVED key)
 --
 -- Short flags:
---  xpm -Sy                   sync
---  xpm -S <pkg>              install
---  xpm -R <pkg>              remove
---  xpm -Ss <term>            search
---  xpm -Q                    list installed
---  xpm -Qi <pkg>             info
---  xpm -Syu                  sync + update all
+--   xpm -Sy                   sync
+--   xpm -S <pkg>              install
+--   xpm -R <pkg>              remove
+--   xpm -Ss <term>            search
+--   xpm -Q                    list installed
+--   xpm -Qi <pkg>             info
+--   xpm -Syu                  sync + update all
 --
 
 local fs   = require("filesystem")
@@ -560,7 +560,6 @@ local function cmdSync()
     return false
   end
 
-  -- ... rest unchanged
 
   local sBody = stripBom(resp.body)
 

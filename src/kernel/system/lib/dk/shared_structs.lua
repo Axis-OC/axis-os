@@ -45,7 +45,6 @@ function oDK.fNewDeviceObject()
     sDeviceName = nil,
     pDeviceExtension = {},
     nFlags = 0,
-    -- NEW: Device stack pointers
     pAttachedDevice = nil,   -- device attached ON TOP of this one (filter above us)
     pLowerDevice = nil,      -- device we are attached TO (function driver below us)
     pTopOfStack = nil,       -- cached pointer to top of stack (updated on attach/detach)
@@ -60,14 +59,12 @@ function oDK.fNewIrp(nMajorFunction)
     tIoStatus = { nStatus = 0, vInformation = nil },
     nSenderPid = nil,
     nFlags = 0,
-    -- NEW: Stack traversal
     pCurrentDevice = nil,      -- current device in stack (tracks IRP position)
     tCompletionStack = {},     -- stack of {fCompletion, pDeviceObject} for unwind
     nStackLocation = 0,        -- current index in device stack
   }
 end
 
--- NEW: Get the top of the device stack starting from any device
 function oDK.fGetTopOfStack(pDeviceObject)
     if not pDeviceObject then return nil end
     local pTop = pDeviceObject

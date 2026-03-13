@@ -16,7 +16,7 @@ local tGpu = syscall("gdi_get_gpu_info", 1)
 if not tGpu then return end
 local W, H = tGpu.nW, tGpu.nH
 
--- Colors 
+--  Colors 
 
 local C_BG      = tCfg.wallpaper_color or 0x0C0C1E
 local C_FG      = 0xCCCCDD
@@ -31,7 +31,7 @@ local C_ICON_FG = 0x55DDFF
 
 syscall("gdi_set_desktop_background", C_FG, C_BG)
 
--- Surfaces 
+--  Surfaces 
 
 local TB_H = 1
 local nDesktopH = H - TB_H
@@ -48,7 +48,7 @@ local hTaskbar = syscall("gdi_create_surface", W, TB_H, {
 if not hDesktop or not hTaskbar then return end
 syscall("gdi_set_focus", hDesktop)
 
--- Taskbar Icons 
+--  Taskbar Icons 
 
 local tTbIcons = {
     { label = " [=] ", action = "menu",     fg = C_ACCENT,  bg = C_TB_BG, tip = "Menu" },
@@ -60,7 +60,7 @@ do
     for _, ic in ipairs(tTbIcons) do ic.x = nX; ic.w = #ic.label; nX = nX + ic.w + 1 end
 end
 
--- Start Menu 
+--  Start Menu 
 
 local C_MENU_BG     = 0x111133
 local C_MENU_FG     = 0xCCCCDD
@@ -146,7 +146,7 @@ local function closeMenu()
     end
 end
 
--- Render 
+--  Render 
 
 local function renderDesktop()
     syscall("gdi_surface_fill", hDesktop, 1, 1, W, nDesktopH, " ", C_FG, C_BG)
@@ -189,7 +189,7 @@ local function renderTaskbar()
     syscall("gdi_surface_set", hTaskbar, W - #sClock - #sU + 1, 1, sU, C_DIM, C_TB_BG)
 end
 
--- App Launching 
+--  App Launching 
 
 local function launchTerminal()
     oSys.spawn("/system/apps/terminal.lua", 3, {
@@ -238,7 +238,7 @@ local function menuHitTest(nLocalY)
     return item.action
 end
 
--- Main Loop 
+--  Main Loop 
 
 bRunning = true
 local nLastClock = 0

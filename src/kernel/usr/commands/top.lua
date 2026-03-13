@@ -292,7 +292,7 @@ while bRunning do
     ctx:beginFrame()
     ctx:clear(ctx:c("bg"))
 
-    -- HEADER (Row 1-3) 
+    --  HEADER (Row 1-3) 
     local nHalfW = math.floor(W / 2)
     
     -- Left Col: Meters
@@ -306,7 +306,7 @@ while bRunning do
     ctx:text(nHalfW, 2, string.format("Load average: %.2f %.2f %.2f", nLoad1, nLoad5, nLoad15), ctx:c("fg"))
     -- ctx:text(nHalfW, 3, string.format("Uptime: %02d:%02d:%02d", math.floor(nNow/3600), math.floor(nNow/60)%60, nNow%60), ctx:c("fg"))
 
-    -- COLUMNS (Row 4) 
+    --  COLUMNS (Row 4) 
     local yList = 5
     local sHeader = string.format(" %-5s %-8s %3s %3s %4s %1s %5s %8s %s",
         "PID", "USER", "PRI", "NI", "MEM", "S", "CPU%", "TIME+", "Command")
@@ -314,7 +314,7 @@ while bRunning do
     ctx:fill(1, yList, W, 1, " ", ctx:c("bar_fg"), ctx:c("bar_bg"))
     ctx:text(1, yList, sHeader, ctx:c("bar_fg"), ctx:c("bar_bg"))
 
-    -- PROCESS LIST 
+    --  PROCESS LIST 
     local listH = H - yList - 1
     if bSearchMode then listH = listH - 1 end -- leave room for search bar
 
@@ -359,7 +359,7 @@ while bRunning do
     end
     ctx:endScroll()
 
-    -- FOOTER 
+    --  FOOTER 
     if bSearchMode then
         local sNewFilter, bChanged, bSubmit = ctx:textInput("filter", 1, H, W, sFilter, ctx:c("input_fg"), ctx:c("input_bg"), ctx:c("input_afg"), ctx:c("input_abg"))
         if bChanged then
@@ -387,7 +387,7 @@ while bRunning do
         end
     end
 
-    -- INPUT & MODALS 
+    --  INPUT & MODALS 
     local k = ctx:key()
 
     if not ctx:hasModal() and not bSearchMode then
